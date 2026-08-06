@@ -1,0 +1,28 @@
+[package]
+name = "zj-agent-mob"
+version = "0.1.0"
+edition = "2021"
+description = "Zellij plugin for monitoring Claude Code and Codex agents in the current session"
+license = "Apache-2.0"
+
+# Zellij loads plugins as WASI *binaries*: the host looks for the `_start`
+# entry point alongside load/update/render/pipe. A bare cdylib omits `_start`
+# and fails at load time with "could not find exported function", so the
+# plugin is built as a bin. The lib target exists only so `cargo test` can
+# run the state machine natively.
+[[bin]]
+name = "zj-agent-mob"
+path = "src/main.rs"
+
+[lib]
+name = "zj_agent_mob"
+path = "src/lib.rs"
+
+[dependencies]
+zellij-tile = "0.44.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
