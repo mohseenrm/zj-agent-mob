@@ -11,6 +11,10 @@
 #   ZJ_AGENT_PLUGIN      override plugin path
 #   ZJ_AGENT_DEBUG       1 logs to ~/.cache/zj-agent-mob/hook.log
 
+# SC2154: event, session_id, cwd, transcript and tool_name are all assigned by
+# the `eval` of jq's @sh output below, which shellcheck cannot follow.
+# shellcheck disable=SC2154
+
 # Only monitor agents running inside a zellij pane. This is what scopes the
 # plugin to the current session: no pane id means nothing to report.
 [ -n "$ZELLIJ_PANE_ID" ] || exit 0
@@ -41,7 +45,7 @@ case "$event" in
   PreToolUse|PostToolUse)
     [ "${ZJ_AGENT_HEARTBEAT:-1}" = "0" ] && exit 0
     status=working ;;
-  Stop)                           status=done ;;
+  Stop)                           status='done' ;;
   SessionEnd)                     status=ended ;;
   *) exit 0 ;;
 esac

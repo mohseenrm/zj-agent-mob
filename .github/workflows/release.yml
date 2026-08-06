@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Allows a dry run: builds and uploads the artifact, but publishes no release.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create the release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag is the source of truth for the version; a mismatch with
+      # Cargo.toml means the release would be mislabelled.
+      - name: Check tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
+      - run: cargo test --all-targets
+
+      - run: cargo build --release --target wasm32-wasip1
+
+      # Guard the failure mode that only shows up at load time in Zellij: never
+      # ship an artifact that cannot load.
+      - name: Verify the wasm exports Zellij needs
+        run: |
+          sudo apt-get update && sudo apt-get install -y wabt
+          exports=$(wasm-objdump -x target/wasm32-wasip1/release/zj-agent-mob.wasm)
+          for sym in _start load update render pipe plugin_version; do
+            printf '%s' "$exports" | grep -q "<$sym> -> \"$sym\"" \
+              || { echo "::error::wasm is missing the $sym export"; exit 1; }
+          done
+          echo "all required exports present"
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp target/wasm32-wasip1/release/zj-agent-mob.wasm dist/
+          # Ship the installer and hook so a release is usable without the repo.
+          cp init.sh dist/
+          cp scripts/zj-agent-mob-hook.sh dist/
+          (cd dist && sha256sum zj-agent-mob.wasm > zj-agent-mob.wasm.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zj-agent-mob-wasm
+          path: dist/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            dist/zj-agent-mob.wasm
+            dist/zj-agent-mob.wasm.sha256
+            dist/init.sh
+            dist/zj-agent-mob-hook.sh

@@ -5,6 +5,7 @@ use zellij_tile::prelude::*;
 
 use crate::agent::Agent;
 use crate::host;
+use crate::install::Install;
 use crate::status::Status;
 use crate::{SPINNER, TICK};
 
@@ -19,6 +20,7 @@ pub struct State {
     pub(crate) timer_running: bool,
     pub(crate) popup_on_waiting: bool,
     pub(crate) hidden: bool,
+    pub(crate) install: Install,
 }
 
 impl State {
@@ -181,7 +183,6 @@ impl State {
             self.selected = self.agents.len() - 1;
         }
     }
-
 }
 
 #[cfg(test)]
@@ -189,10 +190,7 @@ mod tests {
     use super::*;
 
     fn args(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
     fn state() -> State {
@@ -343,10 +341,11 @@ mod tests {
         s.handle_status(&args(&[("pane_id", "1"), ("status", "idle"), ("task", "auto")]));
         assert!(s.handle_label(&args(&[("pane_id", "1"), ("label", "manual")])));
         assert_eq!(s.agents[0].task.as_deref(), Some("manual"));
-        assert!(!s.handle_label(&args(&[("pane_id", "99"), ("label", "x")])), "unknown pane");
+        assert!(
+            !s.handle_label(&args(&[("pane_id", "99"), ("label", "x")])),
+            "unknown pane"
+        );
     }
-
-
 
     #[test]
     fn counts_summarize_by_status() {
@@ -369,7 +368,9 @@ mod reconcile_tests {
     }
 
     fn manifest(panes: &[(usize, u32)]) -> PaneManifest {
-        let mut m = PaneManifest { panes: std::collections::HashMap::new() };
+        let mut m = PaneManifest {
+            panes: std::collections::HashMap::new(),
+        };
         for (tab, id) in panes {
             let p = PaneInfo {
                 id: *id,
@@ -384,7 +385,10 @@ mod reconcile_tests {
 
     #[test]
     fn agent_on_live_pane_survives_reconcile() {
-        let mut s = State { permissions_granted: true, ..Default::default() };
+        let mut s = State {
+            permissions_granted: true,
+            ..Default::default()
+        };
         s.handle_status(&args(&[("pane_id", "5"), ("status", "working")]));
         s.reconcile(manifest(&[(0, 5)]));
         assert_eq!(s.agents.len(), 1, "agent on a live pane must survive");
@@ -393,7 +397,10 @@ mod reconcile_tests {
 
     #[test]
     fn agent_on_dead_pane_is_culled() {
-        let mut s = State { permissions_granted: true, ..Default::default() };
+        let mut s = State {
+            permissions_granted: true,
+            ..Default::default()
+        };
         s.handle_status(&args(&[("pane_id", "5"), ("status", "working")]));
         s.reconcile(manifest(&[(0, 99)]));
         assert!(s.agents.is_empty(), "pane gone -> agent removed");
@@ -401,17 +408,27 @@ mod reconcile_tests {
 
     #[test]
     fn pipe_before_first_pane_update_is_not_culled() {
-        let mut s = State { permissions_granted: true, ..Default::default() };
+        let mut s = State {
+            permissions_granted: true,
+            ..Default::default()
+        };
         s.handle_status(&args(&[("pane_id", "5"), ("status", "waiting")]));
-        s.reconcile(PaneManifest { panes: std::collections::HashMap::new() });
+        s.reconcile(PaneManifest {
+            panes: std::collections::HashMap::new(),
+        });
         assert_eq!(s.agents.len(), 1, "empty manifest must not cull agents");
     }
 
     #[test]
     fn plugin_only_manifest_does_not_cull() {
-        let mut s = State { permissions_granted: true, ..Default::default() };
+        let mut s = State {
+            permissions_granted: true,
+            ..Default::default()
+        };
         s.handle_status(&args(&[("pane_id", "5"), ("status", "waiting")]));
-        let mut m = PaneManifest { panes: std::collections::HashMap::new() };
+        let mut m = PaneManifest {
+            panes: std::collections::HashMap::new(),
+        };
         let p = PaneInfo {
             id: 5,
             is_plugin: true,
@@ -425,7 +442,11 @@ mod reconcile_tests {
     /// `Text::color_range` takes BYTE offsets, not char offsets.
     #[test]
     fn icon_byte_offset_lands_on_the_icon() {
-        for (marker, idx, icon) in [("\u{25b6}", 1usize, "\u{25cf}"), (" ", 2, "\u{2713}"), ("\u{25b6}", 10, "\u{280b}")] {
+        for (marker, idx, icon) in [
+            ("\u{25b6}", 1usize, "\u{25cf}"),
+            (" ", 2, "\u{2713}"),
+            ("\u{25b6}", 10, "\u{280b}"),
+        ] {
             let line = format!("{} {} {} rest", marker, idx, icon);
             let start = marker.len() + 1 + idx.to_string().len() + 1;
             let end = start + icon.len() - 1;

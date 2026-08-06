@@ -1,12 +1,21 @@
 #!/bin/sh
-# zj-agent-mob one-time installer.
+# zj-agent-mob installer.
 #
-#   ./init.sh              install hooks + plugin
-#   ./init.sh uninstall    remove exactly what was installed
-#   ./init.sh --dry-run    show what would change, write nothing
+#   ./init.sh                    install hooks + plugin
+#   ./init.sh uninstall          remove exactly what was installed
+#   ./init.sh --dry-run          show what would change, write nothing
+#   ./init.sh status             print install state (machine-readable)
+#   ./init.sh install claude     install one target only
+#   ./init.sh uninstall codex    remove one target only
+#
+# Targets: claude, codex, plugin. Omitting the target means all of them.
 #
 # Installs the status hook into Claude Code (~/.claude/settings.json) and
 # Codex (~/.codex/hooks.json), and copies the plugin to the zellij plugin dir.
+#
+# A copy of this script is installed alongside the hook as
+# ~/.config/zj-agent-mob/install.sh so the plugin's install screen can drive it
+# without knowing where the repo was cloned.
 #
 # Symlink-aware: these files are commonly stow-managed symlinks into a dotfiles
 # repo. We resolve to the real path before the temp-file swap, otherwise `mv`
@@ -14,6 +23,7 @@
 
 set -eu
 
+# shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only.
 SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HOOK_SRC="$SRC_DIR/scripts/zj-agent-mob-hook.sh"
 # Use the bin artifact (hyphenated). Zellij needs the WASI `_start` export,
@@ -23,6 +33,7 @@ WASM_SRC="$WASM_DIR/zj-agent-mob.wasm"
 
 HOOK_DIR="${ZJ_AGENT_HOOK_DIR:-$HOME/.config/zj-agent-mob}"
 HOOK_DST="$HOOK_DIR/hook.sh"
+SELF_DST="$HOOK_DIR/install.sh"
 PLUGIN_DIR="${ZJ_AGENT_PLUGIN_DIR:-$HOME/.config/zellij/plugins}"
 PLUGIN_DST="$PLUGIN_DIR/zj-agent-mob.wasm"
 
@@ -31,14 +42,21 @@ CODEX_HOOKS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 
 MODE=install
 DRY=0
+TARGET=all
 for arg in "$@"; do
   case "$arg" in
+    install)   MODE=install ;;
     uninstall) MODE=uninstall ;;
+    status)    MODE=status ;;
+    claude|codex|plugin) TARGET=$arg ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+
+# True when $TARGET selects $1 (an explicit target, or "all").
+wants() { [ "$TARGET" = all ] || [ "$TARGET" = "$1" ]; }
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -62,6 +80,7 @@ resolve() {
     esac
   done
   # Normalize
+  # shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only.
   (CDPATH= cd -- "$(dirname -- "$_p")" && printf '%s/%s\n' "$(pwd)" "$(basename -- "$_p")")
 }
 
@@ -204,60 +223,132 @@ uninstall_codex() {
   ' "$(resolve "$CODEX_HOOKS")" | write_atomic "$CODEX_HOOKS"
 }
 
+# ---------------------------------------------------------------------- status
+
+# Does $1 (a settings file) already reference our hook command?
+hooked() {
+  [ -e "$1" ] || return 1
+  jq -e --arg cmd "$2" '
+    [(.hooks // {}) | .[]? | .[]? | .hooks[]? | .command] | index($cmd) != null
+  ' "$(resolve "$1")" >/dev/null 2>&1
+}
+
+# One `key=state` line per target. Parsed by the plugin's install screen, so the
+# format is fixed: state is `installed` or `absent`.
+print_status() {
+  hooked "$CLAUDE_SETTINGS" "$HOOK_DST" && _c=installed || _c=absent
+  hooked "$CODEX_HOOKS" "env ZJ_AGENT_TOOL=codex $HOOK_DST" && _x=installed || _x=absent
+  [ -f "$PLUGIN_DST" ] && _p=installed || _p=absent
+  [ -x "$HOOK_DST" ] && _h=installed || _h=absent
+  say "claude=$_c"
+  say "codex=$_x"
+  say "plugin=$_p"
+  say "hook=$_h"
+}
+
 # ----------------------------------------------------------------------- main
+
+if [ "$MODE" = status ]; then
+  print_status
+  exit 0
+fi
 
 if [ "$MODE" = uninstall ]; then
   say "Uninstalling zj-agent-mob..."
-  uninstall_claude
-  uninstall_codex
+  if wants claude; then uninstall_claude; fi
+  if wants codex;  then uninstall_codex;  fi
   if [ "$DRY" = 0 ]; then
-    rm -f "$HOOK_DST" && say "removed $HOOK_DST"
-    rm -f "$PLUGIN_DST" && say "removed $PLUGIN_DST"
+    if wants plugin; then
+      rm -f "$PLUGIN_DST"
+      say "removed $PLUGIN_DST"
+    fi
+    # hook.sh and install.sh are shared by both agents, so they only go away on
+    # a full uninstall.
+    if [ "$TARGET" = all ]; then
+      rm -f "$HOOK_DST" "$SELF_DST"
+      say "removed $HOOK_DST"
+    fi
   else
-    say "  [dry-run] would remove $HOOK_DST and $PLUGIN_DST"
+    say "  [dry-run] would remove install artifacts"
   fi
   say ""
   say "Done. Backups (*.bak-*) were left in place."
   exit 0
 fi
 
-[ -f "$HOOK_SRC" ] || die "hook script not found: $HOOK_SRC"
+# Reinstalling a single agent's hooks only needs the already-installed hook.sh,
+# so the source tree is optional there.
+if [ ! -f "$HOOK_SRC" ]; then
+  if [ -x "$HOOK_DST" ]; then
+    HOOK_SRC=$HOOK_DST
+  else
+    die "hook script not found: $HOOK_SRC"
+  fi
+fi
 
 say "Installing zj-agent-mob..."
-[ "$DRY" = 1 ] && say "(dry run: nothing will be written)"
+if [ "$DRY" = 1 ]; then say "(dry run: nothing will be written)"; fi
 say ""
 
 if [ "$DRY" = 0 ]; then
-  mkdir -p "$HOOK_DIR" "$PLUGIN_DIR"
-  cp "$HOOK_SRC" "$HOOK_DST"
+  mkdir -p "$HOOK_DIR"
+  # Re-running from the installed copy makes src and dst the same file, and
+  # `cp foo foo` is an error that would abort the rest of the install.
+  same_file() { [ -e "$1" ] && [ -e "$2" ] && [ "$(resolve "$1")" = "$(resolve "$2")" ]; }
+  if same_file "$HOOK_SRC" "$HOOK_DST"; then
+    say "hook  -> $HOOK_DST (already current)"
+  else
+    cp "$HOOK_SRC" "$HOOK_DST"
+    say "hook  -> $HOOK_DST"
+  fi
   chmod +x "$HOOK_DST"
-  say "hook  -> $HOOK_DST"
+  # Self-copy so the plugin's install screen has a stable path to drive,
+  # independent of where this repo was cloned.
+  if same_file "$0" "$SELF_DST"; then
+    say "installer -> $SELF_DST (already current)"
+  else
+    cp "$0" "$SELF_DST"
+    say "installer -> $SELF_DST"
+  fi
+  chmod +x "$SELF_DST"
 else
   say "  [dry-run] would install hook -> $HOOK_DST"
+  say "  [dry-run] would install installer -> $SELF_DST"
 fi
 
-if [ -f "$WASM_SRC" ]; then
-  # Guard against installing a cdylib-only build: without `_start` Zellij fails
-  # at load time with "could not find exported function".
-  if ! grep -q '_start' "$WASM_SRC" 2>/dev/null; then
-    warn "$WASM_SRC has no _start export (cdylib instead of bin?)."
-    warn "Rebuild with: cargo build --release --target wasm32-wasip1"
-  fi
-  if [ "$DRY" = 0 ]; then
-    cp "$WASM_SRC" "$PLUGIN_DST"
-    say "plugin -> $PLUGIN_DST"
+if wants plugin; then
+  if [ -f "$WASM_SRC" ]; then
+    # Guard against installing a cdylib-only build: without `_start` Zellij fails
+    # at load time with "could not find exported function".
+    # -a: without it grep treats the wasm as binary and reports no match even
+    # when the export is present, so the guard would fire on every good build.
+    if ! grep -qa '_start' "$WASM_SRC" 2>/dev/null; then
+      warn "$WASM_SRC has no _start export (cdylib instead of bin?)."
+      warn "Rebuild with: cargo build --release --target wasm32-wasip1"
+    fi
+    if [ "$DRY" = 0 ]; then
+      mkdir -p "$PLUGIN_DIR"
+      cp "$WASM_SRC" "$PLUGIN_DST"
+      say "plugin -> $PLUGIN_DST"
+    else
+      say "  [dry-run] would install plugin -> $PLUGIN_DST"
+    fi
+  elif [ "$TARGET" = plugin ]; then
+    die "plugin not built; run: cargo build --release --target wasm32-wasip1"
   else
-    say "  [dry-run] would install plugin -> $PLUGIN_DST"
+    warn "plugin not built; run: cargo build --release --target wasm32-wasip1"
   fi
-else
-  warn "plugin not built; run: cargo build --release --target wasm32-wasip1"
 fi
 say ""
 
-install_claude
-say ""
-install_codex
-say ""
+if wants claude; then
+  install_claude
+  say ""
+fi
+if wants codex; then
+  install_codex
+  say ""
+fi
 
 say "Done. Next steps:"
 say ""

@@ -105,11 +105,7 @@ impl Agent {
     }
 
     pub(crate) fn project(&self) -> &str {
-        self.cwd
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(&self.cwd)
+        self.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.cwd)
     }
 }
 
@@ -138,7 +134,16 @@ mod render_tests {
     fn row_contains_all_columns() {
         let a = agent();
         let row = a.plain_row(0, true, "\u{280b}", 134.0, 110, true);
-        for expect in ["\u{25b6}", "1", "\u{280b}", "claude", "working", "2m14s", "api", "Add retry to webhook client"] {
+        for expect in [
+            "\u{25b6}",
+            "1",
+            "\u{280b}",
+            "claude",
+            "working",
+            "2m14s",
+            "api",
+            "Add retry to webhook client",
+        ] {
             assert!(row.contains(expect), "row {:?} missing {:?}", row, expect);
         }
     }
@@ -152,7 +157,9 @@ mod render_tests {
             assert!(
                 row.chars().count() <= cols,
                 "cols={} produced {} chars: {:?}",
-                cols, row.chars().count(), row
+                cols,
+                row.chars().count(),
+                row
             );
         }
     }
@@ -171,7 +178,11 @@ mod render_tests {
         let d = agent().detail_line(false, 110);
         assert!(d.contains("Edit src/webhook.rs"));
         assert!(d.contains("4 turns"));
-        assert!(d.contains("tab:2"), "tab is 0-indexed internally, displayed 1-based: {:?}", d);
+        assert!(
+            d.contains("tab:2"),
+            "tab is 0-indexed internally, displayed 1-based: {:?}",
+            d
+        );
         assert!(d.contains("pane:3"));
     }
 

@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A force-push to a PR should cancel the previous run rather than queue behind it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: fmt, clippy, test, wasm build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup target add wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+
+      - run: cargo clippy --all-targets -- -D warnings
+
+      # Tests run natively: host calls are stubbed off-wasm precisely so this works.
+      - run: cargo test --all-targets
+
+      - run: cargo build --release --target wasm32-wasip1
+
+      # Zellij's loader needs the WASI `_start` export, which only a bin target
+      # provides. A cdylib-only build fails at load with "could not find
+      # exported function", which no other check here would catch.
+      - name: Verify the wasm exports Zellij needs
+        run: |
+          sudo apt-get update && sudo apt-get install -y wabt
+          exports=$(wasm-objdump -x target/wasm32-wasip1/release/zj-agent-mob.wasm)
+          for sym in _start load update render pipe plugin_version; do
+            printf '%s' "$exports" | grep -q "<$sym> -> \"$sym\"" \
+              || { echo "::error::wasm is missing the $sym export"; exit 1; }
+          done
+          echo "all required exports present"
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh
+
+      # The installer is the only supported path to a working install, so its
+      # contract is worth exercising: idempotent re-install, per-target
+      # selection, and a status output the plugin can parse.
+      - name: Installer smoke test
+        run: |
+          sudo apt-get install -y jq
+          export ZJ_AGENT_HOOK_DIR="$RUNNER_TEMP/hooks"
+          export ZJ_AGENT_PLUGIN_DIR="$RUNNER_TEMP/plugins"
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude"
+          export CODEX_HOME="$RUNNER_TEMP/codex"
+
+          expect_status() {
+            got=$(./init.sh status | tr '\n' ' ')
+            case "$got" in
+              *"$1"*) ;;
+              *) echo "::error::expected '$1' in status, got: $got"; exit 1 ;;
+            esac
+          }
+
+          expect_status "claude=absent"
+          ./init.sh install claude >/dev/null
+          expect_status "claude=installed"
+          expect_status "codex=absent"
+
+          # Re-running must not duplicate hook entries.
+          ./init.sh install claude >/dev/null
+          n=$(jq '[.hooks | .[] | .[] | .hooks[] | .command] | length' \
+                "$CLAUDE_CONFIG_DIR/settings.json")
+          ./init.sh install claude >/dev/null
+          m=$(jq '[.hooks | .[] | .[] | .hooks[] | .command] | length' \
+                "$CLAUDE_CONFIG_DIR/settings.json")
+          [ "$n" = "$m" ] || { echo "::error::install is not idempotent ($n -> $m)"; exit 1; }
+
+          # The self-copy must work standalone, since that is what the plugin runs.
+          "$ZJ_AGENT_HOOK_DIR/install.sh" install codex >/dev/null
+          expect_status "codex=installed"
+
+          # Uninstalling one target must leave the other alone.
+          ./init.sh uninstall claude >/dev/null
+          expect_status "claude=absent"
+          expect_status "codex=installed"
+
+          ./init.sh uninstall >/dev/null
+          expect_status "codex=absent"
+          echo "installer smoke test passed"
