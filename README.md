@@ -36,12 +36,12 @@ Status comes from real agent hooks, not screen scraping. The task summary is pul
 
 ## Quick start
 
-Download the prebuilt plugin from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest):
+Download the prebuilt plugin from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest). The repo is private for now, so this uses `gh` for an authenticated download ([details](docs/setup.md#from-a-release)):
 
 ```sh
 mkdir -p target/wasm32-wasip1/release
-curl -fsSL -o target/wasm32-wasip1/release/zj-agent-mob.wasm \
-  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
+gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
+  --pattern zj-agent-mob.wasm --dir target/wasm32-wasip1/release
 ./init.sh
 ```
 

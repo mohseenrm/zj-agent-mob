@@ -15,22 +15,32 @@ Two options: download the prebuilt `zj-agent-mob.wasm` from a release, or build 
 
 Grab `zj-agent-mob.wasm` from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest) ([all releases](https://github.com/mohseenrm/zj-agent-mob/releases)). No Rust toolchain needed.
 
+> [!NOTE]
+> This repository is currently **private**, so release assets need an authenticated download. Plain `curl` gets a 404 until the repo is public. The `gh` commands below work today; the `curl` ones become the simpler path once it is public.
+
 `init.sh` reads the plugin from `target/wasm32-wasip1/release/`, so put the download there and it installs like a local build:
 
 ```sh
 mkdir -p target/wasm32-wasip1/release
-curl -fsSL -o target/wasm32-wasip1/release/zj-agent-mob.wasm \
-  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
+gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
+  --pattern zj-agent-mob.wasm --dir target/wasm32-wasip1/release
 ./init.sh
 ```
 
-To skip the repo entirely, copy the wasm straight into the plugin directory and install the hooks separately:
+To skip the repo entirely, put the wasm straight into the plugin directory and install the hooks separately:
 
 ```sh
 mkdir -p ~/.config/zellij/plugins
-curl -fsSL -o ~/.config/zellij/plugins/zj-agent-mob.wasm \
-  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
+gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
+  --pattern zj-agent-mob.wasm --dir ~/.config/zellij/plugins
 ./init.sh install claude codex   # hooks only; the plugin is already in place
+```
+
+Once the repo is public, either download becomes a plain `curl` against the stable `latest` URL:
+
+```sh
+curl -fsSL -o target/wasm32-wasip1/release/zj-agent-mob.wasm \
+  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
 ```
 
 ### From source
