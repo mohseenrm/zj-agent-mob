@@ -2,6 +2,7 @@
 
 - [Getting started](#getting-started)
 - [Iterating against a live session](#iterating-against-a-live-session)
+- [Cutting a release](#cutting-a-release)
 - [Why a bin target](#why-a-bin-target)
 - [Module layout](#module-layout)
 - [Rendering note](#rendering-note)
@@ -51,6 +52,24 @@ export ZJ_AGENT_HOOK_DIR=/tmp/zj/hooks ZJ_AGENT_PLUGIN_DIR=/tmp/zj/plugins
 export CLAUDE_CONFIG_DIR=/tmp/zj/claude CODEX_HOME=/tmp/zj/codex
 ./init.sh install && ./init.sh status && ./init.sh uninstall
 ```
+
+## Cutting a release
+
+Releases are published by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v*` tag is pushed. The workflow builds the wasm, asserts it exports the six symbols Zellij needs, checks the tag matches `Cargo.toml`, then creates the GitHub release with generated notes and the wasm attached.
+
+The tag and `Cargo.toml` version must agree or the workflow fails on purpose, so bump the version first:
+
+```sh
+# 1. bump `version` in Cargo.toml, then refresh Cargo.lock
+cargo build --release --target wasm32-wasip1
+git commit -am "chore: release v0.2.0"
+
+# 2. tag and push; the workflow does the rest
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin main --follow-tags
+```
+
+Published releases are listed on the [releases page](https://github.com/mohseenrm/zj-agent-mob/releases).
 
 ## Why a bin target
 

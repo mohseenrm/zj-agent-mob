@@ -1,6 +1,7 @@
 # Zellij Agent Mob (zj-agent-mob)
 
 [![CI](https://github.com/mohseenrm/zj-agent-mob/actions/workflows/ci.yml/badge.svg)](https://github.com/mohseenrm/zj-agent-mob/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mohseenrm/zj-agent-mob?sort=semver)](https://github.com/mohseenrm/zj-agent-mob/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Zellij 0.44+](https://img.shields.io/badge/zellij-0.44%2B-green.svg)
 
@@ -29,11 +30,22 @@ Status comes from real agent hooks, not screen scraping. The task summary is pul
 | Requirement | Why |
 |---|---|
 | Zellij 0.44+ | Plugin API (`LaunchOrFocusPlugin`, pipes, `RunCommandResult`) |
-| Rust + `wasm32-wasip1` target | Building the plugin |
 | `jq` | The hook parses hook-event JSON; the installer merges settings |
 | Claude Code and/or Codex | The agents being monitored |
+| Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
 
 ## Quick start
+
+Download the prebuilt plugin from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest):
+
+```sh
+mkdir -p target/wasm32-wasip1/release
+curl -fsSL -o target/wasm32-wasip1/release/zj-agent-mob.wasm \
+  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
+./init.sh
+```
+
+Or build it yourself:
 
 ```sh
 rustup target add wasm32-wasip1
@@ -133,6 +145,10 @@ Agents are sorted `waiting`, `done`, `working`, `idle`, so whatever needs you is
 - The install screen needs Zellij's "Run commands" permission. Denying it leaves the rest of the panel fully functional; only that screen stops working.
 
 Hitting something not listed here? See [docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Releases
+
+Prebuilt `zj-agent-mob.wasm` binaries and changelogs are on the [releases page](https://github.com/mohseenrm/zj-agent-mob/releases). Pushing a `v*` tag builds the wasm, verifies it exports what Zellij needs, and publishes it automatically.
 
 ## License
 

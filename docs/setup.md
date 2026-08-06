@@ -1,11 +1,39 @@
 # Setup
 
 - [Install](#install)
+  - [From a release](#from-a-release)
+  - [From source](#from-source)
 - [The install screen](#the-install-screen)
 - [Register the plugin with Zellij](#register-the-plugin-with-zellij)
 - [Configuration](#configuration)
 
 ## Install
+
+Two options: download the prebuilt `zj-agent-mob.wasm` from a release, or build it yourself. Either way `init.sh` does the rest, and `jq` is required for both.
+
+### From a release
+
+Grab `zj-agent-mob.wasm` from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest) ([all releases](https://github.com/mohseenrm/zj-agent-mob/releases)). No Rust toolchain needed.
+
+`init.sh` reads the plugin from `target/wasm32-wasip1/release/`, so put the download there and it installs like a local build:
+
+```sh
+mkdir -p target/wasm32-wasip1/release
+curl -fsSL -o target/wasm32-wasip1/release/zj-agent-mob.wasm \
+  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
+./init.sh
+```
+
+To skip the repo entirely, copy the wasm straight into the plugin directory and install the hooks separately:
+
+```sh
+mkdir -p ~/.config/zellij/plugins
+curl -fsSL -o ~/.config/zellij/plugins/zj-agent-mob.wasm \
+  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
+./init.sh install claude codex   # hooks only; the plugin is already in place
+```
+
+### From source
 
 ```sh
 rustup target add wasm32-wasip1
