@@ -65,7 +65,9 @@ impl Agent {
         }
 
         let level = self.status.color_level();
-        let text = Text::new(text).color_range(level, icon_range).color_range(level, label_range);
+        let text = Text::new(text)
+            .color_range(level, icon_range)
+            .color_range(level, label_range);
         if selected {
             text.selected()
         } else {
@@ -136,7 +138,15 @@ mod render_tests {
     #[test]
     fn row_contains_all_columns() {
         let r = row(&agent(), 0, true, "\u{280b}", 134.0, 110, true);
-        for expect in ["1", "\u{280b}", "claude", "working", "2m14s", "api", "Add retry to webhook client"] {
+        for expect in [
+            "1",
+            "\u{280b}",
+            "claude",
+            "working",
+            "2m14s",
+            "api",
+            "Add retry to webhook client",
+        ] {
             assert!(r.contains(expect), "row {:?} missing {:?}", r, expect);
         }
     }
@@ -149,7 +159,10 @@ mod render_tests {
         let unsel = a.list_item(0, false, "\u{25cf}", 0.0, 110, true);
         assert!(is_selected(&sel));
         assert!(!is_selected(&unsel));
-        assert!(item_text(&sel).starts_with('\u{25b6}'), "selected row leads with the cursor");
+        assert!(
+            item_text(&sel).starts_with('\u{25b6}'),
+            "selected row leads with the cursor"
+        );
         assert!(item_text(&unsel).starts_with(' '), "unselected row is blank there");
     }
 
@@ -185,7 +198,12 @@ mod render_tests {
 
             let label = a.status.label();
             let label_at = icon_at + icon.len() + 1 + a.tool.len().max(7) + 1;
-            assert_eq!(&text[label_at..label_at + label.len()], label, "label offset in {:?}", text);
+            assert_eq!(
+                &text[label_at..label_at + label.len()],
+                label,
+                "label offset in {:?}",
+                text
+            );
         }
     }
 
@@ -194,7 +212,11 @@ mod render_tests {
         let d = item_text(&agent().detail_item(false, 110));
         assert!(d.contains("Edit src/webhook.rs"));
         assert!(d.contains("4 turns"));
-        assert!(d.contains("tab:2"), "tab is 0-indexed internally, shown 1-based: {:?}", d);
+        assert!(
+            d.contains("tab:2"),
+            "tab is 0-indexed internally, shown 1-based: {:?}",
+            d
+        );
         assert!(d.contains("pane:3"));
     }
 

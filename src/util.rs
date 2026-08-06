@@ -66,10 +66,7 @@ pub(crate) mod testing {
             Some(at) => &body[at + 1..],
             None => body,
         };
-        let bytes: Vec<u8> = payload
-            .split(',')
-            .filter_map(|b| b.trim().parse::<u8>().ok())
-            .collect();
+        let bytes: Vec<u8> = payload.split(',').filter_map(|b| b.trim().parse::<u8>().ok()).collect();
         String::from_utf8_lossy(&bytes).to_string()
     }
 

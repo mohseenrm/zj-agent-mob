@@ -52,5 +52,4 @@ impl Status {
             Status::Idle => 3,
         }
     }
-
 }

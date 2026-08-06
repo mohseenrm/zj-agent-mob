@@ -68,8 +68,12 @@ pub(crate) enum SetupAction {
 }
 
 impl SetupAction {
-    pub(crate) const ALL: [SetupAction; 4] =
-        [SetupAction::Claude, SetupAction::Codex, SetupAction::Both, SetupAction::Quit];
+    pub(crate) const ALL: [SetupAction; 4] = [
+        SetupAction::Claude,
+        SetupAction::Codex,
+        SetupAction::Both,
+        SetupAction::Quit,
+    ];
 
     pub(crate) fn hotkey(self) -> char {
         match self {
@@ -225,11 +229,7 @@ impl Install {
             self.set(*t, InstallState::Busy);
         }
         host::run_command(
-            &[
-                "sh",
-                "-c",
-                &format!("{} install {}", INSTALLER, keys.join(" ")),
-            ],
+            &["sh", "-c", &format!("{} install {}", INSTALLER, keys.join(" "))],
             ctx(CTX_ACTION, None),
         );
         true
@@ -492,10 +492,7 @@ mod tests {
         assert!(!i.needs_setup(), "one agent hooked is a choice, not a broken setup");
 
         i.on_command_result(Some(127), "", "not found", &ctx_of(CTX_STATUS));
-        assert!(
-            !i.needs_setup(),
-            "a missing installer cannot be fixed by these actions"
-        );
+        assert!(!i.needs_setup(), "a missing installer cannot be fixed by these actions");
     }
 
     #[test]
@@ -660,5 +657,4 @@ mod tests {
             assert!(!item_text(item).contains('\n'));
         }
     }
-
 }

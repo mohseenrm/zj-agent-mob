@@ -275,11 +275,10 @@ mod tests {
             permissions_granted: true,
             ..Default::default()
         };
-        let ctx: BTreeMap<String, String> =
-            [(crate::install::CTX_KEY, crate::install::CTX_STATUS)]
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+        let ctx: BTreeMap<String, String> = [(crate::install::CTX_KEY, crate::install::CTX_STATUS)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         s.install
             .on_command_result(Some(0), "claude=absent\ncodex=absent\n", "", &ctx);
         s

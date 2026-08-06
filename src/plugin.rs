@@ -255,9 +255,6 @@ impl State {
             .collect();
         // Width `None`: the sized variant stretches the FIRST ribbon to fill it
         // and shoves the rest to the far edge.
-        print!(
-            "{}",
-            serialize_ribbon_line_with_coordinates(&texts, 0, y, None, None)
-        );
+        print!("{}", serialize_ribbon_line_with_coordinates(&texts, 0, y, None, None));
     }
 }
