@@ -240,9 +240,20 @@ impl State {
             print_text_with_coordinates(Text::new(line).color_range(DIM_LEVEL, ..), 0, y, Some(width), None);
             return;
         }
+        // Alternating backgrounds: consecutive ribbons otherwise run together
+        // into one long bar, since the separators are the same colour as the
+        // chips. `selected` is what flips a ribbon to its alternate background.
         let texts: Vec<Text> = hints
             .iter()
-            .map(|h| Text::new(h.text()).color_range(0, h.key_range()))
+            .enumerate()
+            .map(|(i, h)| {
+                let t = Text::new(h.text()).color_range(0, h.key_range());
+                if i % 2 == 1 {
+                    t.selected()
+                } else {
+                    t
+                }
+            })
             .collect();
         // `None` width: the coordinates variant applies the width to the FIRST
         // ribbon only, which then expands to fill it and shoves the rest to the

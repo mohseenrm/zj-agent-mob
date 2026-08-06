@@ -16,19 +16,21 @@ impl Hint {
         Hint { key, action }
     }
 
-    /// `<key> action`, the shape Zellij's own status bar uses.
+    /// `key action`. No angle brackets: the ribbon already reads as a discrete
+    /// chip, and the brackets crowded the enter glyph badly enough to look like
+    /// one smudged character. The key is told apart by colour instead.
     pub(crate) fn text(&self) -> String {
-        format!("<{}> {}", self.key, self.action)
+        format!("{} {}", self.key, self.action)
     }
 
-    /// Byte range covering `<key>`, for `color_range`.
+    /// Byte range covering the key, for `color_range`.
     ///
     /// `Text::serialize` encodes via `as_bytes()` while the indices are built as
     /// a plain range, so these are **byte** offsets. Keys are ASCII, except the
     /// enter glyph, so the range is computed from the encoded length rather than
-    /// assumed to be `key.len()`.
+    /// the character count.
     pub(crate) fn key_range(&self) -> std::ops::Range<usize> {
-        0..self.key.len() + 2
+        0..self.key.len()
     }
 }
 
@@ -79,18 +81,21 @@ pub(crate) const INSTALL_HINTS: &[Hint] = &[
 mod tests {
     use super::*;
 
+    /// No angle brackets: they crowded the enter glyph into an unreadable
+    /// smudge. Colour separates the key from the action instead.
     #[test]
-    fn hint_text_wraps_the_key_in_angle_brackets() {
-        assert_eq!(Hint::new("x", "kill").text(), "<x> kill");
-        assert_eq!(Hint::new("1-9", "quick").text(), "<1-9> quick");
+    fn hint_text_is_the_bare_key_and_action() {
+        assert_eq!(Hint::new("x", "kill").text(), "x kill");
+        assert_eq!(Hint::new("1-9", "quick").text(), "1-9 quick");
+        assert_eq!(Hint::new("\u{21b5}", "jump").text(), "\u{21b5} jump");
     }
 
-    /// The highlighted range must cover exactly `<key>` and stop before the
+    /// The highlighted range must cover exactly the key and stop before the
     /// space, and must land on a char boundary so multi-byte keys don't corrupt
     /// the serialized payload.
     #[test]
-    fn key_range_covers_the_bracketed_key_only() {
-        for h in LIST_HINTS.iter().chain(INSTALL_HINTS) {
+    fn key_range_covers_the_key_only() {
+        for h in LIST_HINTS.iter().chain(INSTALL_HINTS).chain(SETUP_HINTS) {
             let text = h.text();
             let r = h.key_range();
             assert!(
@@ -99,11 +104,7 @@ mod tests {
                 r,
                 text
             );
-            assert_eq!(
-                &text[r.clone()],
-                &format!("<{}>", h.key),
-                "range must cover exactly the bracketed key"
-            );
+            assert_eq!(&text[r.clone()], h.key, "range must cover exactly the key");
             assert_eq!(
                 text.as_bytes().get(r.end),
                 Some(&b' '),
@@ -152,12 +153,19 @@ mod tests {
         );
     }
 
-    /// Ribbons are only worth it when the whole set fits; at 72 columns the
-    /// list footer does not, so that pane must get the plain row instead.
+    /// Dropping the angle brackets bought back two columns per hint, which is
+    /// what lets the full list footer render as ribbons in a typical floating
+    /// pane instead of falling back to plain text.
     #[test]
-    fn list_hints_overflow_ribbons_at_a_typical_pane_width() {
-        assert!(ribbon_width(LIST_HINTS) > 72);
-        assert!(plain_line(LIST_HINTS).chars().count() <= 72);
+    fn every_hint_row_fits_a_typical_pane_as_ribbons() {
+        for (name, set) in [("list", LIST_HINTS), ("setup", SETUP_HINTS), ("install", INSTALL_HINTS)] {
+            assert!(
+                ribbon_width(set) <= 72,
+                "{} hints need {} columns; Zellij would silently drop one",
+                name,
+                ribbon_width(set)
+            );
+        }
     }
 
     /// The footer is the only discoverability surface for these keys, so every
