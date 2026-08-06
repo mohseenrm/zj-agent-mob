@@ -6,10 +6,11 @@ use crate::host;
 use crate::install::{SetupAction, Target};
 use crate::state::State;
 use crate::status::Status;
+use crate::util::wrap;
 
 impl State {
-    /// Keys for the setup prompt on the empty screen. It owns the whole screen
-    /// while it is up, so the agent-list keys are unreachable and cannot fire.
+    /// The setup prompt owns the whole screen while it is up, so the agent-list
+    /// keys below are unreachable and cannot fire.
     fn handle_setup_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Char('j') | BareKey::Down => {
@@ -29,8 +30,7 @@ impl State {
                 self.run_setup(SetupAction::Quit);
                 true
             }
-            // `i` still opens the full install screen, which is the only way to
-            // reach the plugin row or uninstall from here.
+            // The full install screen is the only route to the plugin row.
             BareKey::Char('i') => {
                 self.install.open = true;
                 self.install.refresh();
@@ -48,7 +48,7 @@ impl State {
         }
     }
 
-    /// Runs a setup action, translating `Quit` into hiding the panel.
+    /// Translates `Quit` into hiding the panel.
     fn run_setup(&mut self, action: SetupAction) {
         if !self.install.run_setup(action) {
             self.hidden = true;
@@ -56,8 +56,7 @@ impl State {
         }
     }
 
-    /// Keys for the install screen. Separate from the agent list so a stray key
-    /// there can never kill a pane.
+    /// Separate from the agent list so a stray key here cannot kill a pane.
     fn handle_install_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Char('j') | BareKey::Down => {
@@ -93,6 +92,14 @@ impl State {
         }
     }
 
+    /// Moves the agent cursor, wrapping at both ends, and disarms a pending kill.
+    fn move_selection(&mut self, delta: isize) {
+        if !self.agents.is_empty() {
+            self.selected = wrap(self.selected, delta, self.agents.len());
+        }
+        self.kill_armed = None;
+    }
+
     pub(crate) fn focus_selected(&mut self) {
         if let Some(agent) = self.agents.get(self.selected) {
             let pane_id = agent.pane_id;
@@ -125,21 +132,11 @@ impl State {
                 true
             }
             BareKey::Char('j') | BareKey::Down => {
-                if !self.agents.is_empty() {
-                    self.selected = (self.selected + 1) % self.agents.len();
-                }
-                self.kill_armed = None;
+                self.move_selection(1);
                 true
             }
             BareKey::Char('k') | BareKey::Up => {
-                if !self.agents.is_empty() {
-                    self.selected = if self.selected == 0 {
-                        self.agents.len() - 1
-                    } else {
-                        self.selected - 1
-                    };
-                }
-                self.kill_armed = None;
+                self.move_selection(-1);
                 true
             }
             BareKey::Enter => {
@@ -229,7 +226,6 @@ mod tests {
     }
 
     /// `x` kills a pane in the list but selects Codex on the install screen.
-    /// The two handlers must stay separate.
     #[test]
     fn x_on_the_install_screen_does_not_touch_agents() {
         let mut s = state_with_one_agent();
@@ -240,8 +236,7 @@ mod tests {
         assert_eq!(s.install.target_at_cursor(), crate::install::Target::Codex);
     }
 
-    /// Opening the install screen must disarm a pending kill, so a queued `x`
-    /// can't close a pane after the user has navigated away.
+    /// Otherwise a queued `x` closes a pane after navigating away.
     #[test]
     fn opening_install_screen_disarms_a_pending_kill() {
         let mut s = state_with_one_agent();
@@ -265,8 +260,7 @@ mod tests {
         }
     }
 
-    /// Toggling needs a known state; from Unknown it must be a no-op so a
-    /// missing installer can't make the panel claim work is in flight.
+    /// From Unknown, toggling must not claim work is in flight.
     #[test]
     fn toggling_from_unknown_state_is_inert() {
         let mut s = state_with_one_agent();
@@ -343,8 +337,7 @@ mod tests {
         );
     }
 
-    /// `x` kills a pane on the list screen. The setup screen must swallow it,
-    /// and there is no pane to kill anyway.
+    /// The setup screen must swallow `x` rather than kill a pane.
     #[test]
     fn setup_screen_swallows_list_keys() {
         let mut s = state_needing_setup();

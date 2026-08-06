@@ -31,13 +31,7 @@ impl Agent {
         }
     }
 
-    /// The agent row as a nested-list item.
-    ///
-    /// Zellij owns the layout here: it positions the row, draws the selection
-    /// highlight across the full width, and resolves the colour levels from the
-    /// user's theme. That is what keeps rows on their own grid lines - the
-    /// hand-rolled ANSI version had to pad to an exact width, and a row that
-    /// filled the pane wrapped and ate the line below it.
+    /// One agent's row. The icon and status label are themed; the rest is plain.
     pub(crate) fn list_item(
         &self,
         i: usize,
@@ -47,17 +41,20 @@ impl Agent {
         cols: usize,
         show_cwd: bool,
     ) -> Text {
-        let elapsed = fmt_elapsed(now - self.status_since);
         let marker = if selected { "\u{25b6}" } else { " " };
-        let mut text = format!(
-            "{} {} {} {:<7} {:<7} {:>6}",
-            marker,
-            i + 1,
-            icon,
-            self.tool,
-            self.status.label(),
-            elapsed
-        );
+        let label = self.status.label();
+
+        // Ranges are tracked as the string is built. `Text::serialize` encodes
+        // via `as_bytes()`, so these must be byte offsets, and both the marker
+        // and the spinner icon are multi-byte.
+        let mut text = format!("{} {} ", marker, i + 1);
+        let icon_range = text.len()..text.len() + icon.len();
+        text.push_str(icon);
+        text.push(' ');
+        text.push_str(&format!("{:<7} ", self.tool));
+        let label_range = text.len()..text.len() + label.len();
+        text.push_str(&format!("{:<7} {:>6}", label, fmt_elapsed(now - self.status_since)));
+
         if show_cwd {
             text.push_str(&format!("  {:<10}", truncate(self.project(), 10)));
         }
@@ -66,13 +63,6 @@ impl Agent {
             text.push_str("  ");
             text.push_str(&truncate(self.display_task(), room));
         }
-
-        // Byte offsets: `Text::serialize` encodes the payload via `as_bytes()`,
-        // so a multi-byte marker or icon shifts everything after it.
-        let icon_at = marker.len() + 1 + (i + 1).to_string().len() + 1;
-        let icon_range = icon_at..icon_at + icon.len();
-        let label_at = icon_range.end + 1 + self.tool.chars().count().max(7) + 1;
-        let label_range = label_at..label_at + self.status.label().len();
 
         let level = self.status.color_level();
         let text = Text::new(text).color_range(level, icon_range).color_range(level, label_range);
@@ -83,7 +73,7 @@ impl Agent {
         }
     }
 
-    /// The dimmed second line under an agent.
+    /// The dimmed second line under an agent's row.
     pub(crate) fn detail_item(&self, kill_armed: bool, cols: usize) -> Text {
         let mut bits: Vec<String> = Vec::new();
         if kill_armed {
@@ -163,8 +153,6 @@ mod render_tests {
         assert!(item_text(&unsel).starts_with(' '), "unselected row is blank there");
     }
 
-    /// Zellij clips to the pane, but an over-long row would still push the task
-    /// summary past the edge, so the summary is budgeted against the width.
     #[test]
     fn row_never_exceeds_cols() {
         let mut a = agent();
@@ -180,6 +168,25 @@ mod render_tests {
         let a = agent();
         assert!(!row(&a, 0, false, "\u{25cf}", 0.0, 40, false).contains("api"));
         assert!(row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains("api"));
+    }
+
+    /// Drifting byte offsets colour the wrong characters, which the text
+    /// assertions above cannot catch.
+    #[test]
+    fn colour_ranges_land_on_the_icon_and_status_label() {
+        for (i, selected, icon) in [(0usize, true, "\u{280b}"), (9, false, "\u{25cf}"), (2, true, "?")] {
+            let a = agent();
+            let item = a.list_item(i, selected, icon, 0.0, 110, true);
+            let text = item_text(&item);
+            let marker = if selected { "\u{25b6}" } else { " " };
+
+            let icon_at = marker.len() + 1 + (i + 1).to_string().len() + 1;
+            assert_eq!(&text[icon_at..icon_at + icon.len()], icon, "icon offset in {:?}", text);
+
+            let label = a.status.label();
+            let label_at = icon_at + icon.len() + 1 + a.tool.len().max(7) + 1;
+            assert_eq!(&text[label_at..label_at + label.len()], label, "label offset in {:?}", text);
+        }
     }
 
     #[test]
@@ -213,8 +220,7 @@ mod render_tests {
         }
     }
 
-    /// One item is one grid line. An embedded newline would desync every
-    /// coordinate below it, which is exactly the bug this rewrite removed.
+    /// An embedded newline would desync every coordinate below the row.
     #[test]
     fn rows_contain_no_embedded_newlines() {
         let a = agent();

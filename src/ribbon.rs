@@ -1,9 +1,5 @@
-//! The footer key hints, rendered as Zellij ribbons.
-//!
-//! Ribbons are the same component Zellij uses for its own mode indicators, so
-//! they pick up the user's theme instead of the fixed 256-colour codes the rest
-//! of the panel falls back to. Each action is its own ribbon segment with the
-//! key highlighted, which is what makes the actions distinguishable at a glance.
+//! Footer key hints. Ribbons are Zellij's own mode-indicator component, so they
+//! follow the user's theme rather than the fixed colours the panel once used.
 
 /// One footer entry: the key to press, and what it does.
 pub(crate) struct Hint {
@@ -16,19 +12,14 @@ impl Hint {
         Hint { key, action }
     }
 
-    /// `key action`. No angle brackets: the ribbon already reads as a discrete
-    /// chip, and the brackets crowded the enter glyph badly enough to look like
-    /// one smudged character. The key is told apart by colour instead.
+    /// No angle brackets: they crowd the enter glyph into an unreadable smudge.
+    /// Colour separates the key from the action instead.
     pub(crate) fn text(&self) -> String {
         format!("{} {}", self.key, self.action)
     }
 
-    /// Byte range covering the key, for `color_range`.
-    ///
-    /// `Text::serialize` encodes via `as_bytes()` while the indices are built as
-    /// a plain range, so these are **byte** offsets. Keys are ASCII, except the
-    /// enter glyph, so the range is computed from the encoded length rather than
-    /// the character count.
+    /// **Byte** offsets: `Text::serialize` encodes via `as_bytes()`, and the
+    /// enter glyph is multi-byte.
     pub(crate) fn key_range(&self) -> std::ops::Range<usize> {
         0..self.key.len()
     }
@@ -42,25 +33,6 @@ pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("i", "install"),
     Hint::new("q", "hide"),
 ];
-
-/// Columns Zellij pads around each ribbon segment (one space each side, plus
-/// the two arrow glyphs that join them).
-const RIBBON_PADDING: usize = 4;
-
-/// Columns a hint set needs when drawn as ribbons.
-pub(crate) fn ribbon_width(hints: &[Hint]) -> usize {
-    hints.iter().map(|h| h.text().chars().count() + RIBBON_PADDING).sum()
-}
-
-/// The same hints as one plain line, for panes too narrow for ribbons.
-///
-/// Zellij drops whole ribbon segments that don't fit rather than truncating,
-/// and it drops from the middle, so an over-wide set silently loses a key. The
-/// plain row keeps every key visible at the cost of the themed styling.
-pub(crate) fn plain_line(hints: &[Hint]) -> String {
-    let joined: Vec<String> = hints.iter().map(|h| format!("{} {}", h.key, h.action)).collect();
-    format!(" {}", joined.join("  "))
-}
 
 pub(crate) const SETUP_HINTS: &[Hint] = &[
     Hint::new("1", "claude"),
@@ -76,6 +48,20 @@ pub(crate) const INSTALL_HINTS: &[Hint] = &[
     Hint::new("r", "refresh"),
     Hint::new("esc", "back"),
 ];
+
+/// A space each side of every segment, plus the two joining arrow glyphs.
+const RIBBON_PADDING: usize = 4;
+
+pub(crate) fn ribbon_width(hints: &[Hint]) -> usize {
+    hints.iter().map(|h| h.text().chars().count() + RIBBON_PADDING).sum()
+}
+
+/// Fallback for panes too narrow for ribbons, which drop whole segments from
+/// the middle rather than truncating, silently losing a key.
+pub(crate) fn plain_line(hints: &[Hint]) -> String {
+    let joined: Vec<String> = hints.iter().map(|h| format!("{} {}", h.key, h.action)).collect();
+    format!(" {}", joined.join("  "))
+}
 
 #[cfg(test)]
 mod tests {

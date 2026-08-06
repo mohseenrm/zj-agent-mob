@@ -1,9 +1,8 @@
-//! The install screen: hook install state, and the actions that change it.
+//! The install screen.
 //!
-//! The plugin runs in WASI with no access to `$HOME`, so it cannot read
-//! `settings.json` itself. Everything here is driven by shelling out to the
-//! installer that `init.sh` copies to `~/.config/zj-agent-mob/install.sh`,
-//! which reports state as `key=state` lines and performs the mutations.
+//! WASI gives the plugin no `$HOME` and no filesystem, so it cannot read
+//! `settings.json`. All state comes from shelling out to the installer copy at
+//! `~/.config/zj-agent-mob/install.sh`, which reports `key=state` lines.
 
 use std::collections::BTreeMap;
 
@@ -11,13 +10,12 @@ use zellij_tile::prelude::Text;
 
 use crate::host;
 use crate::style::DIM_LEVEL;
+use crate::util::wrap;
 
-/// Where `init.sh` puts its self-copy. `$HOME` is expanded by the shell, not us:
-/// the plugin has no environment to read it from.
+/// `$HOME` is expanded by the shell, not us: the plugin has no environment.
 pub(crate) const INSTALLER: &str = "$HOME/.config/zj-agent-mob/install.sh";
 
-/// Marks a `run_command` result as belonging to the install screen, so status
-/// output is never confused with some other command's.
+/// Tags `run_command` results so they are not confused with another command's.
 pub(crate) const CTX_KEY: &str = "zj-agent-mob";
 pub(crate) const CTX_STATUS: &str = "install-status";
 pub(crate) const CTX_ACTION: &str = "install-action";
@@ -50,7 +48,6 @@ impl Target {
         }
     }
 
-    /// The key that toggles this row.
     pub(crate) fn hotkey(self) -> char {
         match self {
             Target::Claude => 'c',
@@ -60,9 +57,8 @@ impl Target {
     }
 }
 
-/// The quick actions offered on the empty screen when no hooks are installed.
-/// Deliberately not the same list as `Target`: the plugin wasm is already
-/// running by definition, so offering to install it there would be noise.
+/// Quick actions for the empty screen. Not the same list as `Target`: the
+/// plugin wasm is already running, so offering to install it would be noise.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SetupAction {
     Claude,
@@ -93,7 +89,7 @@ impl SetupAction {
         }
     }
 
-    /// Targets this action installs. Empty for `Quit`.
+    /// Empty for `Quit`.
     fn targets(self) -> &'static [Target] {
         match self {
             SetupAction::Claude => &[Target::Claude],
@@ -132,7 +128,6 @@ impl InstallState {
             InstallState::Unknown => "unknown",
         }
     }
-
 }
 
 /// State for the install screen. Lives on `State` and is inert until opened.
@@ -141,14 +136,10 @@ pub(crate) struct Install {
     pub(crate) open: bool,
     pub(crate) selected: usize,
     states: [InstallState; 3],
-    /// Last error from the installer, shown under the rows.
     pub(crate) error: Option<String>,
-    /// True once the installer has been found to be missing.
     pub(crate) missing_installer: bool,
-    /// Cursor on the setup quick actions shown on the empty screen.
     pub(crate) setup_selected: usize,
-    /// Set once the first status read has come back, so the empty screen does
-    /// not flash setup prompts before we know whether anything is missing.
+    /// Gates the setup screen so it cannot flash before the first status read.
     pub(crate) status_known: bool,
 }
 
@@ -162,30 +153,28 @@ impl Install {
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let n = Target::ALL.len() as isize;
-        self.selected = (((self.selected as isize + delta) % n + n) % n) as usize;
+        self.selected = wrap(self.selected, delta, Target::ALL.len());
     }
 
     pub(crate) fn target_at_cursor(&self) -> Target {
         Target::ALL[self.selected.min(Target::ALL.len() - 1)]
     }
 
-    /// Ask the installer for current state. Also how we learn it is missing.
+    /// Also how a missing installer is detected.
     pub(crate) fn refresh(&mut self) {
         self.error = None;
         self.dispatch_status();
     }
 
-    /// Refresh without clearing `error`, so a failed action's message survives
-    /// the state re-read that follows it.
+    /// Unlike `refresh`, leaves `error` intact so a failed action's message
+    /// survives the re-read that follows it.
     fn dispatch_status(&self) {
         host::run_command(&["sh", "-c", &format!("{} status", INSTALLER)], ctx(CTX_STATUS, None));
     }
 
-    /// Install or uninstall one target, based on its current state.
     pub(crate) fn toggle(&mut self, t: Target) {
-        // Unknown state means we don't know which direction to go; a refresh is
-        // in flight or the installer is missing, so do nothing rather than guess.
+        // Unknown means a refresh is in flight or the installer is missing, so
+        // there is no direction to toggle in.
         let verb = match self.state(t) {
             InstallState::Installed => "uninstall",
             InstallState::Absent => "install",
@@ -199,9 +188,8 @@ impl Install {
         );
     }
 
-    /// True when neither agent's hooks are in place, so nothing can ever report
-    /// status. That is the only case worth interrupting the empty screen for:
-    /// one agent installed is a deliberate choice, not a broken setup.
+    /// True when neither agent is hooked, so nothing can ever report status.
+    /// One agent installed is a deliberate choice, not a broken setup.
     pub(crate) fn needs_setup(&self) -> bool {
         self.status_known
             && !self.missing_installer
@@ -209,29 +197,25 @@ impl Install {
             && self.state(Target::Codex) != InstallState::Installed
     }
 
-    /// True while a setup action is still running, so the screen can say so.
     pub(crate) fn setup_busy(&self) -> bool {
         self.state(Target::Claude) == InstallState::Busy || self.state(Target::Codex) == InstallState::Busy
     }
 
     pub(crate) fn move_setup_selection(&mut self, delta: isize) {
-        let n = SetupAction::ALL.len() as isize;
-        self.setup_selected = (((self.setup_selected as isize + delta) % n + n) % n) as usize;
+        self.setup_selected = wrap(self.setup_selected, delta, SetupAction::ALL.len());
     }
 
     pub(crate) fn setup_at_cursor(&self) -> SetupAction {
         SetupAction::ALL[self.setup_selected.min(SetupAction::ALL.len() - 1)]
     }
 
-    /// Run a setup quick action. Returns false for `Quit`, which the caller
-    /// handles by hiding the panel; installs are fire-and-forget from here.
+    /// Returns false for `Quit`, which the caller handles by hiding the panel.
     pub(crate) fn run_setup(&mut self, action: SetupAction) -> bool {
         let targets = action.targets();
         if targets.is_empty() {
             return false;
         }
-        // A second press while an install is in flight would double-write the
-        // settings file from two shells at once.
+        // Two shells writing the same settings file would race.
         if self.setup_busy() {
             return true;
         }
@@ -251,7 +235,6 @@ impl Install {
         true
     }
 
-    /// The setup quick actions, one row each.
     pub(crate) fn setup_items(&self) -> Vec<Text> {
         SetupAction::ALL
             .into_iter()
@@ -259,8 +242,7 @@ impl Install {
             .map(|(i, a)| {
                 let marker = if i == self.setup_selected { "\u{25b6}" } else { " " };
                 let text = format!("{} {}  {}", marker, a.hotkey(), a.label());
-                // Highlight the hotkey so the row reads as a shortcut. Byte
-                // offsets: the marker is multi-byte when it is the cursor.
+                // Byte offset: the cursor marker is multi-byte.
                 let at = marker.len() + 1;
                 let text = Text::new(text).color_range(0, at..at + 1);
                 if i == self.setup_selected {
@@ -272,7 +254,7 @@ impl Install {
             .collect()
     }
 
-    /// The message under the body, and whether it is an error.
+    /// The message under the body, and whether it renders as an error.
     pub(crate) fn notes(&self) -> Option<(String, bool)> {
         if self.setup_busy() {
             Some(("installing...".to_string(), false))
@@ -288,7 +270,7 @@ impl Install {
         }
     }
 
-    /// Handle a finished `run_command`. Returns true if the panel should redraw.
+    /// Returns true if the panel should redraw.
     pub(crate) fn on_command_result(
         &mut self,
         exit_code: Option<i32>,
@@ -303,8 +285,7 @@ impl Install {
                     self.missing_installer = false;
                     self.apply_status(stdout);
                 } else {
-                    // `sh -c` exits 127 when the installer isn't there. Anything
-                    // else is a real failure worth surfacing verbatim.
+                    // `sh -c` exits 127 when the installer isn't there.
                     self.missing_installer = true;
                     for t in Target::ALL {
                         self.set(t, InstallState::Unknown);
@@ -319,9 +300,8 @@ impl Install {
                 if exit_code != Some(0) {
                     self.error = first_line(stderr).or_else(|| first_line(stdout));
                 }
-                // Re-read rather than assuming the toggle landed: the installer
-                // can succeed partially (e.g. hooks written, plugin not built).
-                // Not `refresh()`: that would clear the error we just recorded.
+                // The installer can partially succeed, so re-read rather than
+                // assume. Not `refresh()`, which would clear the error above.
                 self.dispatch_status();
                 true
             }
@@ -346,7 +326,6 @@ impl Install {
         }
     }
 
-    /// One row per target.
     pub(crate) fn list_items(&self) -> Vec<Text> {
         Target::ALL
             .into_iter()
@@ -362,8 +341,7 @@ impl Install {
                     st.icon(),
                     st.text()
                 );
-                // Byte offsets: the payload is encoded via `as_bytes()`, and the
-                // cursor marker is multi-byte.
+                // Byte offsets: the cursor marker is multi-byte.
                 let key_at = marker.len() + 1;
                 let icon_at = key_at + 1 + 2 + 20 + 1;
                 let mut item = Text::new(text).color_range(0, key_at..key_at + 1);
@@ -441,8 +419,7 @@ mod tests {
         );
     }
 
-    /// 127 from `sh -c` means the installer isn't on disk. That is an expected
-    /// state with its own hint, not an error to dump raw.
+    /// 127 is an expected state with its own hint, not an error to dump raw.
     #[test]
     fn missing_installer_is_detected_without_an_error_message() {
         let mut i = Install::default();
@@ -503,7 +480,6 @@ mod tests {
         assert_eq!(i.state(Target::Claude), InstallState::Busy);
     }
 
-    /// The prompt is only for the case where nothing can report in at all.
     #[test]
     fn setup_is_offered_only_when_neither_agent_is_hooked() {
         let mut i = Install::default();
@@ -533,7 +509,7 @@ mod tests {
         assert_eq!(i.setup_at_cursor(), SetupAction::Claude);
     }
 
-    /// `SetupAction as usize` indexes `ALL` when a hotkey moves the cursor.
+    /// A hotkey sets the cursor via `SetupAction as usize`.
     #[test]
     fn setup_discriminants_line_up_with_all() {
         for (i, a) in SetupAction::ALL.into_iter().enumerate() {
@@ -565,8 +541,7 @@ mod tests {
         assert_eq!(i.state(Target::Plugin), InstallState::Unknown, "plugin is untouched");
     }
 
-    /// Unlike the row toggle, setup installs from Unknown: the whole point is
-    /// that it fires before any status read is required.
+    /// Unlike the row toggle, setup must fire before any status read.
     #[test]
     fn setup_installs_without_a_prior_status_read() {
         let mut i = Install::default();
@@ -600,9 +575,7 @@ mod tests {
         assert!(i.needs_setup(), "still unhooked, so keep offering");
     }
 
-    /// Pins the exact text of the four actions. This is the screen the user
-    /// lands on, so a silent change to it is worth failing on. Zellij draws the
-    /// cursor and the highlight, so neither appears in the payload.
+    /// Pins the screen the user lands on, so a silent change fails here.
     #[test]
     fn setup_screen_renders_four_numbered_actions() {
         let i = Install::default();
@@ -618,8 +591,6 @@ mod tests {
         );
     }
 
-    /// Only the item under the cursor carries the `x` selected flag, so Zellij
-    /// highlights exactly one row.
     #[test]
     fn exactly_one_setup_item_is_selected() {
         let mut i = Install::default();
@@ -675,8 +646,7 @@ mod tests {
         assert_eq!(keys.len(), Target::ALL.len());
     }
 
-    /// A row must never carry a newline: one item is one grid line, and an
-    /// embedded newline would desync every coordinate below it.
+    /// An embedded newline would desync every coordinate below the row.
     #[test]
     fn rows_are_single_line() {
         let mut i = Install::default();

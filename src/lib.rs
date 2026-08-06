@@ -23,17 +23,11 @@ pub(crate) const TICK: f64 = 0.25;
 /// Shown in the pane frame instead of the full wasm path.
 pub(crate) const PANE_TITLE: &str = "Agent Mob";
 
-/// Rows stop growing past this, so a very wide pane doesn't stretch a task
-/// summary across the whole screen. Rules and rows both use it, which is what
-/// keeps them flush with each other.
+/// Stops a very wide pane from stretching a task summary across the screen.
 pub(crate) const MAX_WIDTH: usize = 120;
 
-/// The width every element in the panel lays out against.
-///
-/// One column short of the pane on purpose. A line that exactly fills the pane
-/// wraps when its trailing newline lands, so the grid swallows a row and every
-/// element below it renders one row too high - the detail line collides with
-/// the row above it and the footer lands on the closing rule.
+/// The width every element lays out against, deliberately one column short of
+/// the pane: a line that exactly fills it wraps and eats the row below.
 pub(crate) fn content_width(cols: usize) -> usize {
     cols.saturating_sub(1).clamp(1, MAX_WIDTH)
 }

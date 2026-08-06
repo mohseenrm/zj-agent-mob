@@ -19,7 +19,7 @@ impl ZellijPlugin for State {
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
-            // Needed only by the install screen, which shells out to init.sh.
+            // Only the install screen needs this; it shells out to init.sh.
             PermissionType::RunCommands,
         ]);
         subscribe(&[
@@ -32,21 +32,18 @@ impl ZellijPlugin for State {
         ]);
         set_selectable(true);
 
-        // Without this the frame shows the full wasm path, which is both unwieldy
-        // and leaks a home directory into a screenshot.
+        // Otherwise the frame shows the full wasm path, leaking $HOME.
         host::rename_own_pane(PANE_TITLE);
     }
 
     fn update(&mut self, event: Event) -> bool {
         match event {
-            // A denial here is not fatal. `RunCommands` is in the same request
-            // but only the install screen needs it, so the panel stays usable
-            // either way and that screen reports the failure itself.
+            // Denial is not fatal, so this ignores the result: only the install
+            // screen needs RunCommands, and it reports its own failures.
             Event::PermissionRequestResult(_) => {
                 self.permissions_granted = true;
-                // Only now can `run_command` reach the host: a status read fired
-                // from `load` is dropped before the grant lands. The empty
-                // screen needs this to decide whether to offer setup.
+                // `run_command` only reaches the host after the grant; a refresh
+                // fired from `load` is silently dropped.
                 self.install.refresh();
                 true
             }
@@ -79,12 +76,9 @@ impl ZellijPlugin for State {
         }
     }
 
-    /// Everything is drawn as a coordinate-positioned Zellij component.
-    ///
-    /// Nothing here uses `println!`. Components emit a DCS sequence that moves
-    /// the cursor itself, so mixing the two puts plain lines wherever the last
-    /// component happened to leave the cursor - which is how rows used to land
-    /// on top of each other. Explicit `y` for every element instead.
+    /// Never use `println!` here. Components position the cursor themselves via
+    /// a DCS sequence, so a plain line lands wherever the last one left it and
+    /// rows collide. Every element gets an explicit `y`.
     fn render(&mut self, rows: usize, cols: usize) {
         if !self.permissions_granted {
             print_text_with_coordinates(
@@ -118,7 +112,7 @@ impl ZellijPlugin for State {
 impl State {
     fn render_install(&self, width: usize) {
         let mut y = self.render_header("install", width);
-        y = self.render_rows(self.install.list_items(), y, width);
+        y = self.render_rows(self.install.list_items(), y);
         y = self.render_rule(y, width);
         y = self.render_notes(self.install.notes(), y, width);
         self.render_hints(ribbon::INSTALL_HINTS, y, width);
@@ -134,7 +128,7 @@ impl State {
             None,
         );
         y += 2;
-        y = self.render_rows(self.install.setup_items(), y, width);
+        y = self.render_rows(self.install.setup_items(), y);
         y = self.render_rule(y, width);
         y = self.render_notes(self.install.notes(), y, width);
         self.render_hints(ribbon::SETUP_HINTS, y, width);
@@ -146,29 +140,38 @@ impl State {
             Text::new("  Start claude or codex in a pane; hooks report status here.").color_range(DIM_LEVEL, ..),
             Text::new("  Press i to check and install the hooks.").color_range(DIM_LEVEL, ..),
         ];
-        self.render_rows(rows, y, width);
+        self.render_rows(rows, y);
     }
 
     fn render_list(&self, rows: usize, width: usize) {
-        let counts = self.counts();
-        // Colour each count from the theme, matching the status it summarises.
-        let head = format!(
-            "zj-agent-mob   {} waiting \u{b7} {} working \u{b7} {} done",
-            counts.0, counts.1, counts.2
-        );
-        let at = "zj-agent-mob   ".len();
-        let w = counts.0.to_string().len();
-        let wk = counts.1.to_string().len();
-        let working_at = at + w + " waiting \u{b7} ".len();
-        let done_at = working_at + wk + " working \u{b7} ".len();
-        let head = Text::new(head)
-            .color_range(Status::Waiting.color_level(), at..at + w)
-            .color_range(Status::Working.color_level(), working_at..working_at + wk)
-            .color_range(Status::Done.color_level(), done_at..done_at + counts.2.to_string().len());
+        let (waiting, working, done) = self.counts();
+        let parts = [
+            (waiting, "waiting", Status::Waiting),
+            (working, "working", Status::Working),
+            (done, "done", Status::Done),
+        ];
+
+        // Built up incrementally so each count's colour range tracks the digits
+        // actually written; a two-digit count shifts everything after it.
+        let mut head = "zj-agent-mob   ".to_string();
+        let mut ranges = Vec::new();
+        for (i, (n, label, status)) in parts.into_iter().enumerate() {
+            if i > 0 {
+                head.push_str(" \u{b7} ");
+            }
+            let digits = n.to_string();
+            ranges.push((status.color_level(), head.len()..head.len() + digits.len()));
+            head.push_str(&digits);
+            head.push(' ');
+            head.push_str(label);
+        }
+        let head = ranges
+            .into_iter()
+            .fold(Text::new(head), |t, (level, r)| t.color_range(level, r));
         print_text_with_coordinates(head, 0, 0, None, None);
         let mut y = self.render_rule(1, width);
 
-        // Needs two rows per agent, plus the chrome above and below.
+        // A detail line per agent needs two rows each, plus header and footer.
         let detail_lines = rows >= 4 + self.agents.len() * 2 && width >= 60;
         let show_cwd = width >= 50;
 
@@ -180,17 +183,16 @@ impl State {
                 items.push(agent.detail_item(self.kill_armed == Some(agent.pane_id), width));
             }
         }
-        y = self.render_rows(items, y, width);
+        y = self.render_rows(items, y);
         y = self.render_rule(y, width);
         self.render_hints(ribbon::LIST_HINTS, y, width);
     }
 
-    /// One `Text` per grid row, each at its own `y`. Returns the next free row.
+    /// One row per `Text`, each at its own `y`. Returns the next free row.
     ///
-    /// Width is deliberately `None`: a component given an explicit width is
-    /// padded out to it, and a row that fills the pane wraps onto the next grid
-    /// line - which is what used to make rows land on top of each other.
-    fn render_rows(&self, rows: Vec<Text>, y: usize, _width: usize) -> usize {
+    /// Passes width `None` throughout: a sized component is padded out to that
+    /// width, and a row filling the pane wraps and eats the line below it.
+    fn render_rows(&self, rows: Vec<Text>, y: usize) -> usize {
         let n = rows.len();
         for (i, row) in rows.into_iter().enumerate() {
             print_text_with_coordinates(row, 0, y + i, None, None);
@@ -198,7 +200,7 @@ impl State {
         y + n
     }
 
-    /// Title row. Returns the first free `y` below it.
+    /// Returns the next free `y`.
     fn render_header(&self, subtitle: &str, width: usize) -> usize {
         let text = format!("zj-agent-mob   {}", subtitle);
         let at = "zj-agent-mob   ".len();
@@ -206,14 +208,14 @@ impl State {
         self.render_rule(1, width)
     }
 
-    /// A horizontal rule. Returns the next free `y`.
+    /// Returns the next free `y`.
     fn render_rule(&self, y: usize, width: usize) -> usize {
         let rule = "\u{2500}".repeat(width);
         print_text_with_coordinates(Text::new(rule).color_range(DIM_LEVEL, ..), 0, y, None, None);
         y + 1
     }
 
-    /// An error or hint under the body. Returns the next free `y`.
+    /// Returns the next free `y`.
     fn render_notes(&self, note: Option<(String, bool)>, y: usize, width: usize) -> usize {
         match note {
             Some((msg, is_error)) => {
@@ -230,19 +232,15 @@ impl State {
         }
     }
 
-    /// Footer key hints as a row of ribbons.
     fn render_hints(&self, hints: &[ribbon::Hint], y: usize, width: usize) {
-        // Zellij drops whole ribbon segments that overflow rather than
-        // truncating them, so a narrow pane silently loses a key. Plain dimmed
-        // text keeps every key visible at the cost of the themed styling.
+        // Overflowing ribbons lose whole segments rather than truncating, so a
+        // narrow pane would silently drop a key. Plain text keeps them all.
         if ribbon::ribbon_width(hints) > width {
             let line = truncate(&ribbon::plain_line(hints), width);
             print_text_with_coordinates(Text::new(line).color_range(DIM_LEVEL, ..), 0, y, Some(width), None);
             return;
         }
-        // Alternating backgrounds: consecutive ribbons otherwise run together
-        // into one long bar, since the separators are the same colour as the
-        // chips. `selected` is what flips a ribbon to its alternate background.
+        // `selected` alternates the background so adjacent chips stay distinct.
         let texts: Vec<Text> = hints
             .iter()
             .enumerate()
@@ -255,9 +253,8 @@ impl State {
                 }
             })
             .collect();
-        // `None` width: the coordinates variant applies the width to the FIRST
-        // ribbon only, which then expands to fill it and shoves the rest to the
-        // far edge. Unsized, each segment is drawn at its natural length.
+        // Width `None`: the sized variant stretches the FIRST ribbon to fill it
+        // and shoves the rest to the far edge.
         print!(
             "{}",
             serialize_ribbon_line_with_coordinates(&texts, 0, y, None, None)

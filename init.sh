@@ -11,16 +11,14 @@
 #
 # Targets: claude, codex, plugin. Omitting the target means all of them.
 #
-# Installs the status hook into Claude Code (~/.claude/settings.json) and
-# Codex (~/.codex/hooks.json), and copies the plugin to the zellij plugin dir.
+# Writes the status hook into ~/.claude/settings.json and ~/.codex/hooks.json,
+# and copies the plugin to the zellij plugin dir. Also self-copies to
+# ~/.config/zj-agent-mob/install.sh, which is what the plugin's install screen
+# drives so it need not know where the repo was cloned.
 #
-# A copy of this script is installed alongside the hook as
-# ~/.config/zj-agent-mob/install.sh so the plugin's install screen can drive it
-# without knowing where the repo was cloned.
-#
-# Symlink-aware: these files are commonly stow-managed symlinks into a dotfiles
-# repo. We resolve to the real path before the temp-file swap, otherwise `mv`
-# replaces the symlink with a regular file and detaches it from the repo.
+# Symlink-aware: settings files are often stow-managed symlinks, so we resolve
+# to the real path before the temp-file swap. Otherwise `mv` would replace the
+# symlink with a regular file and detach it from the dotfiles repo.
 
 set -eu
 
@@ -57,7 +55,9 @@ for arg in "$@"; do
         *)   TARGET="$TARGET $arg" ;;
       esac ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Print the header block: every comment line until the first blank line, so
+    # the help text cannot drift out of sync with a hardcoded line range.
+    -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done

@@ -14,6 +14,12 @@ pub(crate) fn fmt_elapsed(secs: f64) -> String {
     }
 }
 
+/// Moves a cursor by `delta`, wrapping at both ends.
+pub(crate) fn wrap(i: usize, delta: isize, len: usize) -> usize {
+    let n = len as isize;
+    (((i as isize + delta) % n + n) % n) as usize
+}
+
 /// Truncates on char boundaries; summaries can contain non-ASCII.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     let count = s.chars().count();
