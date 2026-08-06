@@ -1,7 +1,4 @@
-//! Panel state and the state machine that drives it.
-//!
-//! Everything here is host-testable: Zellij calls go through [`crate::host`],
-//! which no-ops off-wasm.
+//! Panel state: pipe handling, pane reconciliation.
 
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
@@ -71,8 +68,8 @@ impl State {
             return false;
         };
 
-        // Empty task/detail mean "leave unchanged": heartbeat events deliberately
-        // omit them to avoid re-reading multi-MB transcripts on every tool call.
+        // Empty means "unchanged": heartbeats omit these to avoid re-reading
+        // multi-MB transcripts.
         let task = args.get("task").filter(|t| !t.is_empty()).cloned();
         let detail = args.get("detail").filter(|d| !d.is_empty()).cloned();
         let now = self.now;
@@ -83,7 +80,6 @@ impl State {
             newly_waiting = changed && status == Status::Waiting;
             if changed {
                 agent.status_since = now;
-                // A fresh turn starting counts as a turn.
                 if status == Status::Working {
                     agent.turns += 1;
                 }
@@ -151,8 +147,7 @@ impl State {
         let mut saw_any_terminal = false;
         for (tab, panes) in manifest.panes {
             for pane in panes {
-                // Agents only ever run in terminal panes, so plugin panes
-                // (including this panel itself) are never candidates.
+                // Agents only run in terminal panes.
                 if pane.is_plugin {
                     continue;
                 }
@@ -164,12 +159,8 @@ impl State {
                 }
             }
         }
-        // Drop agents whose pane is gone: covers kills and crashes where no
-        // SessionEnd hook fires.
-        //
-        // Guard against the startup race: a pipe can arrive before the first
-        // PaneUpdate, and an empty/plugin-only manifest would otherwise cull
-        // every agent we just learned about.
+        // Drop agents whose pane is gone, but only once we've actually seen a
+        // terminal pane: a pipe can land before the first PaneUpdate.
         if saw_any_terminal {
             self.agents.retain(|a| a.alive);
         }
@@ -192,17 +183,6 @@ impl State {
     }
 
 }
-
-// Raw SGR codes.
-//
-// We deliberately do NOT use Zellij's Text/ribbon UI components here. Those
-// serialize to a DCS sequence (`\x1bPztext;...`) that repositions the cursor
-// itself, so consecutive components all collapse onto one grid row - verified
-// live: task, detail, and the separator all landed on line 2. Plain ANSI with
-// one println! per row gives exact line control.
-//
-// Trade-off: raw SGR does not follow the user's Zellij theme the way
-// color_range() indices would. Fixed 256-colour codes are the price of correct
 
 #[cfg(test)]
 mod tests {
@@ -243,9 +223,7 @@ mod tests {
         assert!(s.agents[0].status == Status::Done);
     }
 
-    /// The bug this guards: heartbeat events send task= empty to avoid re-reading
-    /// multi-MB transcripts. A naive assignment would blank the summary on every
-    /// tool call.
+    /// Heartbeats send an empty task; it must not blank an existing summary.
     #[test]
     fn empty_task_does_not_clear_existing_summary() {
         let mut s = state();
@@ -256,7 +234,6 @@ mod tests {
         ]));
         assert_eq!(s.agents[0].task.as_deref(), Some("Fix the parser"));
 
-        // Heartbeat: empty task must be ignored.
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working"), ("task", "")]));
         assert_eq!(
             s.agents[0].task.as_deref(),
@@ -264,11 +241,9 @@ mod tests {
             "empty task must mean 'unchanged', not 'clear'"
         );
 
-        // Absent task key must also be ignored.
         s.handle_status(&args(&[("pane_id", "1"), ("status", "done")]));
         assert_eq!(s.agents[0].task.as_deref(), Some("Fix the parser"));
 
-        // A non-empty task replaces it.
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working"), ("task", "New task")]));
         assert_eq!(s.agents[0].task.as_deref(), Some("New task"));
     }
@@ -307,10 +282,8 @@ mod tests {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
         s.now = 10.0;
-        // Same status again (heartbeat): timer must not reset.
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
         assert_eq!(s.agents[0].status_since, 0.0, "heartbeat must not reset elapsed");
-        // Real transition: timer resets.
         s.handle_status(&args(&[("pane_id", "1"), ("status", "done")]));
         assert_eq!(s.agents[0].status_since, 10.0);
     }
@@ -428,8 +401,6 @@ mod reconcile_tests {
 
     #[test]
     fn pipe_before_first_pane_update_is_not_culled() {
-        // Startup race: a hook fires before the plugin has seen any PaneUpdate.
-        // An empty manifest must not wipe the agent we just registered.
         let mut s = State { permissions_granted: true, ..Default::default() };
         s.handle_status(&args(&[("pane_id", "5"), ("status", "waiting")]));
         s.reconcile(PaneManifest { panes: std::collections::HashMap::new() });
@@ -451,8 +422,7 @@ mod reconcile_tests {
         assert_eq!(s.agents.len(), 1, "plugin panes are not agent panes");
     }
 
-    /// Text::serialize() encodes via as_bytes(), so color_range takes BYTE
-    /// offsets. This guards the arithmetic used for the status icon column.
+    /// `Text::color_range` takes BYTE offsets, not char offsets.
     #[test]
     fn icon_byte_offset_lands_on_the_icon() {
         for (marker, idx, icon) in [("\u{25b6}", 1usize, "\u{25cf}"), (" ", 2, "\u{2713}"), ("\u{25b6}", 10, "\u{280b}")] {

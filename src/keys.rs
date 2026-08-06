@@ -1,4 +1,4 @@
-//! Keyboard handling: selection, jump-to-pane, and the two-step kill.
+//! Keyboard: selection, jump-to-pane, two-step kill.
 
 use zellij_tile::prelude::*;
 
@@ -10,7 +10,6 @@ impl State {
     pub(crate) fn focus_selected(&mut self) {
         if let Some(agent) = self.agents.get(self.selected) {
             let pane_id = agent.pane_id;
-            // Clear the "done" badge: we're about to look at it.
             if let Some(a) = self.agents.iter_mut().find(|a| a.pane_id == pane_id) {
                 if a.status == Status::Done {
                     a.status = Status::Idle;
@@ -56,7 +55,7 @@ impl State {
                 }
                 true
             }
-            // x: SIGINT (interrupt the agent). Second x: close the pane.
+            // First x interrupts, second closes the pane.
             BareKey::Char('x') => {
                 if let Some(agent) = self.agents.get(self.selected) {
                     let pane_id = agent.pane_id;

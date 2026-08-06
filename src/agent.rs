@@ -1,8 +1,4 @@
-//! A single monitored agent, and how one row of the panel is built.
-//!
-//! `plain_row` / `detail_line` are pure string builders: all width math and
-//! truncation lives here so tests can assert exact layout without ANSI noise.
-//! `styled_row` layers colour on top without changing widths.
+//! A monitored agent and its panel row.
 
 use crate::status::Status;
 use crate::style::{BOLD, RESET, SEL_BG};
@@ -11,7 +7,6 @@ use crate::util::{fmt_elapsed, truncate};
 pub(crate) struct Agent {
     pub(crate) pane_id: u32,
     pub(crate) tool: String,
-    /// Kept for debugging and future per-session features (e.g. resume).
     #[allow(dead_code)]
     pub(crate) session_id: String,
     pub(crate) status: Status,
@@ -26,7 +21,7 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
-    /// Task summary, falling back to the pane title when no transcript summary exists.
+    /// Falls back to the pane title when there is no transcript summary.
     pub(crate) fn display_task(&self) -> &str {
         match self.task.as_deref() {
             Some(t) if !t.is_empty() => t,
@@ -34,8 +29,6 @@ impl Agent {
         }
     }
 
-    /// Plain (unstyled) row text. Width math and truncation live here so tests
-    /// can assert exact layout without ANSI noise.
     pub(crate) fn plain_row(
         &self,
         i: usize,
@@ -67,7 +60,6 @@ impl Agent {
         plain
     }
 
-    /// Same layout as `plain_row`, with colour applied.
     pub(crate) fn styled_row(
         &self,
         i: usize,
@@ -78,7 +70,7 @@ impl Agent {
         show_cwd: bool,
     ) -> String {
         let plain = self.plain_row(i, selected, icon, now, cols, show_cwd);
-        // Colour the status icon and label in place, keeping the plain widths.
+        // Colour in place so widths match plain_row.
         let colored_icon = format!("{}{}{}{}", self.status.ansi(), BOLD, icon, RESET);
         let label = self.status.label();
         let colored_label = format!("{}{}{}", self.status.ansi(), label, RESET);
@@ -205,8 +197,7 @@ mod render_tests {
         }
     }
 
-    /// The bug that made every row collapse onto one grid line: rows must not
-    /// contain embedded newlines, and the caller emits exactly one println per row.
+    /// Rows must stay single-line; the caller emits one println per row.
     #[test]
     fn rows_contain_no_embedded_newlines() {
         let a = agent();
@@ -221,7 +212,6 @@ mod render_tests {
         let a = agent();
         let plain = a.plain_row(0, false, "\u{25cf}", 0.0, 110, true);
         let styled = a.styled_row(0, false, "\u{25cf}", 0.0, 110, true);
-        // Stripping ANSI from the styled row must recover the plain row.
         let mut stripped = String::new();
         let mut chars = styled.chars();
         while let Some(c) = chars.next() {

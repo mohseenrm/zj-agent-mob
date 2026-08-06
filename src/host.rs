@@ -1,9 +1,5 @@
-//! Zellij host-call shim.
-//!
-//! Host functions are WASM imports with no native symbol, so a native
-//! `cargo test` build cannot link against them. This module delegates to the
-//! real shim on wasm and no-ops everywhere else, which is what lets the whole
-//! state machine be unit-tested on the host.
+//! Host calls are WASM imports with no native symbol, so they no-op off-wasm to
+//! keep everything else testable with a plain `cargo test`.
 
 #[cfg(target_family = "wasm")]
 pub(crate) use zellij_tile::shim::{

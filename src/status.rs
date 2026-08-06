@@ -1,4 +1,4 @@
-//! Agent status: the four states an agent can be in, and how each is presented.
+//! The four agent states and how each is presented.
 
 use crate::style::{BLUE, GREEN, GREY, RED};
 
@@ -30,7 +30,7 @@ impl Status {
         }
     }
 
-    /// Sort order: things needing attention first.
+    /// Needs-attention first.
     pub(crate) fn rank(&self) -> u8 {
         match self {
             Status::Waiting => 0,

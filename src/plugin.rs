@@ -1,4 +1,4 @@
-//! Zellij plugin lifecycle: permissions, event subscriptions, and rendering.
+//! Zellij lifecycle and rendering.
 
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
@@ -40,7 +40,6 @@ impl ZellijPlugin for State {
                 self.frame = self.frame.wrapping_add(1);
                 self.now += TICK;
                 self.arm_timer();
-                // Only repaint if something is actually animating.
                 self.agents.iter().any(|a| a.status == Status::Working)
             }
             Event::PaneUpdate(manifest) => {
@@ -85,7 +84,7 @@ impl ZellijPlugin for State {
         );
         println!("{}{}{}", DIM, "\u{2500}".repeat(cols.min(72)), RESET);
 
-        // Two lines per agent plus header/footer; collapse to one when short.
+        // Needs two lines per agent plus chrome.
         let detail_lines = rows >= 4 + self.agents.len() * 2 && cols >= 60;
         let show_cwd = cols >= 50;
 
