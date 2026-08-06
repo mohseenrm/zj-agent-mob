@@ -33,17 +33,13 @@ cargo build --release --target wasm32-wasip1
 
 After the first run you can do all of this from inside the panel instead: press <kbd>i</kbd> for the install screen.
 
-```text
-zj-agent-mob   install
-────────────────────────────────────────────────────────
-▶ c  Claude Code hooks    ✓ installed
-  x  Codex hooks          ○ not installed
-  p  Plugin wasm          ✓ installed
-────────────────────────────────────────────────────────
- c/x/p toggle  ↵ toggle  r refresh  esc back
-```
+![The install screen with Claude Code hooks and the plugin installed, Codex hooks absent](img/05-install-partial.png)
 
-Each row toggles: pressing its key installs when absent and uninstalls when present. The screen shells out to the copy of the installer that `init.sh` leaves at `~/.config/zj-agent-mob/install.sh`, so it works regardless of where you cloned the repo. This needs Zellij's "Run commands" permission, which the plugin requests on first load.
+Each row toggles: pressing its key installs when absent and uninstalls when present.
+
+If neither agent is hooked, the panel skips the empty state and offers the same install directly:
+
+![The setup screen listing four quick actions: install for Claude Code, for Codex, for both, or quit](img/01-setup.png) The screen shells out to the copy of the installer that `init.sh` leaves at `~/.config/zj-agent-mob/install.sh`, so it works regardless of where you cloned the repo. This needs Zellij's "Run commands" permission, which the plugin requests on first load.
 
 ## Register the plugin with Zellij
 

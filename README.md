@@ -6,20 +6,7 @@
 
 A Zellij plugin that monitors Claude Code and Codex agents running in your current session: live status, what each agent is working on, jump-to-pane, and kill.
 
-```text
-zj-agent-mob   1 waiting · 1 working · 1 done
-────────────────────────────────────────────────────────────────────────
-▶ 1 ● codex   waiting  2m14s  web         Fix flaky checkout test
-      └ needs approval: rm -rf node_modules · 3 turns · tab:1 · pane:5
-  2 ✓ claude  done     5m01s  dotfiles    Review zellij plugin docs
-      └ 12 turns · tab:1 · pane:2
-  3 ⠋ claude  working     8s  api         Add retry to webhook client
-      └ Edit src/webhook.rs · 47 turns · tab:2 · pane:3
-  4 ○ codex   idle    15m00s  cli         Bump deps
-      └ tab:2 · pane:7
-────────────────────────────────────────────────────────────────────────
- ↵ jump  1-9 quick  x kill  d dismiss  i install  q hide
-```
+![The agent list: one row per agent with status, elapsed time, project and task, each with an indented detail line](docs/img/02-agent-list.png)
 
 Status comes from real agent hooks, not screen scraping. The task summary is pulled from the agent's own transcript.
 
@@ -27,6 +14,7 @@ Status comes from real agent hooks, not screen scraping. The task summary is pul
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Screens](#screens)
 - [Keys](#keys)
 - [Statuses](#statuses)
 - [Known limitations](#known-limitations)
@@ -75,6 +63,28 @@ Press <kbd>Ctrl</kbd>+<kbd>s</kbd> then <kbd>c</kbd> to open the panel.
 > Restart any running `claude` / `codex` sessions after installing. Hooks are read at session start, so existing sessions won't report status.
 
 See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install screen, layout registration, and every config knob.
+
+## Screens
+
+**First run.** If neither agent's hooks are installed nothing can report status, so the panel offers to install them rather than sitting empty. Press <kbd>1</kbd>, <kbd>2</kbd> or <kbd>3</kbd> to install without leaving Zellij.
+
+![The setup screen listing four quick actions: install for Claude Code, for Codex, for both, or quit](docs/img/01-setup.png)
+
+**Hooks installed, nothing running yet.** Start `claude` or `codex` in any pane and it appears here.
+
+![The empty state telling you to start claude or codex in a pane](docs/img/00-empty.png)
+
+**Killing an agent.** <kbd>x</kbd> sends an interrupt and arms the row; pressing it again closes the pane. The armed row says so in red, so the destructive step is never one keystroke away.
+
+![The agent list with the selected row showing "press x again to close pane" in red](docs/img/03-kill-armed.png)
+
+**The install screen** (<kbd>i</kbd>) toggles each target: pressing a row's key installs it when absent and uninstalls it when present.
+
+![The install screen showing Claude Code hooks, Codex hooks and Plugin wasm all installed](docs/img/04-install.png)
+
+Targets are independent, so running only one agent's hooks is a supported state:
+
+![The install screen with Claude Code and the plugin installed but Codex hooks absent](docs/img/05-install-partial.png)
 
 ## Keys
 
