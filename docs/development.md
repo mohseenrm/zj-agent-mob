@@ -23,7 +23,24 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release --target wasm32-wasip1
-shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh
+shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh tests/e2e-hook.sh
+./tests/e2e-hook.sh
+```
+
+### Test layers
+
+| Layer | Where | Covers |
+|---|---|---|
+| Unit | `src/*.rs`, beside the code | The state machine and layout, starting from an already-parsed pipe message |
+| End-to-end | [`tests/e2e-hook.sh`](../tests/e2e-hook.sh) | The hook script: hook-event JSON in, `zellij pipe --args` out |
+| Installer | CI `shell` job | Idempotent re-install, per-target selection, parseable `status` output |
+
+`tests/e2e-hook.sh` covers the seam the Rust tests cannot reach: event-to-status mapping, the cases that must stay silent (no `$ZELLIJ_PANE_ID`, `ZJ_AGENT_HEARTBEAT=0`, unknown or malformed events), Claude `ai-title` and Codex rollout summaries, sanitizing, shell-injection through the task and `cwd`, and the always-exit-0 contract.
+
+It stubs `zellij` with a script that records its argv, so it needs no Zellij, no agent and no pane, and runs in about a second:
+
+```sh
+./tests/e2e-hook.sh
 ```
 
 ## Iterating against a live session
@@ -85,21 +102,22 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 
 ## Module layout
 
-| File | Lines | Role |
-|---|---|---|
-| `main.rs` | 6 | `register_plugin!` + WASI entry point |
-| `lib.rs` | 20 | Module wiring and shared constants |
-| `plugin.rs` | 137 | Zellij lifecycle: permissions, subscriptions, `render` |
-| `state.rs` | 187 | State machine: pipe handling, pane reconciliation |
-| `install.rs` | 271 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 143 | Keyboard: selection, jump-to-pane, two-step kill |
-| `agent.rs` | 111 | One agent, and how its row is built |
-| `status.rs` | 53 | The four states and their presentation |
-| `util.rs` | 30 | `fmt_elapsed`, `truncate` |
-| `host.rs` | 22 | Host-call shim |
-| `style.rs` | 12 | ANSI constants |
+| File | Lines | Tests | Role |
+|---|---|---|---|
+| `main.rs` | 6 | | `register_plugin!` + WASI entry point |
+| `lib.rs` | 33 | | Module wiring and shared constants |
+| `plugin.rs` | 260 | | Zellij lifecycle: permissions, subscriptions, `render` |
+| `state.rs` | 194 | 18 | State machine: pipe handling, pane reconciliation |
+| `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
+| `keys.rs` | 191 | 12 | Keyboard: selection, jump-to-pane, two-step kill |
+| `agent.rs` | 111 | 10 | One agent, and how its row is built |
+| `ribbon.rs` | 65 | 7 | Ribbon line serialization |
+| `status.rs` | 55 | | The four states and their presentation |
+| `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
+| `host.rs` | 31 | | Host-call shim |
+| `style.rs` | 11 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover: 18 in `state.rs`, 10 in `install.rs`, 9 in `agent.rs`, 6 in `keys.rs`, 2 in `util.rs`, for 45 total, none needing a running Zellij.
+Line counts exclude tests. Tests live beside the code they cover, 71 in total, none needing a running Zellij, plus the 41 end-to-end cases in `tests/e2e-hook.sh`.
 
 Zellij host calls (`focus_terminal_pane`, `hide_self`, `run_command`, ...) are WASM imports with no native symbol, so they're behind the `host` shim that no-ops off-wasm. That keeps the whole state machine and all layout code unit-testable with a plain `cargo test`.
 
