@@ -7,9 +7,10 @@
 
 use std::collections::BTreeMap;
 
+use zellij_tile::prelude::Text;
+
 use crate::host;
-use crate::style::{BOLD, DIM, GREEN, GREY, RED, RESET, SEL_BG};
-use crate::util::truncate;
+use crate::style::DIM_LEVEL;
 
 /// Where `init.sh` puts its self-copy. `$HOME` is expanded by the shell, not us:
 /// the plugin has no environment to read it from.
@@ -59,6 +60,50 @@ impl Target {
     }
 }
 
+/// The quick actions offered on the empty screen when no hooks are installed.
+/// Deliberately not the same list as `Target`: the plugin wasm is already
+/// running by definition, so offering to install it there would be noise.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SetupAction {
+    Claude,
+    Codex,
+    Both,
+    Quit,
+}
+
+impl SetupAction {
+    pub(crate) const ALL: [SetupAction; 4] =
+        [SetupAction::Claude, SetupAction::Codex, SetupAction::Both, SetupAction::Quit];
+
+    pub(crate) fn hotkey(self) -> char {
+        match self {
+            SetupAction::Claude => '1',
+            SetupAction::Codex => '2',
+            SetupAction::Both => '3',
+            SetupAction::Quit => 'q',
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SetupAction::Claude => "Install for Claude Code",
+            SetupAction::Codex => "Install for Codex",
+            SetupAction::Both => "Install for both",
+            SetupAction::Quit => "Quit",
+        }
+    }
+
+    /// Targets this action installs. Empty for `Quit`.
+    fn targets(self) -> &'static [Target] {
+        match self {
+            SetupAction::Claude => &[Target::Claude],
+            SetupAction::Codex => &[Target::Codex],
+            SetupAction::Both => &[Target::Claude, Target::Codex],
+            SetupAction::Quit => &[],
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum InstallState {
     #[default]
@@ -88,14 +133,6 @@ impl InstallState {
         }
     }
 
-    fn ansi(self) -> &'static str {
-        match self {
-            InstallState::Installed => GREEN,
-            InstallState::Absent => GREY,
-            InstallState::Busy => GREY,
-            InstallState::Unknown => RED,
-        }
-    }
 }
 
 /// State for the install screen. Lives on `State` and is inert until opened.
@@ -108,6 +145,11 @@ pub(crate) struct Install {
     pub(crate) error: Option<String>,
     /// True once the installer has been found to be missing.
     pub(crate) missing_installer: bool,
+    /// Cursor on the setup quick actions shown on the empty screen.
+    pub(crate) setup_selected: usize,
+    /// Set once the first status read has come back, so the empty screen does
+    /// not flash setup prompts before we know whether anything is missing.
+    pub(crate) status_known: bool,
 }
 
 impl Install {
@@ -157,6 +199,95 @@ impl Install {
         );
     }
 
+    /// True when neither agent's hooks are in place, so nothing can ever report
+    /// status. That is the only case worth interrupting the empty screen for:
+    /// one agent installed is a deliberate choice, not a broken setup.
+    pub(crate) fn needs_setup(&self) -> bool {
+        self.status_known
+            && !self.missing_installer
+            && self.state(Target::Claude) != InstallState::Installed
+            && self.state(Target::Codex) != InstallState::Installed
+    }
+
+    /// True while a setup action is still running, so the screen can say so.
+    pub(crate) fn setup_busy(&self) -> bool {
+        self.state(Target::Claude) == InstallState::Busy || self.state(Target::Codex) == InstallState::Busy
+    }
+
+    pub(crate) fn move_setup_selection(&mut self, delta: isize) {
+        let n = SetupAction::ALL.len() as isize;
+        self.setup_selected = (((self.setup_selected as isize + delta) % n + n) % n) as usize;
+    }
+
+    pub(crate) fn setup_at_cursor(&self) -> SetupAction {
+        SetupAction::ALL[self.setup_selected.min(SetupAction::ALL.len() - 1)]
+    }
+
+    /// Run a setup quick action. Returns false for `Quit`, which the caller
+    /// handles by hiding the panel; installs are fire-and-forget from here.
+    pub(crate) fn run_setup(&mut self, action: SetupAction) -> bool {
+        let targets = action.targets();
+        if targets.is_empty() {
+            return false;
+        }
+        // A second press while an install is in flight would double-write the
+        // settings file from two shells at once.
+        if self.setup_busy() {
+            return true;
+        }
+        self.error = None;
+        let keys: Vec<&str> = targets.iter().map(|t| t.key()).collect();
+        for t in targets {
+            self.set(*t, InstallState::Busy);
+        }
+        host::run_command(
+            &[
+                "sh",
+                "-c",
+                &format!("{} install {}", INSTALLER, keys.join(" ")),
+            ],
+            ctx(CTX_ACTION, None),
+        );
+        true
+    }
+
+    /// The setup quick actions, one row each.
+    pub(crate) fn setup_items(&self) -> Vec<Text> {
+        SetupAction::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let marker = if i == self.setup_selected { "\u{25b6}" } else { " " };
+                let text = format!("{} {}  {}", marker, a.hotkey(), a.label());
+                // Highlight the hotkey so the row reads as a shortcut. Byte
+                // offsets: the marker is multi-byte when it is the cursor.
+                let at = marker.len() + 1;
+                let text = Text::new(text).color_range(0, at..at + 1);
+                if i == self.setup_selected {
+                    text.selected()
+                } else {
+                    text
+                }
+            })
+            .collect()
+    }
+
+    /// The message under the body, and whether it is an error.
+    pub(crate) fn notes(&self) -> Option<(String, bool)> {
+        if self.setup_busy() {
+            Some(("installing...".to_string(), false))
+        } else if let Some(err) = &self.error {
+            Some((err.clone(), true))
+        } else if self.missing_installer {
+            Some((
+                "Installer not found. Run ./init.sh from the repo once.".to_string(),
+                false,
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Handle a finished `run_command`. Returns true if the panel should redraw.
     pub(crate) fn on_command_result(
         &mut self,
@@ -167,6 +298,7 @@ impl Install {
     ) -> bool {
         match context.get(CTX_KEY).map(|s| s.as_str()) {
             Some(CTX_STATUS) => {
+                self.status_known = true;
                 if exit_code == Some(0) {
                     self.missing_installer = false;
                     self.apply_status(stdout);
@@ -214,41 +346,38 @@ impl Install {
         }
     }
 
-    /// The screen body, one line per element. The caller emits the chrome.
-    pub(crate) fn lines(&self, cols: usize) -> Vec<String> {
-        let mut out = Vec::new();
-        for (i, t) in Target::ALL.into_iter().enumerate() {
-            let st = self.state(t);
-            let marker = if i == self.selected { "\u{25b6}" } else { " " };
-            let plain = format!(
-                "{} {}  {:<20} {} {}",
-                marker,
-                t.hotkey(),
-                t.label(),
-                st.icon(),
-                st.text()
-            );
-            let mut line = truncate(&plain, cols);
-            // Colour after truncation so the escapes are never cut in half.
-            line = line.replacen(st.icon(), &format!("{}{}{}", st.ansi(), st.icon(), RESET), 1);
-            if i == self.selected {
-                line = format!("{}{}{}", SEL_BG, line, RESET);
-            }
-            out.push(line);
-        }
-        if self.missing_installer {
-            let hint = truncate("  Installer not found. Run ./init.sh from the repo once.", cols);
-            out.push(String::new());
-            out.push(format!("{}{}{}", GREY, hint, RESET));
-        } else if let Some(err) = &self.error {
-            out.push(String::new());
-            out.push(format!("{}  {}{}", RED, truncate(err, cols.saturating_sub(2)), RESET));
-        }
-        out
-    }
-
-    pub(crate) fn header(&self) -> String {
-        format!("{}zj-agent-mob{}   {}install{}", BOLD, RESET, DIM, RESET)
+    /// One row per target.
+    pub(crate) fn list_items(&self) -> Vec<Text> {
+        Target::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let st = self.state(t);
+                let marker = if i == self.selected { "\u{25b6}" } else { " " };
+                let text = format!(
+                    "{} {}  {:<20} {} {}",
+                    marker,
+                    t.hotkey(),
+                    t.label(),
+                    st.icon(),
+                    st.text()
+                );
+                // Byte offsets: the payload is encoded via `as_bytes()`, and the
+                // cursor marker is multi-byte.
+                let key_at = marker.len() + 1;
+                let icon_at = key_at + 1 + 2 + 20 + 1;
+                let mut item = Text::new(text).color_range(0, key_at..key_at + 1);
+                item = match st {
+                    InstallState::Installed => item.success_color_range(icon_at..),
+                    InstallState::Unknown => item.error_color_range(icon_at..),
+                    InstallState::Absent | InstallState::Busy => item.color_range(DIM_LEVEL, icon_at..),
+                };
+                if i == self.selected {
+                    item = item.selected();
+                }
+                item
+            })
+            .collect()
     }
 }
 
@@ -272,6 +401,7 @@ fn first_line(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::testing::{is_selected, item_text};
 
     fn ctx_of(kind: &str) -> BTreeMap<String, String> {
         let mut c = BTreeMap::new();
@@ -322,7 +452,9 @@ mod tests {
         for t in Target::ALL {
             assert_eq!(i.state(t), InstallState::Unknown);
         }
-        assert!(i.lines(80).iter().any(|l| l.contains("Run ./init.sh")));
+        let (note, is_error) = i.notes().expect("a missing installer needs a hint");
+        assert!(note.contains("Run ./init.sh"));
+        assert!(!is_error, "a missing installer is an expected state, not an error");
     }
 
     #[test]
@@ -371,6 +503,153 @@ mod tests {
         assert_eq!(i.state(Target::Claude), InstallState::Busy);
     }
 
+    /// The prompt is only for the case where nothing can report in at all.
+    #[test]
+    fn setup_is_offered_only_when_neither_agent_is_hooked() {
+        let mut i = Install::default();
+        assert!(!i.needs_setup(), "no status read yet: stay quiet");
+
+        i.on_command_result(Some(0), "claude=absent\ncodex=absent\n", "", &ctx_of(CTX_STATUS));
+        assert!(i.needs_setup());
+
+        i.on_command_result(Some(0), "claude=installed\ncodex=absent\n", "", &ctx_of(CTX_STATUS));
+        assert!(!i.needs_setup(), "one agent hooked is a choice, not a broken setup");
+
+        i.on_command_result(Some(127), "", "not found", &ctx_of(CTX_STATUS));
+        assert!(
+            !i.needs_setup(),
+            "a missing installer cannot be fixed by these actions"
+        );
+    }
+
+    #[test]
+    fn setup_selection_wraps_and_covers_four_actions() {
+        let mut i = Install::default();
+        assert_eq!(SetupAction::ALL.len(), 4);
+        assert_eq!(i.setup_at_cursor(), SetupAction::Claude);
+        i.move_setup_selection(-1);
+        assert_eq!(i.setup_at_cursor(), SetupAction::Quit);
+        i.move_setup_selection(1);
+        assert_eq!(i.setup_at_cursor(), SetupAction::Claude);
+    }
+
+    /// `SetupAction as usize` indexes `ALL` when a hotkey moves the cursor.
+    #[test]
+    fn setup_discriminants_line_up_with_all() {
+        for (i, a) in SetupAction::ALL.into_iter().enumerate() {
+            assert_eq!(a as usize, i, "{:?} must index ALL", a);
+        }
+    }
+
+    #[test]
+    fn every_setup_action_has_a_distinct_hotkey() {
+        let mut keys: Vec<char> = SetupAction::ALL.iter().map(|a| a.hotkey()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), SetupAction::ALL.len());
+    }
+
+    #[test]
+    fn quit_runs_nothing_and_reports_it() {
+        let mut i = Install::default();
+        assert!(!i.run_setup(SetupAction::Quit), "quit is the caller's job");
+        assert!(!i.setup_busy());
+    }
+
+    #[test]
+    fn install_both_marks_both_targets_busy() {
+        let mut i = Install::default();
+        assert!(i.run_setup(SetupAction::Both));
+        assert_eq!(i.state(Target::Claude), InstallState::Busy);
+        assert_eq!(i.state(Target::Codex), InstallState::Busy);
+        assert_eq!(i.state(Target::Plugin), InstallState::Unknown, "plugin is untouched");
+    }
+
+    /// Unlike the row toggle, setup installs from Unknown: the whole point is
+    /// that it fires before any status read is required.
+    #[test]
+    fn setup_installs_without_a_prior_status_read() {
+        let mut i = Install::default();
+        assert!(i.run_setup(SetupAction::Claude));
+        assert_eq!(i.state(Target::Claude), InstallState::Busy);
+    }
+
+    #[test]
+    fn a_second_setup_press_while_busy_is_ignored() {
+        let mut i = Install::default();
+        i.run_setup(SetupAction::Claude);
+        i.error = Some("stale".into());
+        i.run_setup(SetupAction::Codex);
+        assert_eq!(
+            i.state(Target::Codex),
+            InstallState::Unknown,
+            "must not launch a second writer against the same settings file"
+        );
+        assert_eq!(i.error.as_deref(), Some("stale"), "the in-flight run is left alone");
+    }
+
+    #[test]
+    fn setup_action_failure_surfaces_and_clears_busy() {
+        let mut i = Install::default();
+        i.run_setup(SetupAction::Both);
+        i.on_command_result(Some(1), "", "error: jq is required", &ctx_of(CTX_ACTION));
+        assert_eq!(i.error.as_deref(), Some("jq is required"));
+        // The follow-up status read is what actually clears Busy.
+        i.on_command_result(Some(0), "claude=absent\ncodex=absent\n", "", &ctx_of(CTX_STATUS));
+        assert!(!i.setup_busy());
+        assert!(i.needs_setup(), "still unhooked, so keep offering");
+    }
+
+    /// Pins the exact text of the four actions. This is the screen the user
+    /// lands on, so a silent change to it is worth failing on. Zellij draws the
+    /// cursor and the highlight, so neither appears in the payload.
+    #[test]
+    fn setup_screen_renders_four_numbered_actions() {
+        let i = Install::default();
+        let texts: Vec<String> = i.setup_items().iter().map(item_text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "\u{25b6} 1  Install for Claude Code",
+                "  2  Install for Codex",
+                "  3  Install for both",
+                "  q  Quit",
+            ]
+        );
+    }
+
+    /// Only the item under the cursor carries the `x` selected flag, so Zellij
+    /// highlights exactly one row.
+    #[test]
+    fn exactly_one_setup_item_is_selected() {
+        let mut i = Install::default();
+        for want in 0..SetupAction::ALL.len() {
+            i.setup_selected = want;
+            let flags: Vec<bool> = i.setup_items().iter().map(is_selected).collect();
+            assert_eq!(
+                flags.iter().filter(|f| **f).count(),
+                1,
+                "exactly one row must be selected"
+            );
+            assert!(flags[want], "row {} must be the selected one", want);
+        }
+    }
+
+    #[test]
+    fn install_rows_show_state_for_every_target() {
+        let mut i = Install::default();
+        i.on_command_result(
+            Some(0),
+            "claude=installed\ncodex=absent\nplugin=absent\n",
+            "",
+            &ctx_of(CTX_STATUS),
+        );
+        let texts: Vec<String> = i.list_items().iter().map(item_text).collect();
+        assert_eq!(texts.len(), Target::ALL.len());
+        assert!(texts[0].contains("Claude Code hooks") && texts[0].contains("installed"));
+        assert!(texts[1].contains("Codex hooks") && texts[1].contains("not installed"));
+    }
+
     #[test]
     fn selection_wraps_both_directions() {
         let mut i = Install::default();
@@ -396,8 +675,10 @@ mod tests {
         assert_eq!(keys.len(), Target::ALL.len());
     }
 
+    /// A row must never carry a newline: one item is one grid line, and an
+    /// embedded newline would desync every coordinate below it.
     #[test]
-    fn rows_stay_single_line_and_within_cols() {
+    fn rows_are_single_line() {
         let mut i = Install::default();
         i.on_command_result(
             Some(0),
@@ -405,35 +686,9 @@ mod tests {
             "",
             &ctx_of(CTX_STATUS),
         );
-        for cols in [30usize, 40, 60, 80] {
-            for line in i.lines(cols) {
-                assert!(!line.contains('\n'), "lines must be single-line");
-                let visible: String = strip_ansi(&line);
-                assert!(
-                    visible.chars().count() <= cols,
-                    "cols={} produced {} visible chars: {:?}",
-                    cols,
-                    visible.chars().count(),
-                    visible
-                );
-            }
+        for item in i.list_items().iter().chain(i.setup_items().iter()) {
+            assert!(!item_text(item).contains('\n'));
         }
     }
 
-    fn strip_ansi(s: &str) -> String {
-        let mut out = String::new();
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                for c2 in chars.by_ref() {
-                    if c2 == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
 }

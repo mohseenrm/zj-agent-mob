@@ -10,3 +10,8 @@ pub(crate) const GREEN: &str = "\u{1b}[38;5;114m";
 pub(crate) const BLUE: &str = "\u{1b}[38;5;75m";
 pub(crate) const GREY: &str = "\u{1b}[38;5;245m";
 pub(crate) const SEL_BG: &str = "\u{1b}[48;5;237m";
+
+/// Zellij's colour-index level that renders dim. Levels 0-3 are the theme's
+/// four accent colours; 4 is dim and 5 is unbold. `Text` exposes `dim_all`,
+/// but `NestedListItem` only forwards `color_range`, so it needs the number.
+pub(crate) const DIM_LEVEL: usize = 4;

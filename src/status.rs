@@ -1,7 +1,5 @@
 //! The four agent states and how each is presented.
 
-use crate::style::{BLUE, GREEN, GREY, RED};
-
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Status {
     Working,
@@ -42,12 +40,17 @@ impl Status {
 }
 
 impl Status {
-    pub(crate) fn ansi(&self) -> &'static str {
+    /// Which of Zellij's four theme colour slots this status paints with.
+    ///
+    /// Theme-resolved rather than a fixed 256-colour code, so the panel matches
+    /// whatever palette the user runs. The mapping mirrors `ansi()`.
+    pub(crate) fn color_level(&self) -> usize {
         match self {
-            Status::Waiting => RED,
-            Status::Working => BLUE,
-            Status::Done => GREEN,
-            Status::Idle => GREY,
+            Status::Waiting => 2,
+            Status::Working => 0,
+            Status::Done => 1,
+            Status::Idle => 3,
         }
     }
+
 }

@@ -24,6 +24,13 @@ pub struct State {
 }
 
 impl State {
+    /// The setup prompt replaces the empty screen when nothing can report in.
+    /// Once an agent has checked in the hooks demonstrably work, so the prompt
+    /// is suppressed regardless of what the last status read said.
+    pub(crate) fn showing_setup(&self) -> bool {
+        !self.install.open && self.agents.is_empty() && self.install.needs_setup()
+    }
+
     pub(crate) fn icon_for(&self, agent: &Agent) -> &'static str {
         match agent.status {
             Status::Working => SPINNER[self.frame % SPINNER.len()],

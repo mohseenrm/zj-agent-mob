@@ -3,11 +3,59 @@
 use zellij_tile::prelude::*;
 
 use crate::host;
-use crate::install::Target;
+use crate::install::{SetupAction, Target};
 use crate::state::State;
 use crate::status::Status;
 
 impl State {
+    /// Keys for the setup prompt on the empty screen. It owns the whole screen
+    /// while it is up, so the agent-list keys are unreachable and cannot fire.
+    fn handle_setup_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Char('j') | BareKey::Down => {
+                self.install.move_setup_selection(1);
+                true
+            }
+            BareKey::Char('k') | BareKey::Up => {
+                self.install.move_setup_selection(-1);
+                true
+            }
+            BareKey::Enter => {
+                let a = self.install.setup_at_cursor();
+                self.run_setup(a);
+                true
+            }
+            BareKey::Esc => {
+                self.run_setup(SetupAction::Quit);
+                true
+            }
+            // `i` still opens the full install screen, which is the only way to
+            // reach the plugin row or uninstall from here.
+            BareKey::Char('i') => {
+                self.install.open = true;
+                self.install.refresh();
+                true
+            }
+            BareKey::Char(c) => match SetupAction::ALL.into_iter().find(|a| a.hotkey() == c) {
+                Some(a) => {
+                    self.install.setup_selected = a as usize;
+                    self.run_setup(a);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Runs a setup action, translating `Quit` into hiding the panel.
+    fn run_setup(&mut self, action: SetupAction) {
+        if !self.install.run_setup(action) {
+            self.hidden = true;
+            host::hide_self();
+        }
+    }
+
     /// Keys for the install screen. Separate from the agent list so a stray key
     /// there can never kill a pane.
     fn handle_install_key(&mut self, key: KeyWithModifier) -> bool {
@@ -64,6 +112,9 @@ impl State {
     pub(crate) fn handle_key(&mut self, key: KeyWithModifier) -> bool {
         if self.install.open {
             return self.handle_install_key(key);
+        }
+        if self.showing_setup() {
+            return self.handle_setup_key(key);
         }
         match key.bare_key {
             // Opening refreshes: the state may have changed outside the panel.
@@ -144,7 +195,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install::InstallState;
+    use crate::install::{InstallState, SetupAction, Target};
     use std::collections::BTreeMap;
 
     fn key(c: char) -> KeyWithModifier {
@@ -222,6 +273,96 @@ mod tests {
         s.handle_key(key('i'));
         s.handle_key(key('c'));
         assert_eq!(s.install.state(crate::install::Target::Claude), InstallState::Unknown);
+    }
+
+    /// Empty list plus a status read saying nothing is hooked.
+    fn state_needing_setup() -> State {
+        let mut s = State {
+            permissions_granted: true,
+            ..Default::default()
+        };
+        let ctx: BTreeMap<String, String> =
+            [(crate::install::CTX_KEY, crate::install::CTX_STATUS)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        s.install
+            .on_command_result(Some(0), "claude=absent\ncodex=absent\n", "", &ctx);
+        s
+    }
+
+    #[test]
+    fn setup_screen_shows_only_when_there_are_no_agents_and_no_hooks() {
+        let mut s = state_needing_setup();
+        assert!(s.showing_setup());
+
+        // An agent reporting in proves the hooks work, whatever status said.
+        s.handle_status(&args_map(&[("pane_id", "1"), ("status", "idle")]));
+        assert!(!s.showing_setup());
+
+        s.handle_status(&args_map(&[("pane_id", "1"), ("status", "ended")]));
+        assert!(s.showing_setup(), "back to empty and unhooked");
+
+        s.install.open = true;
+        assert!(!s.showing_setup(), "the full install screen takes over");
+    }
+
+    #[test]
+    fn setup_hotkeys_pick_their_action() {
+        for (c, expect) in [
+            ('1', SetupAction::Claude),
+            ('2', SetupAction::Codex),
+            ('3', SetupAction::Both),
+        ] {
+            let mut s = state_needing_setup();
+            assert!(s.handle_key(key(c)), "key {:?} must be handled", c);
+            assert_eq!(s.install.setup_at_cursor(), expect);
+            assert!(s.install.setup_busy(), "an install must be in flight");
+        }
+    }
+
+    #[test]
+    fn setup_quit_hides_the_panel_without_installing() {
+        let mut s = state_needing_setup();
+        s.handle_key(key('q'));
+        assert!(s.hidden);
+        assert!(!s.install.setup_busy(), "quit must not install anything");
+    }
+
+    #[test]
+    fn setup_enter_runs_the_highlighted_action() {
+        let mut s = state_needing_setup();
+        s.handle_key(key('j'));
+        assert_eq!(s.install.setup_at_cursor(), SetupAction::Codex);
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(s.install.state(Target::Codex), InstallState::Busy);
+        assert_eq!(
+            s.install.state(Target::Claude),
+            InstallState::Absent,
+            "only the highlighted target is touched"
+        );
+    }
+
+    /// `x` kills a pane on the list screen. The setup screen must swallow it,
+    /// and there is no pane to kill anyway.
+    #[test]
+    fn setup_screen_swallows_list_keys() {
+        let mut s = state_needing_setup();
+        assert!(!s.handle_key(key('x')), "x is not a setup action");
+        assert_eq!(s.kill_armed, None);
+        assert!(!s.install.setup_busy());
+    }
+
+    #[test]
+    fn i_still_reaches_the_full_install_screen_from_setup() {
+        let mut s = state_needing_setup();
+        s.handle_key(key('i'));
+        assert!(s.install.open);
+        assert!(!s.showing_setup());
+    }
+
+    fn args_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
     #[test]

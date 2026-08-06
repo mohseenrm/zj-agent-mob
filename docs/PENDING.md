@@ -11,3 +11,7 @@ All clear. Recently completed:
 - [x] Instructions on how to install with zellij (keybinding + layout, both validated)
 - [x] Local dev setup
 - [x] Troubleshooting
+
+- [ ] Self contained install script for agent harnesses
+    - [ ] Claude code
+    - [ ] Codex

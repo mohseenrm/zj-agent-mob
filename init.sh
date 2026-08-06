@@ -6,6 +6,7 @@
 #   ./init.sh --dry-run          show what would change, write nothing
 #   ./init.sh status             print install state (machine-readable)
 #   ./init.sh install claude     install one target only
+#   ./init.sh install claude codex   install several targets
 #   ./init.sh uninstall codex    remove one target only
 #
 # Targets: claude, codex, plugin. Omitting the target means all of them.
@@ -48,15 +49,27 @@ for arg in "$@"; do
     install)   MODE=install ;;
     uninstall) MODE=uninstall ;;
     status)    MODE=status ;;
-    claude|codex|plugin) TARGET=$arg ;;
+    # Targets accumulate, so `install claude codex` does both in one run. The
+    # first explicit target replaces the "all" default rather than adding to it.
+    claude|codex|plugin)
+      case "$TARGET" in
+        all) TARGET=$arg ;;
+        *)   TARGET="$TARGET $arg" ;;
+      esac ;;
     --dry-run) DRY=1 ;;
     -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
-# True when $TARGET selects $1 (an explicit target, or "all").
-wants() { [ "$TARGET" = all ] || [ "$TARGET" = "$1" ]; }
+# True when $TARGET selects $1 (an explicit target in the list, or "all").
+wants() {
+  [ "$TARGET" = all ] && return 0
+  for _t in $TARGET; do
+    [ "$_t" = "$1" ] && return 0
+  done
+  return 1
+}
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }

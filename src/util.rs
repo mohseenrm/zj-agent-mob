@@ -28,6 +28,54 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Decoding helpers for the DCS payloads Zellij's UI components emit. Tests
+/// read rendered rows through these rather than asserting on raw byte lists.
+#[cfg(test)]
+pub(crate) mod testing {
+    use zellij_tile::prelude::{NestedListItem, Text};
+
+    /// Both components serialize the same payload shape, so the decoders below
+    /// take either one.
+    pub(crate) trait Serializable {
+        fn payload(&self) -> String;
+    }
+    impl Serializable for Text {
+        fn payload(&self) -> String {
+            self.serialize()
+        }
+    }
+    impl Serializable for NestedListItem {
+        fn payload(&self) -> String {
+            self.serialize()
+        }
+    }
+
+    /// An item serializes as `|`-indent, then `z`/`x` flags, then `$`-separated
+    /// colour index groups, then the text as comma-separated bytes.
+    pub(crate) fn item_text<T: Serializable>(item: &T) -> String {
+        let s = item.payload();
+        let body = s.trim_start_matches('|').trim_start_matches(['z', 'x']);
+        // Everything up to the last `$` is index groups, not text.
+        let payload = match body.rfind('$') {
+            Some(at) => &body[at + 1..],
+            None => body,
+        };
+        let bytes: Vec<u8> = payload
+            .split(',')
+            .filter_map(|b| b.trim().parse::<u8>().ok())
+            .collect();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    pub(crate) fn is_selected<T: Serializable>(item: &T) -> bool {
+        // `z` (opaque) is prepended before `x`, so skip it first.
+        item.payload()
+            .trim_start_matches('|')
+            .trim_start_matches('z')
+            .starts_with('x')
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

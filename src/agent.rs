@@ -1,7 +1,9 @@
 //! A monitored agent and its panel row.
 
+use zellij_tile::prelude::Text;
+
 use crate::status::Status;
-use crate::style::{BOLD, RESET, SEL_BG};
+use crate::style::DIM_LEVEL;
 use crate::util::{fmt_elapsed, truncate};
 
 pub(crate) struct Agent {
@@ -29,7 +31,14 @@ impl Agent {
         }
     }
 
-    pub(crate) fn plain_row(
+    /// The agent row as a nested-list item.
+    ///
+    /// Zellij owns the layout here: it positions the row, draws the selection
+    /// highlight across the full width, and resolves the colour levels from the
+    /// user's theme. That is what keeps rows on their own grid lines - the
+    /// hand-rolled ANSI version had to pad to an exact width, and a row that
+    /// filled the pane wrapped and ate the line below it.
+    pub(crate) fn list_item(
         &self,
         i: usize,
         selected: bool,
@@ -37,10 +46,10 @@ impl Agent {
         now: f64,
         cols: usize,
         show_cwd: bool,
-    ) -> String {
-        let marker = if selected { "\u{25b6}" } else { " " };
+    ) -> Text {
         let elapsed = fmt_elapsed(now - self.status_since);
-        let mut plain = format!(
+        let marker = if selected { "\u{25b6}" } else { " " };
+        let mut text = format!(
             "{} {} {} {:<7} {:<7} {:>6}",
             marker,
             i + 1,
@@ -50,41 +59,32 @@ impl Agent {
             elapsed
         );
         if show_cwd {
-            plain.push_str(&format!("  {:<10}", truncate(self.project(), 10)));
+            text.push_str(&format!("  {:<10}", truncate(self.project(), 10)));
         }
-        let room = cols.saturating_sub(plain.chars().count() + 2);
+        let room = cols.saturating_sub(text.chars().count() + 2);
         if room > 6 {
-            plain.push_str("  ");
-            plain.push_str(&truncate(self.display_task(), room));
+            text.push_str("  ");
+            text.push_str(&truncate(self.display_task(), room));
         }
-        plain
-    }
 
-    pub(crate) fn styled_row(
-        &self,
-        i: usize,
-        selected: bool,
-        icon: &str,
-        now: f64,
-        cols: usize,
-        show_cwd: bool,
-    ) -> String {
-        let plain = self.plain_row(i, selected, icon, now, cols, show_cwd);
-        // Colour in place so widths match plain_row.
-        let colored_icon = format!("{}{}{}{}", self.status.ansi(), BOLD, icon, RESET);
-        let label = self.status.label();
-        let colored_label = format!("{}{}{}", self.status.ansi(), label, RESET);
-        let mut out = plain
-            .replacen(icon, &colored_icon, 1)
-            .replacen(label, &colored_label, 1);
+        // Byte offsets: `Text::serialize` encodes the payload via `as_bytes()`,
+        // so a multi-byte marker or icon shifts everything after it.
+        let icon_at = marker.len() + 1 + (i + 1).to_string().len() + 1;
+        let icon_range = icon_at..icon_at + icon.len();
+        let label_at = icon_range.end + 1 + self.tool.chars().count().max(7) + 1;
+        let label_range = label_at..label_at + self.status.label().len();
+
+        let level = self.status.color_level();
+        let text = Text::new(text).color_range(level, icon_range).color_range(level, label_range);
         if selected {
-            out = format!("{}{}{}", SEL_BG, out, RESET);
+            text.selected()
+        } else {
+            text
         }
-        out.push_str(RESET);
-        out
     }
 
-    pub(crate) fn detail_line(&self, kill_armed: bool, cols: usize) -> String {
+    /// The dimmed second line under an agent.
+    pub(crate) fn detail_item(&self, kill_armed: bool, cols: usize) -> Text {
         let mut bits: Vec<String> = Vec::new();
         if kill_armed {
             bits.push("press x again to close pane".to_string());
@@ -101,7 +101,15 @@ impl Agent {
         if !self.alive {
             bits.push("(pane gone)".to_string());
         }
-        truncate(&format!("      \u{2514} {}", bits.join(" \u{b7} ")), cols)
+        // Indented under the row it belongs to, matching the documented layout.
+        let text = truncate(&format!("      \u{2514} {}", bits.join(" \u{b7} ")), cols);
+        let text = Text::new(text);
+        // A pending kill is the one thing here that must not read as chrome.
+        if kill_armed {
+            text.error_color_range(..)
+        } else {
+            text.color_range(DIM_LEVEL, ..)
+        }
     }
 
     pub(crate) fn project(&self) -> &str {
@@ -112,6 +120,7 @@ impl Agent {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+    use crate::util::testing::{is_selected, item_text};
 
     fn agent() -> Agent {
         Agent {
@@ -130,65 +139,61 @@ mod render_tests {
         }
     }
 
+    fn row(a: &Agent, i: usize, selected: bool, icon: &str, now: f64, cols: usize, cwd: bool) -> String {
+        item_text(&a.list_item(i, selected, icon, now, cols, cwd))
+    }
+
     #[test]
     fn row_contains_all_columns() {
-        let a = agent();
-        let row = a.plain_row(0, true, "\u{280b}", 134.0, 110, true);
-        for expect in [
-            "\u{25b6}",
-            "1",
-            "\u{280b}",
-            "claude",
-            "working",
-            "2m14s",
-            "api",
-            "Add retry to webhook client",
-        ] {
-            assert!(row.contains(expect), "row {:?} missing {:?}", row, expect);
+        let r = row(&agent(), 0, true, "\u{280b}", 134.0, 110, true);
+        for expect in ["1", "\u{280b}", "claude", "working", "2m14s", "api", "Add retry to webhook client"] {
+            assert!(r.contains(expect), "row {:?} missing {:?}", r, expect);
         }
     }
 
+    /// The selected row gets both the cursor glyph and the `x` highlight flag.
+    #[test]
+    fn selected_row_is_marked_and_flagged() {
+        let a = agent();
+        let sel = a.list_item(0, true, "\u{25cf}", 0.0, 110, true);
+        let unsel = a.list_item(0, false, "\u{25cf}", 0.0, 110, true);
+        assert!(is_selected(&sel));
+        assert!(!is_selected(&unsel));
+        assert!(item_text(&sel).starts_with('\u{25b6}'), "selected row leads with the cursor");
+        assert!(item_text(&unsel).starts_with(' '), "unselected row is blank there");
+    }
+
+    /// Zellij clips to the pane, but an over-long row would still push the task
+    /// summary past the edge, so the summary is budgeted against the width.
     #[test]
     fn row_never_exceeds_cols() {
         let mut a = agent();
         a.task = Some("A very long task summary that must be truncated to fit".into());
         for cols in [40usize, 50, 60, 80, 110] {
-            let row = a.plain_row(0, true, "\u{25cf}", 0.0, cols, cols >= 50);
-            assert!(
-                row.chars().count() <= cols,
-                "cols={} produced {} chars: {:?}",
-                cols,
-                row.chars().count(),
-                row
-            );
+            let r = row(&a, 0, true, "\u{25cf}", 0.0, cols, cols >= 50);
+            assert!(r.chars().count() <= cols, "cols={} produced {:?}", cols, r);
         }
     }
 
     #[test]
     fn narrow_panes_drop_cwd_and_task() {
         let a = agent();
-        let narrow = a.plain_row(0, false, "\u{25cf}", 0.0, 40, false);
-        assert!(!narrow.contains("api"), "cwd must be dropped when show_cwd=false");
-        let wide = a.plain_row(0, false, "\u{25cf}", 0.0, 110, true);
-        assert!(wide.contains("api"));
+        assert!(!row(&a, 0, false, "\u{25cf}", 0.0, 40, false).contains("api"));
+        assert!(row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains("api"));
     }
 
     #[test]
     fn detail_line_lists_activity_turns_tab_and_pane() {
-        let d = agent().detail_line(false, 110);
+        let d = item_text(&agent().detail_item(false, 110));
         assert!(d.contains("Edit src/webhook.rs"));
         assert!(d.contains("4 turns"));
-        assert!(
-            d.contains("tab:2"),
-            "tab is 0-indexed internally, displayed 1-based: {:?}",
-            d
-        );
+        assert!(d.contains("tab:2"), "tab is 0-indexed internally, shown 1-based: {:?}", d);
         assert!(d.contains("pane:3"));
     }
 
     #[test]
     fn kill_armed_replaces_activity_with_confirmation() {
-        let d = agent().detail_line(true, 110);
+        let d = item_text(&agent().detail_item(true, 110));
         assert!(d.contains("press x again"), "{:?}", d);
         assert!(!d.contains("Edit src/webhook.rs"));
     }
@@ -197,45 +202,23 @@ mod render_tests {
     fn dead_pane_is_flagged() {
         let mut a = agent();
         a.alive = false;
-        assert!(a.detail_line(false, 110).contains("(pane gone)"));
+        assert!(item_text(&a.detail_item(false, 110)).contains("(pane gone)"));
     }
 
     #[test]
     fn detail_line_respects_cols() {
         for cols in [30usize, 60, 110] {
-            let d = agent().detail_line(false, cols);
+            let d = item_text(&agent().detail_item(false, cols));
             assert!(d.chars().count() <= cols, "cols={} got {:?}", cols, d);
         }
     }
 
-    /// Rows must stay single-line; the caller emits one println per row.
+    /// One item is one grid line. An embedded newline would desync every
+    /// coordinate below it, which is exactly the bug this rewrite removed.
     #[test]
     fn rows_contain_no_embedded_newlines() {
         let a = agent();
-        let row = a.styled_row(0, true, "\u{280b}", 10.0, 110, true);
-        let detail = a.detail_line(false, 110);
-        assert!(!row.contains('\n'), "row must be a single line");
-        assert!(!detail.contains('\n'), "detail must be a single line");
-    }
-
-    #[test]
-    fn styled_row_preserves_plain_text_content() {
-        let a = agent();
-        let plain = a.plain_row(0, false, "\u{25cf}", 0.0, 110, true);
-        let styled = a.styled_row(0, false, "\u{25cf}", 0.0, 110, true);
-        let mut stripped = String::new();
-        let mut chars = styled.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                for c2 in chars.by_ref() {
-                    if c2 == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                stripped.push(c);
-            }
-        }
-        assert_eq!(stripped, plain);
+        assert!(!row(&a, 0, true, "\u{280b}", 10.0, 110, true).contains('\n'));
+        assert!(!item_text(&a.detail_item(false, 110)).contains('\n'));
     }
 }
