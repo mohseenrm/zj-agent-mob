@@ -1,7 +1,16 @@
 ## Pending tasks
 
-All clear. Recently completed:
+- [ ] System notifications when an agent needs you — investigated and specced in
+      [notifications.md](notifications.md), not implemented. Recommendation is `osascript`
+      via `run_command` with per-agent debouncing and burst coalescing, defaulting to
+      `waiting,failed`. Open: SSH sessions notify on the wrong machine.
 
+Recently completed:
+
+- [x] Full-feature demo recording ([demo.md](demo.md)): `demo/tour.gif`, linked from the README,
+      rendered by `./scripts/demo/render.sh`. Driven by `zellij action` from outside the session
+      rather than keystrokes, so it is reproducible. Still open: regenerating `docs/img/*.png`
+      under the current theme, a real-agent clip, and a `dump-screen` CI assertion job.
 - [x] Richer hook data, F1-F9 from [roadmap-ux.md](roadmap-ux.md): tool arguments on the
       detail line, real notification text, the turn's closing message, a `failed` state from
       `StopFailure`, compaction, a permission-mode badge, subagent fan-out counts, native task

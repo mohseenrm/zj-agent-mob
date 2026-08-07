@@ -7,7 +7,9 @@
 
 A Zellij plugin that monitors Claude Code and Codex agents running in your current session: live status, what each agent is working on, jump-to-pane, and ability to kill agents.
 
-![The agent list: one row per agent with status, elapsed time, project, and task, each with an indented detail line](docs/img/02-agent-list.png)
+![Agents appear as they start work, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm and install screen](demo/tour.gif)
+
+<sub>The full tour: agents appearing, subagent fan-out and task progress, a permission prompt approved without leaving the panel, every status, the two-step kill, and the install screen. Statuses here are piped in rather than driven by live agents, so the recording is reproducible - see [docs/demo.md](docs/demo.md).</sub>
 
 ## Contents
 
@@ -22,6 +24,11 @@ A Zellij plugin that monitors Claude Code and Codex agents running in your curre
   - [How it works: status transport, task summaries](docs/how-it-works.md)
   - [Local development](docs/development.md)
   - [Troubleshooting](docs/troubleshooting.md)
+  - [Recording the demo](docs/demo.md)
+  - Design notes:
+    - [Richer hook data and UX sketches](docs/roadmap-ux.md) (shipped)
+    - [Discovering agents that have not reported](docs/agent-discovery.md) (shipped)
+    - [System notifications when an agent needs you](docs/notifications.md) (proposed)
 
 ## Requirements
 
@@ -86,6 +93,10 @@ See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install 
 **Hooks installed, nothing running yet.** Start `claude` or `codex` in any pane and it appears here.
 
 ![The empty state telling you to start claude or codex in a pane](docs/img/00-empty.png)
+
+**The agent list.** One row per agent with status, elapsed time, project, and task, each with an indented detail line.
+
+![The agent list: one row per agent with status, elapsed time, project, and task, each with an indented detail line](docs/img/02-agent-list.png)
 
 **Killing an agent.** <kbd>x</kbd> sends an interrupt and arms the row; pressing it again closes the pane. The armed row says so in red, so the destructive step is never one keystroke away.
 
