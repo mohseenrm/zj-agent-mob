@@ -28,6 +28,7 @@ A Zellij plugin that monitors Claude Code and Codex agents running in your curre
   - Design notes:
     - [Richer hook data and UX sketches](docs/roadmap-ux.md) (shipped)
     - [Discovering agents that have not reported](docs/agent-discovery.md) (shipped)
+    - [Agents across Zellij sessions](docs/cross-session.md) (proposed)
     - [System notifications when an agent needs you](docs/notifications.md) (proposed)
 
 ## Requirements
@@ -36,21 +37,29 @@ A Zellij plugin that monitors Claude Code and Codex agents running in your curre
 |---|---|
 | Zellij 0.44+ | Plugin API (`LaunchOrFocusPlugin`, pipes, `RunCommandResult`) |
 | `jq` | The hook parses hook-event JSON; the installer merges settings |
+| `curl` or `wget` | Only for the one-line install; not needed from a clone |
 | Claude Code, Codex, or both | The agents being monitored |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
+
+> [!NOTE]
+> This repository is currently **private**, so the `curl` commands below return 404 until it is made public. Until then, install from a clone (1.B), or use `gh` - see [docs/setup.md](docs/setup.md#from-a-release).
 
 
 ## Quick start
 
-### 1.A. Download the prebuilt plugin from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest). 
-
-Use `gh` for downloading prebuilt releases ([details](docs/setup.md#from-a-release)):
+### 1.A. Install (no clone, no Rust toolchain)
 
 ```bash
-mkdir -p target/wasm32-wasip1/release
-gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
-  --pattern zj-agent-mob.wasm --dir target/wasm32-wasip1/release
-./init.sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+```
+
+This downloads the plugin and hook script for that release, wires up whichever of Claude Code and Codex you have, and leaves an installer at `~/.config/zj-agent-mob/install.sh` so the in-panel install screen works from then on.
+
+Prefer to read before running? Same thing in two steps:
+
+```bash
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh
+less init.sh && sh init.sh
 ```
 
 ### 1.B Or build it yourself:
@@ -60,6 +69,8 @@ rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
 ./init.sh
 ```
+
+From a clone, `./init.sh` uses your local build and downloads nothing.
 
 ### 2. Add keybinding to `~/.config/zellij/config.kdl`:
 

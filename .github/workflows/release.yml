@@ -47,6 +47,9 @@ jobs:
           [ "$tag" = "$crate" ] \
             || { echo "::error::tag $tag != Cargo.toml $crate"; exit 1; }
 
+      # The installer and hook ship as assets so a user can install without a
+      # clone: `init.sh` fetches its siblings from the same tag it was pulled
+      # from. Uploading them here is what makes `--from-release` resolvable.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,4 +57,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            target/wasm32-wasip1/release/zj-agent-mob.wasm
+            target/wasm32-wasip1/release/zj-agent-mob.wasm \
+            init.sh \
+            scripts/zj-agent-mob-hook.sh

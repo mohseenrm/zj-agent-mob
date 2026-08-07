@@ -1,6 +1,17 @@
 # Distribution spec: wasm + config, no external deps
 
-Status: proposal. Nothing here is implemented yet.
+Status: proposal, partially implemented.
+
+**Shipped.** The download step is gone. Releases now carry `init.sh` and
+`zj-agent-mob-hook.sh` alongside the wasm, and `init.sh` fetches whatever the source
+tree does not provide (`--from-release`, `--version`, `--no-download`), so installing is
+one `curl ... | sh` with no clone and no `mkdir -p target/wasm32-wasip1/release`. The
+self-copy now also works when the script is piped rather than run from a file, which was
+silently leaving the install screen with no installer to drive.
+
+**Still open.** Items 3-6 below (moving `jq` out of the hook and into the wasm) and the
+`https:` plugin URL, which needs the repo to be public. Item 1 remains the prerequisite
+for the `curl` path working for anyone but the repo owner.
 
 The goal: a user installs zj-agent-mob by adding a block to `~/.config/zellij/config.kdl`.
 No clone, no `curl`, no `jq`, no `init.sh`, no Rust toolchain. One wasm and one config file.

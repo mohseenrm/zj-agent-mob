@@ -8,8 +8,19 @@
 #   ./init.sh install claude     install one target only
 #   ./init.sh install claude codex   install several targets
 #   ./init.sh uninstall codex    remove one target only
+#   ./init.sh --from-release     fetch hook + plugin from a GitHub release
+#   ./init.sh --version v0.1.0   pin a release; implies --from-release
+#   ./init.sh --no-download      fail rather than fetch anything (offline)
 #
 # Targets: claude, codex, plugin. Omitting the target means all of them.
+#
+# Run without a clone, downloading everything it needs:
+#
+#   curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+#
+# By default only what the source tree lacks is downloaded: from a clone with a
+# built wasm nothing is fetched, and piped through `sh` (where there is no repo
+# alongside the script, and $0 is not a readable file) everything is.
 #
 # Writes the status hook into ~/.claude/settings.json and ~/.codex/hooks.json,
 # and copies the plugin to the zellij plugin dir. Also self-copies to
@@ -33,6 +44,22 @@ WASM_SRC="$WASM_DIR/zj-agent-mob.wasm"
 HOOK_DIR="${ZJ_AGENT_HOOK_DIR:-$HOME/.config/zj-agent-mob}"
 HOOK_DST="$HOOK_DIR/hook.sh"
 SELF_DST="$HOOK_DIR/install.sh"
+
+# Bumped by the release workflow's tag check along with Cargo.toml. Downloads
+# pin to this tag rather than `latest`: a `latest` wasm can outrun the hook
+# script that a half-finished install left on disk, and Zellij caches remote
+# plugins by URL, so a moving URL serves a stale binary until that cache clears.
+VERSION="${ZJ_AGENT_VERSION:-v0.1.0}"
+REPO="${ZJ_AGENT_REPO:-mohseenrm/zj-agent-mob}"
+# Overridable so the e2e suite can point at a local tree instead of the network.
+# Recomputed by --version below, so this is a function rather than a constant.
+release_url() {
+  if [ -n "${ZJ_AGENT_RELEASE_URL:-}" ]; then
+    printf '%s' "$ZJ_AGENT_RELEASE_URL"
+  else
+    printf 'https://github.com/%s/releases/download/%s' "$REPO" "$VERSION"
+  fi
+}
 
 # The command string written into the agents' settings files. Kept separate from
 # HOOK_DST (the real path, used for filesystem work) so settings can carry a
@@ -58,11 +85,28 @@ CODEX_HOOKS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 MODE=install
 DRY=0
 TARGET=all
+# auto: download only what the source tree does not provide. Forced to 1 by
+# --from-release, and to 0 by --no-download for an offline install.
+FETCH=auto
+# --version takes a value, so one iteration has to consume the next argument.
+WANT_VERSION=
 for arg in "$@"; do
+  if [ -n "$WANT_VERSION" ]; then
+    # Naming a version asks for that release specifically, so silently using a
+    # local build instead would install something other than what was asked for.
+    VERSION=$arg
+    FETCH=1
+    WANT_VERSION=
+    continue
+  fi
   case "$arg" in
     install)   MODE=install ;;
     uninstall) MODE=uninstall ;;
     status)    MODE=status ;;
+    --from-release) FETCH=1 ;;
+    --no-download)  FETCH=0 ;;
+    --version)      WANT_VERSION=1 ;;
+    --version=*)    VERSION=${arg#--version=}; FETCH=1 ;;
     # Targets accumulate, so `install claude codex` does both in one run. The
     # first explicit target replaces the "all" default rather than adding to it.
     claude|codex|plugin)
@@ -91,7 +135,46 @@ say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+[ -z "$WANT_VERSION" ] || die "--version needs a value, e.g. --version v0.1.0"
+
 command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
+
+# fetch <url> <dst> -- download to a temp file and move it into place, so an
+# interrupted transfer can never leave a truncated hook.sh looking installed.
+# Tries curl, then wget, then gh; gh last because it is the only one that
+# authenticates, which is what makes this work while the repo is still private.
+fetch() {
+  _url=$1
+  _dst=$2
+  _tmp="$_dst.zjdl"
+  mkdir -p "$(dirname "$_dst")"
+  if command -v curl >/dev/null 2>&1 && curl -fsSL -o "$_tmp" "$_url" 2>/dev/null; then
+    :
+  elif command -v wget >/dev/null 2>&1 && wget -qO "$_tmp" "$_url" 2>/dev/null; then
+    :
+  elif command -v gh >/dev/null 2>&1 &&
+       gh release download "$VERSION" --repo "$REPO" \
+          --pattern "$(basename "$_dst")" --output "$_tmp" --clobber 2>/dev/null; then
+    :
+  else
+    rm -f "$_tmp"
+    return 1
+  fi
+  mv "$_tmp" "$_dst"
+}
+
+# Where downloads land. Not $HOOK_DIR: the wasm does not belong there, and a
+# failed run should not leave debris next to the installed files.
+DL_DIR=""
+download_dir() {
+  if [ -z "$DL_DIR" ]; then
+    DL_DIR=$(mktemp -d) || die "could not create a temp dir for downloads"
+    # The plugin copy is read after this function returns, so cleanup waits
+    # until the script exits rather than happening inline.
+    trap 'rm -rf "$DL_DIR"' EXIT INT TERM
+  fi
+  printf '%s' "$DL_DIR"
+}
 
 # Resolve symlinks so we write through to the real file (e.g. a dotfiles repo).
 # `readlink -f` is GNU/BSD-modern; fall back to a portable loop for older systems.
@@ -328,12 +411,26 @@ if [ "$MODE" = uninstall ]; then
 fi
 
 # Reinstalling a single agent's hooks only needs the already-installed hook.sh,
-# so the source tree is optional there.
+# so the source tree is optional there. Failing that, fetch it: running the
+# script straight from a `curl` pipe has no repo alongside it at all.
 if [ ! -f "$HOOK_SRC" ]; then
-  if [ -x "$HOOK_DST" ]; then
+  if [ -x "$HOOK_DST" ] && [ "$FETCH" != 1 ]; then
+    HOOK_SRC=$HOOK_DST
+  elif [ "$FETCH" = 0 ]; then
+    die "hook script not found: $HOOK_SRC (and --no-download was given)"
+  elif [ "$DRY" = 1 ]; then
+    say "  [dry-run] would download hook.sh from $VERSION"
+    # Downstream only reads this path under DRY=0, so a placeholder keeps the
+    # dry run honest about the rest of the plan without touching the network.
     HOOK_SRC=$HOOK_DST
   else
-    die "hook script not found: $HOOK_SRC"
+    say "downloading zj-agent-mob-hook.sh ($VERSION)..."
+    _hook_dl="$(download_dir)/zj-agent-mob-hook.sh"
+    fetch "$(release_url)/zj-agent-mob-hook.sh" "$_hook_dl" \
+      || die "could not download the hook script from $(release_url)
+       Check the version ($VERSION) and your network, or clone the repo and
+       run ./init.sh from there."
+    HOOK_SRC=$_hook_dl
   fi
 fi
 
@@ -355,19 +452,51 @@ if [ "$DRY" = 0 ]; then
   chmod +x "$HOOK_DST"
   # Self-copy so the plugin's install screen has a stable path to drive,
   # independent of where this repo was cloned.
-  if same_file "$0" "$SELF_DST"; then
-    say "installer -> $SELF_DST (already current)"
+  #
+  # Piped through `sh` (`curl ... | sh`) there is no script file: $0 is "sh" and
+  # the source is a consumed stdin pipe, so there is nothing to copy. Without
+  # this fallback the install screen is left with no installer to drive, which
+  # is exactly the state that makes it report "Installer not found".
+  if [ -f "$0" ]; then
+    if same_file "$0" "$SELF_DST"; then
+      say "installer -> $SELF_DST (already current)"
+    else
+      cp "$0" "$SELF_DST"
+      say "installer -> $SELF_DST"
+    fi
+  elif [ "$FETCH" = 0 ]; then
+    warn "not running from a file and --no-download was given;"
+    warn "the install screen will have no installer to drive."
   else
-    cp "$0" "$SELF_DST"
-    say "installer -> $SELF_DST"
+    say "downloading install.sh ($VERSION)..."
+    if fetch "$(release_url)/init.sh" "$SELF_DST"; then
+      say "installer -> $SELF_DST"
+    else
+      warn "could not download the installer to $SELF_DST."
+      warn "The install screen will report it as missing until you re-run this"
+      warn "from a checkout, or re-run once the release is reachable."
+    fi
   fi
-  chmod +x "$SELF_DST"
+  # `[ ... ] && cmd` as the last statement of the block would make a false test
+  # the block's exit status, which `set -e` turns into an abort.
+  if [ -f "$SELF_DST" ]; then chmod +x "$SELF_DST"; fi
 else
   say "  [dry-run] would install hook -> $HOOK_DST"
   say "  [dry-run] would install installer -> $SELF_DST"
 fi
 
 if wants plugin; then
+  # No local build (or an explicit --from-release): pull the released wasm.
+  # Skipped under --dry-run so a preview never hits the network.
+  if { [ ! -f "$WASM_SRC" ] || [ "$FETCH" = 1 ]; } && [ "$FETCH" != 0 ] && [ "$DRY" = 0 ]; then
+    say "downloading zj-agent-mob.wasm ($VERSION)..."
+    _wasm_dl="$(download_dir)/zj-agent-mob.wasm"
+    if fetch "$(release_url)/zj-agent-mob.wasm" "$_wasm_dl"; then
+      WASM_SRC=$_wasm_dl
+    elif [ "$FETCH" = 1 ]; then
+      die "could not download the plugin from $(release_url)"
+    fi
+  fi
   if [ -f "$WASM_SRC" ]; then
     # Guard against installing a cdylib-only build: without `_start` Zellij fails
     # at load time with "could not find exported function".

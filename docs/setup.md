@@ -9,39 +9,40 @@
 
 ## Install
 
-Two options: download the prebuilt `zj-agent-mob.wasm` from a release, or build it yourself. Either way, `init.sh` does the rest, and `jq` is required for both.
+Two options: let `init.sh` download a release for you, or build the wasm yourself. `jq` is required either way.
 
 ### From a release
 
-Grab `zj-agent-mob.wasm` from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest) ([all releases](https://github.com/mohseenrm/zj-agent-mob/releases)). No Rust toolchain needed.
+Each release ships three assets: `init.sh`, `zj-agent-mob-hook.sh`, and `zj-agent-mob.wasm`. The installer fetches the two it needs from the same tag it was downloaded from, so one command is the whole install:
+
+```sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+```
+
+No clone, no Rust toolchain, no manual `target/` directory. To inspect the script first:
+
+```sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh
+less init.sh && sh init.sh
+```
 
 > [!NOTE]
-> This repository is **private**, so release assets need an authenticated download. Plain `curl` gets a 404 until the repo is public. The `gh` commands below work today; the `curl` ones become the simpler path once it is public.
+> This repository is currently **private**, so those `curl` commands return 404. Until it is public, use `gh`, which authenticates:
+>
+> ```sh
+> gh release download --repo mohseenrm/zj-agent-mob v0.1.0 --pattern init.sh
+> sh init.sh
+> ```
+>
+> `init.sh` falls back to `gh` for its own downloads too, so this works end to end today.
 
-`init.sh` reads the plugin from `target/wasm32-wasip1/release/`, so put the download there and it installs like a local build:
-
-```sh
-mkdir -p target/wasm32-wasip1/release
-gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
-  --pattern zj-agent-mob.wasm --dir target/wasm32-wasip1/release
-./init.sh
-```
-
-To skip the repo entirely, put the wasm directly into the plugin directory and install the hooks separately:
+Pin a different release with `--version`:
 
 ```sh
-mkdir -p ~/.config/zellij/plugins
-gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
-  --pattern zj-agent-mob.wasm --dir ~/.config/zellij/plugins
-./init.sh install claude codex   # hooks only; the plugin is already in place
+sh init.sh --version v0.2.0
 ```
 
-Once the repo is public, either download becomes a plain `curl` against the stable `latest` URL:
-
-```sh
-curl -fsSL -o target/wasm32-wasip1/release/zj-agent-mob.wasm \
-  https://github.com/mohseenrm/zj-agent-mob/releases/latest/download/zj-agent-mob.wasm
-```
+Naming a version always downloads that release, even if a local build is present, so you get what you asked for.
 
 ### From source
 
@@ -51,6 +52,8 @@ cargo build --release --target wasm32-wasip1
 ./init.sh
 ```
 
+From a clone with a local build, `init.sh` downloads nothing.
+
 `init.sh` installs the hook script, copies the plugin, and merges hook entries into `~/.claude/settings.json` and `~/.codex/hooks.json` without disturbing hooks you already have. It is idempotent, so re-running it is safe.
 
 ```sh
@@ -59,10 +62,15 @@ cargo build --release --target wasm32-wasip1
 ./init.sh install codex    # just Codex's hooks
 ./init.sh install plugin   # just copy the built wasm
 ./init.sh status           # what is installed right now
-./init.sh --dry-run        # preview, write nothing
+./init.sh --dry-run        # preview, write nothing (never downloads)
 ./init.sh uninstall        # remove exactly what was installed
 ./init.sh uninstall codex  # remove one target only
+./init.sh --from-release   # prefer the released wasm over a local build
+./init.sh --version v0.1.0 # pin a release; implies --from-release
+./init.sh --no-download    # fail rather than fetch anything (offline)
 ```
+
+By default the installer downloads only what the source tree does not already provide: from a clone with a built wasm it stays entirely local, and from a bare `init.sh` it fetches the hook and plugin. `--from-release` and `--no-download` force each end of that.
 
 > [!IMPORTANT]
 > Restart any running `claude` / `codex` sessions after installing. Hooks are read at session start, so existing sessions won't report status.

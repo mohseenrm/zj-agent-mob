@@ -176,6 +176,59 @@ bogus=$(printf '%s\n' "$out" | grep -cv '^[a-z]*=\(installed\|absent\)$' || true
 assert_eq "every status line is key=installed|absent" "$bogus" "0"
 
 echo
+echo "installing without a source tree"
+# The curl-pipe install: no repo beside the script, everything fetched. A
+# `file://` release URL keeps this offline and deterministic while still
+# exercising the real download path (curl and wget both speak file://).
+RELEASE_SRV="$WORK/release"
+mkdir -p "$RELEASE_SRV"
+cp "$ROOT/scripts/zj-agent-mob-hook.sh" "$RELEASE_SRV/"
+cp "$INIT" "$RELEASE_SRV/init.sh"
+printf 'fake wasm with _start export\n' > "$RELEASE_SRV/zj-agent-mob.wasm"
+export ZJ_AGENT_RELEASE_URL="file://$RELEASE_SRV"
+
+if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+  fresh
+  # Bare `sh < file` leaves $0 as "sh" and stdin consumed, which is exactly the
+  # shape of `curl ... | sh` and the case the self-copy fallback exists for.
+  ISOLATED="$WORK/isolated"
+  mkdir -p "$ISOLATED"
+  cp "$INIT" "$ISOLATED/init.sh"
+  ( cd "$ISOLATED" && sh < "$ISOLATED/init.sh" ) >"$WORK/out" 2>"$WORK/err" || true
+  status=$(sh "$INIT" status | tr '\n' ' ')
+  assert_contains "piped install hooks claude" "$status" "claude=installed"
+  assert_contains "piped install hooks codex" "$status" "codex=installed"
+  assert_contains "piped install fetches the plugin" "$status" "plugin=installed"
+  # The whole point: the install screen has an installer to drive afterwards.
+  assert_contains "piped install leaves a hook" "$status" "hook=installed"
+  if [ -x "$ZJ_AGENT_HOOK_DIR/install.sh" ]; then ok "piped install self-installs install.sh"; else
+    bad "piped install self-installs install.sh" "missing; install screen would report none"; fi
+
+  fresh
+  # --from-release must prefer the release even when a local build exists.
+  init install plugin --from-release || true
+  assert_contains "--from-release installs the plugin" \
+    "$(sh "$INIT" status | tr '\n' ' ')" "plugin=installed"
+
+  fresh
+  # ZJ_AGENT_RELEASE_URL pins the whole URL, so it has to go for --version to
+  # be the thing under test. Point at a directory that does not exist rather
+  # than a bad tag on github, which would make this case need the network.
+  rc=0
+  ( unset ZJ_AGENT_RELEASE_URL
+    ZJ_AGENT_RELEASE_URL="file://$WORK/no-such-release" \
+    sh "$INIT" install plugin --version v0.0.0-nope >/dev/null 2>&1 ) || rc=$?
+  assert_eq "an unresolvable version fails loudly" "$rc" "1"
+else
+  echo "  SKIP: neither curl nor wget available"
+fi
+unset ZJ_AGENT_RELEASE_URL
+
+fresh
+rc=0; sh "$INIT" --version >/dev/null 2>&1 || rc=$?
+assert_eq "--version without a value is rejected" "$rc" "1"
+
+echo
 echo "idempotence"
 fresh
 init install claude codex || true
@@ -300,14 +353,16 @@ cp "$INIT" "$UNBUILT/init.sh"
 cp "$ROOT/scripts/zj-agent-mob-hook.sh" "$UNBUILT/scripts/"
 
 fresh
-# Not built: the full install must still wire up the agents and only warn.
-sh "$UNBUILT/init.sh" install >/dev/null 2>&1 || true
+# --no-download keeps these offline. Without it an unbuilt tree now falls back
+# to fetching the release, so these cases would depend on the network and
+# quietly assert nothing when it is unavailable.
+sh "$UNBUILT/init.sh" install --no-download >/dev/null 2>&1 || true
 assert_contains "a missing wasm only warns during a full install" \
-  "$(sh "$UNBUILT/init.sh" install 2>&1 || true)" "plugin not built"
+  "$(sh "$UNBUILT/init.sh" install --no-download 2>&1 || true)" "plugin not built"
 assert_contains "the agents are installed anyway" \
   "$(sh "$INIT" status | tr '\n' ' ')" "claude=installed"
 # Asking for the plugin alone is explicit, so a missing build is a hard error.
-rc=0; sh "$UNBUILT/init.sh" install plugin >/dev/null 2>&1 || rc=$?
+rc=0; sh "$UNBUILT/init.sh" install plugin --no-download >/dev/null 2>&1 || rc=$?
 assert_eq "install plugin alone fails when unbuilt" "$rc" "1"
 
 fresh

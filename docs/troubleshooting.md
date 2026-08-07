@@ -106,7 +106,19 @@ firing. Work through these in order:
 
 ## The install screen says "Installer not found"
 
-The plugin drives `~/.config/zj-agent-mob/install.sh`, which `init.sh` puts there by copying itself. Run `./init.sh` from the repo once to bootstrap it.
+The plugin drives `~/.config/zj-agent-mob/install.sh`, which `init.sh` puts there. Nothing else creates it, so this means `init.sh` has never completed a run on this machine.
+
+The usual cause is a partial install: the wasm was copied into `~/.config/zellij/plugins/` by hand (or by an earlier `install plugin` run), so the panel loads, but the hook and installer were never written. `init.sh status` reports `hook=absent` in that state.
+
+Re-run the installer to bootstrap it:
+
+```sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+```
+
+or `./init.sh` from a clone. Then press <kbd>r</kbd> on the install screen to re-read state.
+
+Every install target shows `?` / "unknown" alongside this message: with no installer to run, the plugin genuinely cannot tell what is installed, so it reports nothing rather than guessing.
 
 ## The install screen shows `?` / "unknown" for everything
 
