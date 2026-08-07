@@ -88,11 +88,15 @@ esac
 # so tool events (which fire constantly) deliberately send an empty task and the
 # plugin treats empty as "leave unchanged".
 task=''
+# Stop usually hands us the turn's closing message directly, and that is cheaper
+# than any transcript read. It is not always present, so an empty result falls
+# through to the transcript below rather than reporting no task at all.
+[ "$event" = Stop ] && task=$(printf '%s' "$last_msg" | head -1)
 case "$event" in
-  # Stop hands us the turn's closing message directly, so no transcript read.
-  Stop) task=$(printf '%s' "$last_msg" | head -1) ;;
-  SessionStart|UserPromptSubmit)
-    if [ "$TOOL" = claude ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  Stop|SessionStart|UserPromptSubmit)
+    if [ -n "$task" ]; then
+      : # already have one from last_assistant_message
+    elif [ "$TOOL" = claude ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
       # Must be `tail -n` (lines), NOT `tail -c` (bytes): a byte cut lands mid-line
       # and jq aborts the whole stream on the partial record:
       #   jq: parse error: Invalid numeric literal at line 1, column 9
