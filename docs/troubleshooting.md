@@ -7,6 +7,7 @@
 - [The install screen shows `?` / "unknown" for everything](#the-install-screen-shows---unknown-for-everything)
 - [Zellij fails to load the plugin](#zellij-fails-to-load-the-plugin)
 - [`waiting` stays on screen after you've answered](#waiting-stays-on-screen-after-youve-answered)
+- [Approve / reject from the panel does nothing](#approve--reject-from-the-panel-does-nothing)
 - [Hooks landed in my dotfiles repo](#hooks-landed-in-my-dotfiles-repo)
 - [The panel is cramped or columns are missing](#the-panel-is-cramped-or-columns-are-missing)
 
@@ -114,6 +115,22 @@ cargo build --release --target wasm32-wasip1
 ## `waiting` stays on screen after you've answered
 
 Claude has no "permission granted" event, so `waiting` to `working` relies on the next tool-event heartbeat. If you set `ZJ_AGENT_HEARTBEAT=0`, `waiting` persists until the turn ends. That's the tradeoff for halving hook volume.
+
+## Approve / reject from the panel does nothing
+
+`a` and `r` only act when a prompt is actually parked for the selected agent, and the footer
+shows `a approve  r reject` only then. If a prompt never appears:
+
+1. **Is it enabled?** It is off by default. `ZJ_AGENT_APPROVE=1` must be set in the environment
+   the agent itself runs in, not the panel's. Check with `echo $ZJ_AGENT_APPROVE` in the agent's pane.
+2. **Did you restart the agent?** As with any hook change, it is read at session start.
+3. **Is `PermissionRequest` registered?** Run `./init.sh status`, or check that the event is
+   present and `async: false` in the settings file - an async hook cannot return a decision.
+4. **Did it time out?** The hook waits `ZJ_AGENT_APPROVE_TIMEOUT` seconds (default 30) and then
+   falls through to the agent's own in-pane prompt. That is the designed failure mode, not a bug.
+
+The panel writes the verdict to `$TMPDIR/zj-agent-mob/verdict.<pane_id>`; watch that path to see
+whether the keypress or the hook's read is the broken half.
 
 ## Hooks landed in my dotfiles repo
 

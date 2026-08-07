@@ -20,6 +20,13 @@ pub(crate) struct Agent {
     pub(crate) tab: Option<usize>,
     pub(crate) pane_title: String,
     pub(crate) alive: bool,
+    /// Non-default permission modes only; `default` is left empty.
+    pub(crate) perm_mode: String,
+    /// Subagents currently running, and the distinct types seen this turn.
+    pub(crate) subagents: u32,
+    pub(crate) subagent_types: Vec<String>,
+    pub(crate) tasks_total: u32,
+    pub(crate) tasks_done: u32,
 }
 
 impl Agent {
@@ -53,11 +60,25 @@ impl Agent {
         text.push(' ');
         text.push_str(&format!("{:<7} ", self.tool));
         let label_range = chars(&text)..chars(&text) + chars(label);
-        text.push_str(&format!("{:<7} {:>6}", label, fmt_elapsed(now - self.status_since)));
+        text.push_str(&format!("{:<9} {:>6}", label, fmt_elapsed(now - self.status_since)));
 
         if show_cwd {
             text.push_str(&format!("  {:<10}", truncate(self.project(), 10)));
         }
+        // Only rendered when the mode is risky enough to differ from `default`,
+        // and only when it fits: a narrow pane drops it like the other columns.
+        let badge = match self.perm_mode.is_empty() {
+            true => String::new(),
+            false => format!("[{}]", truncate(&self.perm_mode, 12)),
+        };
+        let mode_range = if !badge.is_empty() && text.chars().count() + 2 + chars(&badge) <= cols {
+            text.push_str("  ");
+            let start = chars(&text);
+            text.push_str(&badge);
+            Some(start..start + chars(&badge))
+        } else {
+            None
+        };
         let room = cols.saturating_sub(text.chars().count() + 2);
         if room > 6 {
             text.push_str("  ");
@@ -65,9 +86,15 @@ impl Agent {
         }
 
         let level = self.status.color_level();
-        let text = Text::new(text)
-            .color_range(level, icon_range)
-            .color_range(level, label_range);
+        let mut text = Text::new(text);
+        if self.status.is_error() {
+            text = text.error_color_range(icon_range).error_color_range(label_range);
+        } else {
+            text = text.color_range(level, icon_range).color_range(level, label_range);
+        }
+        if let Some(r) = mode_range {
+            text = text.color_range(2, r);
+        }
         if selected {
             text.selected()
         } else {
@@ -83,7 +110,16 @@ impl Agent {
         } else if let Some(d) = self.detail.as_deref().filter(|d| !d.is_empty()) {
             bits.push(d.to_string());
         }
-        if self.turns > 0 {
+        if self.subagents > 0 {
+            bits.push(match self.subagent_types.is_empty() {
+                true => format!("{} subagents", self.subagents),
+                false => format!("{} subagents: {}", self.subagents, self.subagent_types.join(", ")),
+            });
+        }
+        // Native task counts are a real progress signal; turns are a proxy.
+        if self.tasks_total > 0 {
+            bits.push(format!("{}/{} tasks", self.tasks_done, self.tasks_total));
+        } else if self.turns > 0 {
             bits.push(format!("{} turns", self.turns));
         }
         if let Some(t) = self.tab {
@@ -128,6 +164,11 @@ mod render_tests {
             tab: Some(1),
             pane_title: "claude".into(),
             alive: true,
+            perm_mode: String::new(),
+            subagents: 0,
+            subagent_types: Vec::new(),
+            tasks_total: 0,
+            tasks_done: 0,
         }
     }
 
@@ -236,6 +277,69 @@ mod render_tests {
         let d = item_text(&agent().detail_item(true, 110));
         assert!(d.contains("press x again"), "{:?}", d);
         assert!(!d.contains("Edit src/webhook.rs"));
+    }
+
+    #[test]
+    fn perm_mode_badge_shows_only_when_set() {
+        let mut a = agent();
+        assert!(!row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains('['));
+        a.perm_mode = "bypassPermissions".into();
+        assert!(row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains("[bypassPermi…]"));
+    }
+
+    /// The badge is an extra column, so the width contract must still hold.
+    #[test]
+    fn row_with_badge_never_exceeds_cols() {
+        let mut a = agent();
+        a.perm_mode = "bypassPermissions".into();
+        a.task = Some("A very long task summary that must be truncated to fit".into());
+        for cols in [40usize, 50, 60, 80, 110] {
+            let r = row(&a, 0, true, "\u{25cf}", 0.0, cols, cols >= 50);
+            assert!(r.chars().count() <= cols, "cols={} produced {:?}", cols, r);
+        }
+    }
+
+    #[test]
+    fn detail_line_lists_subagents_with_types() {
+        let mut a = agent();
+        a.subagents = 2;
+        a.subagent_types = vec!["Explore".into(), "Plan".into()];
+        let d = item_text(&a.detail_item(false, 110));
+        assert!(d.contains("2 subagents: Explore, Plan"), "{:?}", d);
+    }
+
+    #[test]
+    fn task_progress_replaces_turns() {
+        let mut a = agent();
+        a.tasks_total = 7;
+        a.tasks_done = 4;
+        let d = item_text(&a.detail_item(false, 110));
+        assert!(d.contains("4/7 tasks"), "{:?}", d);
+        assert!(!d.contains("4 turns"), "native counts win over the proxy: {:?}", d);
+    }
+
+    /// `failed` must not be paintable with a normal theme slot.
+    #[test]
+    fn failed_status_renders_as_error() {
+        let mut a = agent();
+        a.status = Status::Failed;
+        let r = row(&a, 0, false, "\u{2717}", 0.0, 110, true);
+        assert!(r.contains("failed"), "{:?}", r);
+        assert!(Status::Failed.is_error());
+        assert!(!Status::Working.is_error());
+    }
+
+    /// The label column widened to fit `idle-wait`; a narrower pad would shove
+    /// the elapsed column left on that one status only.
+    #[test]
+    fn long_status_label_does_not_shift_columns() {
+        let mut a = agent();
+        a.status = Status::IdleWait;
+        let wide = row(&a, 0, false, "\u{25d0}", 0.0, 110, true);
+        a.status = Status::Done;
+        let short = row(&a, 0, false, "\u{2713}", 0.0, 110, true);
+        let at = |s: &str| s.find("dotfiles").or_else(|| s.find("api"));
+        assert_eq!(at(&wide), at(&short), "project column must not move");
     }
 
     #[test]

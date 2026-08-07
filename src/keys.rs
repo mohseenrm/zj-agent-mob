@@ -167,6 +167,10 @@ impl State {
                 }
                 true
             }
+            // Approve / reject. `d` already means dismiss, so reject is `r`:
+            // a mis-keyed dismiss must never answer a permission prompt.
+            BareKey::Char('a') => self.answer_selected(true),
+            BareKey::Char('r') => self.answer_selected(false),
             BareKey::Char('d') => {
                 let now = self.now;
                 if let Some(agent) = self.agents.get_mut(self.selected) {

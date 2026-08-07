@@ -116,18 +116,18 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 |---|---|---|---|
 | `main.rs` | 6 | | `register_plugin!` + WASI entry point |
 | `lib.rs` | 33 | | Module wiring and shared constants |
-| `plugin.rs` | 260 | | Zellij lifecycle: permissions, subscriptions, `render` |
-| `state.rs` | 194 | 18 | State machine: pipe handling, pane reconciliation |
+| `plugin.rs` | 325 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box |
+| `state.rs` | 314 | 36 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation |
 | `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 191 | 12 | Keyboard: selection, jump-to-pane, two-step kill |
-| `agent.rs` | 111 | 10 | One agent, and how its row is built |
-| `ribbon.rs` | 65 | 7 | Ribbon line serialization |
-| `status.rs` | 55 | | The four states and their presentation |
+| `keys.rs` | 195 | 12 | Keyboard: selection, jump-to-pane, two-step kill, approve/reject |
+| `agent.rs` | 147 | 16 | One agent, and how its row is built |
+| `ribbon.rs` | 77 | 7 | Ribbon line serialization |
+| `status.rs` | 79 | | The seven states and their presentation |
 | `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
-| `host.rs` | 31 | | Host-call shim |
-| `style.rs` | 11 | | ANSI constants |
+| `host.rs` | 46 | | Host-call shim |
+| `style.rs` | 23 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover, 71 in total, none needing a running Zellij, plus 118 end-to-end cases across `tests/e2e-hook.sh` (41) and `tests/e2e-install.sh` (77).
+Line counts exclude tests. Tests live beside the code they cover, 95 in total, none needing a running Zellij, plus 168 end-to-end cases across `tests/e2e-hook.sh` (78) and `tests/e2e-install.sh` (90).
 
 Zellij host calls (`focus_terminal_pane`, `hide_self`, `run_command`, ...) are WASM imports with no native symbol, so they're behind the `host` shim that no-ops off-wasm. That keeps the whole state machine and all layout code unit-testable with a plain `cargo test`.
 

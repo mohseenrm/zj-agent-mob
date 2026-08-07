@@ -182,8 +182,10 @@ mkdir -p "$CX/sessions/2026/08/06"
 printf '%s\n' \
   '{"type":"event_msg","payload":{"type":"user_message","message":"Bump deps"}}' \
   > "$CX/sessions/2026/08/06/rollout-2026-08-06-sess-9.jsonl"
+# Stop now takes its summary from the payload, so the rollout is read on the
+# turn-opening events instead.
 assert_contains "codex reads the session rollout" \
-  "$(run '{"hook_event_name":"Stop","session_id":"sess-9"}' \
+  "$(run '{"hook_event_name":"UserPromptSubmit","session_id":"sess-9"}' \
       ZJ_AGENT_TOOL=codex CODEX_HOME="$CX")" \
   "task=Bump deps"
 assert_contains "codex without a rollout still reports" \
@@ -195,15 +197,16 @@ echo
 echo "sanitizing (--args is comma-separated, so commas and newlines break it)"
 printf '%s\n' '{"type":"ai-title","aiTitle":"fix a, b and c"}' > "$TR"
 out=$(run "{\"hook_event_name\":\"Stop\",\"transcript_path\":\"$TR\"}")
-# One comma per key=value pair and no more: a comma inside the task would be
-# read by the plugin as the start of a new key.
-# 7 key=value pairs means exactly 6 separators. A comma surviving in the task
-# would push this higher and the plugin would read the tail as a new key.
-n=$(printf '%s' "$out" | sed 's/[^,]//g' | tr -d '\n' | wc -c | tr -d ' ')
-if [ "$n" = "6" ]; then
+# Every comma in --args must separate two key=value pairs. A comma surviving
+# inside a value leaves a fragment with no `=`, which the plugin reads as a new
+# key. Asserting the invariant rather than a pair count keeps this test honest
+# as fields are added.
+args=$(printf '%s' "$out" | sed -n 's/.*--args \(.*\)/\1/p' | tr -d "'")
+bad_field=$(printf '%s' "$args" | tr ',' '\n' | grep -v '=' || true)
+if [ -z "$bad_field" ]; then
   ok "commas in the task are stripped"
 else
-  bad "commas in the task are stripped" "expected 6 separators, saw $n in: $out"
+  bad "commas in the task are stripped" "fragment without a key: [$bad_field] in: $out"
 fi
 
 printf '%s\n' '{"type":"ai-title","aiTitle":"line one\nline two"}' > "$TR"
@@ -293,6 +296,168 @@ if [ -e "$LOGHOME2/.cache/zj-agent-mob/hook.log" ]; then
   bad "debug off writes nothing" "log created without ZJ_AGENT_DEBUG=1"
 else
   ok "debug off writes nothing"
+fi
+
+echo
+echo "richer payload fields"
+
+# F1: the tool argument, not just the tool name.
+assert_contains "tool_input.file_path reaches detail" \
+  "$(run '{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"src/webhook.rs"}}')" \
+  "detail=Edit src/webhook.rs"
+assert_contains "tool_input.command reaches detail" \
+  "$(run '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"}}')" \
+  "detail=Bash cargo test"
+assert_contains "a tool with no known argument still reports its name" \
+  "$(run '{"hook_event_name":"PreToolUse","tool_name":"Glob","tool_input":{}}')" \
+  "detail=Glob"
+
+# F3: Stop carries the closing message, so no transcript read is needed.
+assert_contains "Stop takes its task from last_assistant_message" \
+  "$(run '{"hook_event_name":"Stop","last_assistant_message":"Found 3 issues in the render path"}')" \
+  "task=Found 3 issues in the render path"
+assert_contains "only the first line of the closing message is used" \
+  "$(run '{"hook_event_name":"Stop","last_assistant_message":"first line\nsecond line"}')" \
+  "task=first line"
+
+# F2: a real prompt is `waiting`; an idle nudge is not the same thing.
+assert_contains "permission_prompt maps to waiting" \
+  "$(run '{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Bash wants to run rm -rf"}')" \
+  "status=waiting"
+assert_contains "notification text reaches detail" \
+  "$(run '{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Bash wants to run rm -rf"}')" \
+  "detail=Bash wants to run rm -rf"
+assert_contains "idle_prompt maps to idlewait" \
+  "$(run '{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"waiting for input"}')" \
+  "status=idlewait"
+
+# F4: a stopped agent must not keep reporting `working`.
+assert_contains "StopFailure maps to failed" \
+  "$(run '{"hook_event_name":"StopFailure","error_type":"rate_limit","error_message":"rate limited, retry in 30s"}')" \
+  "status=failed"
+assert_contains "the failure reason reaches detail" \
+  "$(run '{"hook_event_name":"StopFailure","error_type":"rate_limit","error_message":"rate limited, retry in 30s"}')" \
+  "detail=rate limited"
+assert_contains "a failure with no message falls back to the type" \
+  "$(run '{"hook_event_name":"StopFailure","error_type":"overloaded"}')" \
+  "detail=overloaded"
+
+# F6
+assert_contains "PreCompact maps to compact" \
+  "$(run '{"hook_event_name":"PreCompact","trigger":"auto"}')" "status=compact"
+assert_contains "compaction names its trigger" \
+  "$(run '{"hook_event_name":"PreCompact","trigger":"manual"}')" "detail=compacting context (manual)"
+assert_contains "PostCompact returns to working" \
+  "$(run '{"hook_event_name":"PostCompact","trigger":"auto"}')" "status=working"
+
+# F7: `default` is the common case and must stay off the row.
+assert_contains "a risky permission mode is forwarded" \
+  "$(run '{"hook_event_name":"UserPromptSubmit","permission_mode":"bypassPermissions"}')" \
+  "perm_mode=bypassPermissions"
+assert_contains "the default permission mode is suppressed" \
+  "$(run '{"hook_event_name":"UserPromptSubmit","permission_mode":"default"}')" \
+  "perm_mode=,"
+
+# F5 / F8: counter events carry a delta and no status, so they never
+# overwrite the parent pane's own state.
+sub=$(run '{"hook_event_name":"SubagentStart","agent_type":"Explore"}')
+assert_contains "SubagentStart sends a positive delta" "$sub" "subagent_delta=1"
+assert_contains "SubagentStart names the agent type" "$sub" "agent_type=Explore"
+assert_contains "SubagentStart carries no status" "$sub" "status=,"
+assert_contains "SubagentStop sends a negative delta" \
+  "$(run '{"hook_event_name":"SubagentStop","agent_type":"Explore"}')" "subagent_delta=-1"
+assert_contains "TaskCreated sends a task delta" \
+  "$(run '{"hook_event_name":"TaskCreated","task_title":"Write the tests"}')" "task_delta=1"
+assert_contains "TaskCompleted sends a done delta" \
+  "$(run '{"hook_event_name":"TaskCompleted"}')" "task_done_delta=1"
+
+# The heartbeat switch has to cover the new chatty events too, or turning it
+# off still leaves a fan-out firing several times a second.
+for ev in SubagentStart SubagentStop TaskCreated TaskCompleted PostToolUseFailure; do
+  assert_empty "heartbeat=0 silences $ev" \
+    "$(run "{\"hook_event_name\":\"$ev\"}" ZJ_AGENT_HEARTBEAT=0)"
+done
+
+# Shell metacharacters in the new fields must not reach the shell. The single
+# quotes are deliberate: the payload must stay unexpanded so the hook is what
+# decides whether it ever runs.
+# shellcheck disable=SC2016
+assert_contains "injection through the notification message is neutralised" \
+  "$(run '{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"$(touch /tmp/zj-pwned)"}')" \
+  "status=waiting"
+if [ -e /tmp/zj-pwned ]; then
+  bad "injection through the notification message is neutralised" "command executed"
+  rm -f /tmp/zj-pwned
+fi
+
+echo
+echo "answering permission prompts from the panel (opt-in)"
+
+# The default must stay non-blocking: an unconfigured install can never have a
+# hook that waits on a panel the user may not even have open.
+perm='{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf node_modules"}}'
+out=$(run "$perm")
+assert_contains "PermissionRequest still reports waiting" "$out" "status=waiting"
+case "$out" in
+  *agent-ask*) bad "approval is off by default" "sent agent-ask without ZJ_AGENT_APPROVE=1" ;;
+  *) ok "approval is off by default" ;;
+esac
+
+# With the flag on, the hook parks a prompt and waits for a verdict.
+out=$(run "$perm" ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=1)
+assert_contains "approval mode sends agent-ask" "$out" "agent-ask"
+assert_contains "the ask names a verdict file" "$out" "verdict_file="
+assert_contains "the ask carries the command being approved" "$out" "tool_arg=rm -rf node_modules"
+
+# Timing out must fall through to the agent's own prompt, not emit a decision.
+stdout_only() {
+  ZJ_TEST_CAPTURE="$WORK/capture.$$"
+  export ZJ_TEST_CAPTURE
+  : > "$ZJ_TEST_CAPTURE"
+  env ZELLIJ_PANE_ID=3 ZJ_AGENT_PLUGIN=file:/plugin.wasm \
+      ZJ_TEST_CAPTURE="$ZJ_TEST_CAPTURE" "$@" \
+      sh "$HOOK" <<EOF 2>/dev/null || true
+$perm
+EOF
+}
+decision=$(stdout_only ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=1)
+if [ -z "$decision" ]; then
+  ok "a timeout emits no decision and falls through"
+else
+  bad "a timeout emits no decision and falls through" "got: $decision"
+fi
+
+# A verdict dropped by the panel becomes the documented decision JSON. The
+# hook clears the file first, so it is planted by a helper racing the poll.
+approve_with() {
+  _want=$1
+  ZJ_TEST_CAPTURE="$WORK/capture.$$"
+  export ZJ_TEST_CAPTURE
+  : > "$ZJ_TEST_CAPTURE"
+  _vf="${TMPDIR:-/tmp}/zj-agent-mob/verdict.3"
+  ( sleep 1; mkdir -p "$(dirname "$_vf")"; printf '%s' "$_want" > "$_vf" ) &
+  _planter=$!
+  env ZELLIJ_PANE_ID=3 ZJ_AGENT_PLUGIN=file:/plugin.wasm \
+      ZJ_TEST_CAPTURE="$ZJ_TEST_CAPTURE" ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=8 \
+      sh "$HOOK" <<EOF 2>/dev/null || true
+$perm
+EOF
+  wait "$_planter" 2>/dev/null || true
+}
+assert_contains "an allow verdict becomes an allow decision" \
+  "$(approve_with allow)" '"behavior":"allow"'
+assert_contains "a deny verdict becomes a deny decision" \
+  "$(approve_with deny)" '"behavior":"deny"'
+
+# A blocking hook that can exit non-zero would fail the tool call outright.
+if env ZELLIJ_PANE_ID=3 ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=1 \
+       ZJ_TEST_CAPTURE="$WORK/capture.exit" sh "$HOOK" <<EOF >/dev/null 2>&1
+$perm
+EOF
+then
+  ok "the approval path still exits 0"
+else
+  bad "the approval path still exits 0" "non-zero exit would fail the tool call"
 fi
 
 echo

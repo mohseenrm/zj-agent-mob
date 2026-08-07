@@ -1,5 +1,10 @@
 # Richer agent info: UX sketches and hook feasibility
 
+> [!NOTE]
+> **F1-F9 are implemented.** F10 was skipped by decision (Claude sends no model field, so the
+> column would be permanently blank for half the rows). This doc is kept as the design record;
+> [how-it-works.md](how-it-works.md) documents what actually shipped.
+
 A design doc for pairing. It works in three passes:
 
 1. [What each hook system actually gives us](#1-what-the-hooks-actually-give-us) - the raw material.
@@ -291,18 +296,18 @@ recommend skipping unless Claude adds the field.
 
 Cost is implementation surface: **hook** = shell only, **hook+ui** = also Rust.
 
-| # | Feature | Both tools | Cost | Value | Verdict |
+| # | Feature | Both tools | Cost | Value | Status |
 |---|---|:--:|---|---|---|
-| F1 | Tool detail with args | yes | hook | high | **Do first** |
-| F3 | Final message on done | yes | hook | high | **Do first** |
-| F2 | Real notification text | claude+partial | hook | high | **Do first** |
-| F4 | Failure state | claude only | hook+ui | very high | **Do next** |
-| F7 | Permission mode badge | yes | hook+ui | medium | Do next |
-| F6 | Compaction | yes | hook | medium | Do next |
-| F5 | Subagent fan-out | yes | hook+ui | high | Later - biggest UI change |
-| F8 | Native task progress | claude only | hook+ui | medium | Later |
-| F9 | Approve from panel | yes | hook+ui+protocol | very high | Spike separately |
-| F10 | Model badge | codex only | hook+ui | low | Skip |
+| F1 | Tool detail with args | yes | hook | high | **Shipped** |
+| F3 | Final message on done | yes | hook | high | **Shipped** |
+| F2 | Real notification text | claude+partial | hook | high | **Shipped** |
+| F4 | Failure state | claude only | hook+ui | very high | **Shipped** |
+| F7 | Permission mode badge | yes | hook+ui | medium | **Shipped** |
+| F6 | Compaction | yes | hook | medium | **Shipped** |
+| F5 | Subagent fan-out | yes | hook+ui | high | **Shipped** (flat count) |
+| F8 | Native task progress | claude only | hook+ui | medium | **Shipped** |
+| F9 | Approve from panel | yes | hook+ui+protocol | very high | **Shipped** (opt-in) |
+| F10 | Model badge | codex only | hook+ui | low | Skipped by decision |
 
 ### Suggested first slice
 
@@ -323,13 +328,25 @@ that lands on the turn's critical path, since `async` is not implemented.
 
 ## 4. Open questions
 
-- **F4 asymmetry.** Build a `failed` status that only Claude can ever reach? The failure mode
-  is bad enough to justify it, but it is the first place the two tools visibly diverge.
-- **F5 nesting.** Does a subagent get its own row, or a child line under the parent? Child lines
-  keep the "one row per pane" model intact; own rows break it but make counts meaningful.
-- **F9 `d` rebinding.** `d` is dismiss today. Approve/deny needs keys that cannot be fat-fingered
-  into a destructive action.
-- **Idle-wait threshold.** F2's `idle-wait` needs a duration before it stops being `waiting`.
-  Claude's `idle_prompt` fires on its own schedule - do we trust it or apply our own?
-- **`turn_id`.** Codex sends it, Claude does not. Could give an exact turn count instead of the
+Resolved during implementation:
+
+- **F4 asymmetry.** Built. A Codex agent that dies to a rate limit still shows the old (wrong)
+  `working`, but fixing it for one tool beat fixing it for neither.
+- **F5 nesting.** Flat count on the detail line (`3 subagents: Explore, Plan`), not child rows.
+  Keeps the one-row-per-pane model, which the whole pane-reconciliation path depends on.
+  Per-subagent rows remain possible later.
+- **F9 key binding.** Reject is <kbd>r</kbd>, not <kbd>d</kbd>. `d` stays dismiss, so a mis-keyed
+  dismiss can never answer a permission prompt. Approve/reject only appear in the footer while a
+  prompt is actually parked.
+- **Idle-wait threshold.** Trusts Claude's own `idle_prompt` schedule rather than adding a second
+  timer. One less thing to tune, and the agent knows better than the panel does.
+
+Still open:
+
+- **`turn_id`.** Codex sends it, Claude does not. Would give an exact turn count instead of the
   inferred `turns`, but only for one tool.
+- **F9 on Codex.** The protocol is supported and the code path is shared, but it is untested
+  against a real Codex binary - Codex parses `async` without implementing it, so a slow verdict
+  sits on the turn's critical path. The timeout bounds it; real-world feel is unverified.
+- **Multiple queued prompts.** One parked prompt per pane. A second replaces the first, which is
+  right for a single agent but untested against an agent that prompts twice in quick succession.

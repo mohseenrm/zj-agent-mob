@@ -52,7 +52,7 @@ impl ZellijPlugin for State {
                 self.frame = self.frame.wrapping_add(1);
                 self.now += TICK;
                 self.arm_timer();
-                self.agents.iter().any(|a| a.status == Status::Working)
+                self.agents.iter().any(|a| a.status.is_active())
             }
             Event::PaneUpdate(manifest) => {
                 self.reconcile(manifest);
@@ -72,6 +72,7 @@ impl ZellijPlugin for State {
         match pipe_message.name.as_str() {
             "agent-status" => self.handle_status(&pipe_message.args),
             "agent-label" => self.handle_label(&pipe_message.args),
+            "agent-ask" => self.handle_ask(&pipe_message.args),
             _ => false,
         }
     }
@@ -107,6 +108,39 @@ impl ZellijPlugin for State {
         }
         self.render_list(rows, width);
     }
+}
+
+/// The boxed permission prompt shown under its agent's row. Indented to line up
+/// with the detail line so it reads as belonging to that agent.
+pub(crate) fn ask_rows(ask: &crate::state::Ask, cols: usize) -> Vec<Text> {
+    const INDENT: &str = "        ";
+    let inner = cols.saturating_sub(INDENT.len() + 4).clamp(8, 60);
+    let bar = "\u{2500}".repeat(inner + 2);
+
+    let head = truncate(&ask.tool_name, inner);
+    let body = truncate(&ask.tool_arg, inner);
+    let keys = "a approve    r reject    \u{21b5} jump to pane";
+
+    let mut rows = vec![
+        Text::new(format!("{}\u{250c}{}\u{2510}", INDENT, bar)).color_range(DIM_LEVEL, ..),
+        Text::new(format!("{}\u{2502} {:<w$} \u{2502}", INDENT, head, w = inner)),
+    ];
+    if !body.is_empty() {
+        // The command being approved is the one thing here that must not read
+        // as chrome: it is what the user is actually deciding about.
+        rows.push(Text::new(format!("{}\u{2502} {:<w$} \u{2502}", INDENT, body, w = inner)).error_color_range(..));
+    }
+    rows.push(
+        Text::new(format!(
+            "{}\u{2502} {:<w$} \u{2502}",
+            INDENT,
+            truncate(keys, inner),
+            w = inner
+        ))
+        .color_range(DIM_LEVEL, ..),
+    );
+    rows.push(Text::new(format!("{}\u{2514}{}\u{2518}", INDENT, bar)).color_range(DIM_LEVEL, ..));
+    rows
 }
 
 impl State {
@@ -148,12 +182,17 @@ impl State {
     }
 
     fn render_list(&self, rows: usize, width: usize) {
-        let (waiting, working, done) = self.counts();
-        let parts = [
+        let (failed, waiting, working, done) = self.counts();
+        // A zero failure count is omitted so the common case reads unchanged.
+        let mut parts = Vec::new();
+        if failed > 0 {
+            parts.push((failed, "failed", Status::Failed));
+        }
+        parts.extend([
             (waiting, "waiting", Status::Waiting),
             (working, "working", Status::Working),
             (done, "done", Status::Done),
-        ];
+        ]);
 
         // Built up incrementally so each count's colour range tracks the digits
         // actually written; a two-digit count shifts everything after it.
@@ -166,14 +205,19 @@ impl State {
             let digits = n.to_string();
             // Character offsets: the `\u{b7}` separator is multi-byte, so byte
             // offsets would drift right by one per separator already written.
-            ranges.push((status.color_level(), chars(&head)..chars(&head) + digits.len()));
+            let range = chars(&head)..chars(&head) + digits.len();
+            ranges.push((status.color_level(), status.is_error(), range));
             head.push_str(&digits);
             head.push(' ');
             head.push_str(label);
         }
-        let head = ranges
-            .into_iter()
-            .fold(Text::new(head), |t, (level, r)| t.color_range(level, r));
+        let head = ranges.into_iter().fold(Text::new(head), |t, (level, is_err, r)| {
+            if is_err {
+                t.error_color_range(r)
+            } else {
+                t.color_range(level, r)
+            }
+        });
         print_text_with_coordinates(head, 0, 0, None, None);
         let mut y = self.render_rule(1, width);
 
@@ -188,10 +232,25 @@ impl State {
             if detail_lines {
                 items.push(agent.detail_item(self.kill_armed == Some(agent.pane_id), width));
             }
+            // The prompt belongs to one agent, so it renders under that row.
+            if i == self.selected {
+                if let Some(ask) = self.ask_for(agent.pane_id) {
+                    items.extend(ask_rows(ask, width));
+                }
+            }
         }
         y = self.render_rows(items, y);
         y = self.render_rule(y, width);
-        self.render_hints(ribbon::LIST_HINTS, y, width);
+        let selected_has_ask = self
+            .agents
+            .get(self.selected)
+            .is_some_and(|a| self.ask_for(a.pane_id).is_some());
+        let hints = if selected_has_ask {
+            ribbon::ASK_HINTS
+        } else {
+            ribbon::LIST_HINTS
+        };
+        self.render_hints(hints, y, width);
     }
 
     /// One row per `Text`, each at its own `y`. Returns the next free row.

@@ -10,6 +10,8 @@
 #   ZJ_AGENT_HEARTBEAT   0 disables PreToolUse/PostToolUse status refresh
 #   ZJ_AGENT_PLUGIN      override plugin path
 #   ZJ_AGENT_DEBUG       1 logs to ~/.cache/zj-agent-mob/hook.log
+#   ZJ_AGENT_APPROVE     1 enables answering permission prompts from the panel
+#   ZJ_AGENT_APPROVE_TIMEOUT  seconds to wait for a verdict (default 30)
 
 # SC2154: event, session_id, cwd, transcript and tool_name are all assigned by
 # the `eval` of jq's @sh output below, which shellcheck cannot follow.
@@ -29,24 +31,56 @@ json=$(cat)
 [ -n "$json" ] || exit 0
 
 # @sh quoting keeps values safe to eval even with spaces/quotes in cwd or tool names.
+#
+# tool_arg is the most identifying argument of a tool call: the file for an
+# edit, the command for a shell, the pattern for a search. Codex nests the same
+# shape under .tool_input, so one expression serves both agents.
 eval "$(printf '%s' "$json" | jq -r '
   @sh "event=\(.hook_event_name // "")
        session_id=\(.session_id // "")
        cwd=\(.cwd // "")
        transcript=\(.transcript_path // "")
-       tool_name=\(.tool_name // "")"' 2>/dev/null)"
+       tool_name=\(.tool_name // "")
+       tool_arg=\(.tool_input.file_path // .tool_input.command
+                  // .tool_input.pattern // .tool_input.path
+                  // .tool_input.url // .tool_input.description // "")
+       last_msg=\(.last_assistant_message // "")
+       notif=\(.message // "")
+       notif_type=\(.notification_type // "")
+       perm_mode=\(.permission_mode // "")
+       agent_type=\(.agent_type // "")
+       err_type=\(.error_type // "")
+       err_msg=\(.error_message // "")
+       compact_trigger=\(.trigger // "")"' 2>/dev/null)"
 
 [ -n "$event" ] || exit 0
 
+# Events that fire per-subagent would otherwise overwrite the parent pane's row:
+# both share one $ZELLIJ_PANE_ID. They report a delta instead, below.
 case "$event" in
-  SessionStart)                   status=idle ;;
-  UserPromptSubmit)               status=working ;;
-  Notification|PermissionRequest) status=waiting ;;
+  SessionStart)      status=idle ;;
+  UserPromptSubmit)  status=working ;;
+  Notification)
+    # idle_prompt means abandoned, not blocked; only a real prompt is `waiting`.
+    case "$notif_type" in
+      idle_prompt|agent_needs_input) status=idlewait ;;
+      *)                             status=waiting ;;
+    esac ;;
+  PermissionRequest) status=waiting ;;
   PreToolUse|PostToolUse)
     [ "${ZJ_AGENT_HEARTBEAT:-1}" = "0" ] && exit 0
     status=working ;;
-  Stop)                           status='done' ;;
-  SessionEnd)                     status=ended ;;
+  PostToolUseFailure)
+    [ "${ZJ_AGENT_HEARTBEAT:-1}" = "0" ] && exit 0
+    status=working ;;
+  Stop)              status='done' ;;
+  StopFailure)       status=failed ;;
+  PreCompact)        status=compact ;;
+  PostCompact)       status=working ;;
+  SubagentStart|SubagentStop|TaskCreated|TaskCompleted)
+    [ "${ZJ_AGENT_HEARTBEAT:-1}" = "0" ] && exit 0
+    status='' ;;
+  SessionEnd)        status=ended ;;
   *) exit 0 ;;
 esac
 
@@ -55,7 +89,9 @@ esac
 # plugin treats empty as "leave unchanged".
 task=''
 case "$event" in
-  SessionStart|UserPromptSubmit|Stop)
+  # Stop hands us the turn's closing message directly, so no transcript read.
+  Stop) task=$(printf '%s' "$last_msg" | head -1) ;;
+  SessionStart|UserPromptSubmit)
     if [ "$TOOL" = claude ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
       # Must be `tail -n` (lines), NOT `tail -c` (bytes): a byte cut lands mid-line
       # and jq aborts the whole stream on the partial record:
@@ -80,18 +116,96 @@ esac
 sanitize() {
   printf '%s' "$1" | tr '\n\r\t,' '    ' | cut -c1-60 | sed 's/  */ /g; s/^ *//; s/ *$//'
 }
+
+# The detail line: the most specific thing we can say about this instant.
+case "$event" in
+  Notification)
+    detail=$notif ;;
+  StopFailure)
+    detail=${err_msg:-$err_type} ;;
+  PreCompact)
+    detail="compacting context (${compact_trigger:-auto})" ;;
+  PermissionRequest)
+    detail="needs approval: ${tool_arg:-$tool_name}" ;;
+  PreToolUse|PostToolUse|PostToolUseFailure)
+    detail=$tool_name
+    [ -n "$tool_arg" ] && detail="$tool_name $tool_arg"
+    [ "$event" = PostToolUseFailure ] && detail="$detail (failed)" ;;
+  *)
+    detail='' ;;
+esac
+
 task=$(sanitize "$task")
-detail=$(sanitize "$tool_name")
+detail=$(sanitize "$detail")
+
+# Counter deltas rather than absolute values: the hook is stateless, and each
+# event only knows that one more thing started or finished.
+subagent_delta=0
+task_delta=0
+task_done_delta=0
+case "$event" in
+  SubagentStart)  subagent_delta=1 ;;
+  SubagentStop)   subagent_delta=-1 ;;
+  TaskCreated)    task_delta=1 ;;
+  TaskCompleted)  task_done_delta=1 ;;
+esac
+
+# `default` is the common case and would be noise on every row.
+[ "$perm_mode" = default ] && perm_mode=''
+agent_type=$(sanitize "$agent_type")
+perm_mode=$(sanitize "$perm_mode")
 
 if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
   mkdir -p "$HOME/.cache/zj-agent-mob"
-  printf '%s pane=%s tool=%s event=%s status=%s task=[%s]\n' \
-    "$(date +%H:%M:%S)" "$ZELLIJ_PANE_ID" "$TOOL" "$event" "$status" "$task" \
+  printf '%s pane=%s tool=%s event=%s status=%s task=[%s] detail=[%s]\n' \
+    "$(date +%H:%M:%S)" "$ZELLIJ_PANE_ID" "$TOOL" "$event" "$status" "$task" "$detail" \
     >> "$HOME/.cache/zj-agent-mob/hook.log"
 fi
 
 zellij pipe --name agent-status --plugin "$PLUGIN" \
-  --args "pane_id=$ZELLIJ_PANE_ID,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail" \
+  --args "pane_id=$ZELLIJ_PANE_ID,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta" \
   >/dev/null 2>&1 || true
+
+# Answering a permission prompt from the panel. Opt-in, because this is the one
+# path where the hook deliberately blocks the agent's turn.
+#
+# The plugin cannot write to stdin of an already-running process, so the verdict
+# travels through a file it drops via `run_command`. Timing out falls through to
+# the agent's own prompt, which is why every failure here is silent: the worst
+# case must be the normal interactive experience, never a wedged turn.
+if [ "$event" = PermissionRequest ] && [ "${ZJ_AGENT_APPROVE:-0}" = "1" ]; then
+  vdir="${TMPDIR:-/tmp}/zj-agent-mob"
+  vfile="$vdir/verdict.$ZELLIJ_PANE_ID"
+  mkdir -p "$vdir" 2>/dev/null || true
+  rm -f "$vfile" 2>/dev/null || true
+
+  zellij pipe --name agent-ask --plugin "$PLUGIN" \
+    --args "pane_id=$ZELLIJ_PANE_ID,verdict_file=$vfile,tool_name=$tool_name,tool_arg=$tool_arg" \
+    >/dev/null 2>&1 || true
+
+  # Poll rather than block on a FIFO: a FIFO open() with no reader hangs past
+  # any timeout, and Codex has no working async hooks to absorb that.
+  waited=0
+  limit=${ZJ_AGENT_APPROVE_TIMEOUT:-30}
+  while [ "$waited" -lt "$limit" ]; do
+    if [ -s "$vfile" ]; then
+      verdict=$(cat "$vfile" 2>/dev/null)
+      rm -f "$vfile" 2>/dev/null || true
+      case "$verdict" in
+        allow)
+          printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\n'
+          exit 0 ;;
+        deny)
+          printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}\n'
+          exit 0 ;;
+      esac
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # No verdict: say nothing and let the agent prompt as usual.
+  rm -f "$vfile" 2>/dev/null || true
+fi
 
 exit 0

@@ -14,6 +14,20 @@ pub(crate) fn rename_own_pane(title: &str) {
     zellij_tile::shim::rename_plugin_pane(ids.plugin_id, title);
 }
 
+/// Drops a permission verdict where the blocked hook is polling for it. The
+/// plugin's WASI sandbox has no access to the host filesystem, so this shells
+/// out rather than writing directly.
+/// The verdict is one of two fixed literals and the path is passed as its own
+/// argv element, so nothing user-influenced is ever parsed by a shell.
+#[cfg(target_family = "wasm")]
+pub(crate) fn write_verdict(path: &str, verdict: &str) {
+    let mut ctx = std::collections::BTreeMap::new();
+    ctx.insert("kind".to_string(), "verdict".to_string());
+    // `cp` from /dev/stdin needs a pipe we do not have; `sh -c` with the path as
+    // a positional arg keeps it out of the parsed command string.
+    run_command(&["sh", "-c", "printf '%s' \"$1\" > \"$2\"", "sh", verdict, path], ctx);
+}
+
 #[cfg(not(target_family = "wasm"))]
 mod stub {
     use std::collections::BTreeMap;
@@ -26,6 +40,7 @@ mod stub {
     pub(crate) fn send_sigint_to_pane_id(_id: PaneId) {}
     pub(crate) fn run_command(_cmd: &[&str], _ctx: BTreeMap<String, String>) {}
     pub(crate) fn rename_own_pane(_title: &str) {}
+    pub(crate) fn write_verdict(_path: &str, _verdict: &str) {}
 }
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use stub::*;

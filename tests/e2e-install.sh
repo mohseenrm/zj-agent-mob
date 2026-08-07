@@ -102,9 +102,15 @@ for ev in $(jq -r '.hooks | keys[]' "$CLAUDE_JSON"); do
 done
 assert_eq "every claude event is handled by the hook" "$missing" ""
 # async so a slow hook can never stall a turn; this is the whole reason the
-# plugin is safe to leave installed.
-assert_eq "claude hooks are async" \
-  "$(jq '[.hooks[][].hooks[] | select(.async != true)] | length' "$CLAUDE_JSON")" "0"
+# plugin is safe to leave installed. PermissionRequest is the sole exception:
+# returning a decision requires blocking, which is why it is opt-in at runtime
+# via ZJ_AGENT_APPROVE and falls through to the agent's own prompt on timeout.
+assert_eq "claude reporting hooks are async" \
+  "$(jq '[.hooks | to_entries[] | select(.key != "PermissionRequest")
+         | .value[].hooks[] | select(.async != true)] | length' "$CLAUDE_JSON")" "0"
+assert_eq "PermissionRequest is the only synchronous hook" \
+  "$(jq '[.hooks | to_entries[] | select(.value[].hooks[].async != true) | .key] | join(",")' \
+     "$CLAUDE_JSON")" '"PermissionRequest"'
 assert_eq "claude hooks are command type" \
   "$(jq '[.hooks[][].hooks[] | select(.type != "command")] | length' "$CLAUDE_JSON")" "0"
 # Notification fires for many things; only the two that mean "needs you" should

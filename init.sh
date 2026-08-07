@@ -157,13 +157,22 @@ claude_hooks_json() {
   jq -n --arg cmd "$HOOK_CMD" '
     def h($extra): {type:"command", command:$cmd, async:true} + $extra;
     {
-      SessionStart:     [{matcher:"*",                        hooks:[h({})]}],
-      UserPromptSubmit: [{                                    hooks:[h({})]}],
-      PreToolUse:       [{matcher:"*",                        hooks:[h({})]}],
-      PostToolUse:      [{matcher:"*",                        hooks:[h({})]}],
-      Notification:     [{matcher:"permission_prompt|idle_prompt", hooks:[h({})]}],
-      Stop:             [{                                    hooks:[h({})]}],
-      SessionEnd:       [{matcher:"*",                        hooks:[h({})]}]
+      SessionStart:       [{matcher:"*",                      hooks:[h({})]}],
+      UserPromptSubmit:   [{                                  hooks:[h({})]}],
+      PreToolUse:         [{matcher:"*",                      hooks:[h({})]}],
+      PostToolUse:        [{matcher:"*",                      hooks:[h({})]}],
+      PostToolUseFailure: [{matcher:"*",                      hooks:[h({})]}],
+      Notification:       [{matcher:"permission_prompt|idle_prompt", hooks:[h({})]}],
+      PermissionRequest:  [{matcher:"*",                      hooks:[h({async:false})]}],
+      SubagentStart:      [{matcher:"*",                      hooks:[h({})]}],
+      SubagentStop:       [{matcher:"*",                      hooks:[h({})]}],
+      TaskCreated:        [{                                  hooks:[h({})]}],
+      TaskCompleted:      [{                                  hooks:[h({})]}],
+      PreCompact:         [{matcher:"*",                      hooks:[h({})]}],
+      PostCompact:        [{matcher:"*",                      hooks:[h({})]}],
+      Stop:               [{                                  hooks:[h({})]}],
+      StopFailure:        [{matcher:"*",                      hooks:[h({})]}],
+      SessionEnd:         [{matcher:"*",                      hooks:[h({})]}]
     }'
 }
 
@@ -222,6 +231,10 @@ codex_hooks_json() {
         PreToolUse:       [{matcher:"*", hooks:[h]}],
         PostToolUse:      [{matcher:"*", hooks:[h]}],
         PermissionRequest:[{matcher:"*", hooks:[h]}],
+        SubagentStart:    [{matcher:"*", hooks:[h]}],
+        SubagentStop:     [{matcher:"*", hooks:[h]}],
+        PreCompact:       [{matcher:"*", hooks:[h]}],
+        PostCompact:      [{matcher:"*", hooks:[h]}],
         Stop:             [{             hooks:[h]}],
         SessionEnd:       [{matcher:"*", hooks:[h]}]
       }}'

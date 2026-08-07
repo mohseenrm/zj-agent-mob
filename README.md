@@ -109,6 +109,7 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | <kbd>Enter</kbd> | Jump to that agent's pane (works across tabs) and hide the panel |
 | <kbd>1</kbd>–<kbd>9</kbd> | Jump straight to agent N |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane |
+| <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
 | <kbd>d</kbd> | Dismiss a `done` badge |
 | <kbd>i</kbd> | Open the install screen |
 | <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel |
@@ -130,10 +131,41 @@ Targets are independent, so running only one agent's hooks is a supported state:
 
 | Status | Meaning | Hook event |
 |---|---|---|
-| `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
-| `waiting` | Needs you now (permission prompt / question) | `Notification` (Claude), `PermissionRequest` (Codex) |
+| `failed` | Stopped by an error (rate limit, billing, auth) | `StopFailure` (Claude only) |
+| `waiting` | Needs you now (permission prompt / question) | `Notification` (Claude), `PermissionRequest` (both) |
+| `idle-wait` | Has been waiting on you for a while | `Notification` / `idle_prompt` (Claude only) |
 | `done` | Finished while you were elsewhere | `Stop` |
+| `compact` | Compacting context (looks like a hang otherwise) | `PreCompact`, cleared by `PostCompact` |
+| `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
+
+Rows sort in that order, so whatever needs you most is at the top.
+
+The detail line under each row carries the tool call with its argument (`Edit src/webhook.rs`,
+`Bash cargo test`), a running subagent count with types, native task progress (`4/7 tasks`), and
+the closing message once a turn finishes. A non-default permission mode shows as a badge on the
+row itself (`[bypassPermissions]`, `[plan]`), so an agent running unattended is visible at a
+glance.
+
+### Answering permission prompts from the panel
+
+Off by default. With `ZJ_AGENT_APPROVE=1` set in the agent's environment, a permission prompt
+parks in the panel and <kbd>a</kbd> / <kbd>r</kbd> approve or reject it without leaving the panel:
+
+```
+▶ 1 ● codex   waiting    2s  web        Fix flaky checkout test
+      └ needs approval: rm -rf node_modules · pane:5
+        ┌──────────────────────────────────────────┐
+        │ Bash                                     │
+        │ rm -rf node_modules                      │
+        │ a approve    r reject    ↵ jump to pane  │
+        └──────────────────────────────────────────┘
+```
+
+This is the one hook that blocks the agent's turn, which is why it is opt-in. It waits
+`ZJ_AGENT_APPROVE_TIMEOUT` seconds (default 30) and then falls through to the agent's own prompt,
+so the worst case is the normal interactive experience. Reject is <kbd>r</kbd>, not <kbd>d</kbd>,
+so a mis-keyed dismiss can never answer a prompt.
 
 
 ## Known limitations

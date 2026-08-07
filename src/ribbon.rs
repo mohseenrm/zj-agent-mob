@@ -35,6 +35,17 @@ pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("q", "hide"),
 ];
 
+/// Shown only while the selected agent has a permission prompt parked. Keeping
+/// approve and reject out of the default footer means they cannot be pressed
+/// by muscle memory when no prompt is waiting.
+pub(crate) const ASK_HINTS: &[Hint] = &[
+    Hint::new("a", "approve"),
+    Hint::new("r", "reject"),
+    Hint::new("\u{21b5}", "jump"),
+    Hint::new("x", "kill"),
+    Hint::new("q", "hide"),
+];
+
 pub(crate) const SETUP_HINTS: &[Hint] = &[
     Hint::new("1", "claude"),
     Hint::new("2", "codex"),
