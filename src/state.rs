@@ -31,6 +31,11 @@ pub struct State {
     pub(crate) popup_on_waiting: bool,
     pub(crate) hidden: bool,
     pub(crate) install: Install,
+    /// Needed to scope the scan; the plugin is not told this at load, it
+    /// arrives with the first `SessionUpdate`.
+    pub(crate) session_name: String,
+    /// A scan is in flight, so a second one would be wasted work.
+    pub(crate) scan_pending: bool,
 }
 
 impl State {
@@ -49,11 +54,16 @@ impl State {
             Status::Failed => "\u{2717}",
             Status::Done => "\u{2713}",
             Status::Idle => "\u{25cb}",
+            Status::Discovered => "\u{25cc}",
         }
     }
 
     /// Failed, waiting, working, done. `idle-wait` counts as waiting: both mean
     /// the agent is blocked on you.
+    ///
+    /// `Discovered` is counted as nothing, like `Idle`. Folding it into any
+    /// bucket would state something the scan cannot know - it found a process,
+    /// not a status - and the header is the one place that must not guess.
     pub(crate) fn counts(&self) -> (usize, usize, usize, usize) {
         let mut c = (0, 0, 0, 0);
         for a in &self.agents {
@@ -62,10 +72,15 @@ impl State {
                 Status::Waiting | Status::IdleWait => c.1 += 1,
                 Status::Working | Status::Compact => c.2 += 1,
                 Status::Done => c.3 += 1,
-                Status::Idle => {}
+                Status::Idle | Status::Discovered => {}
             }
         }
         c
+    }
+
+    /// Agents found by the scan that have never reported.
+    pub(crate) fn discovered_count(&self) -> usize {
+        self.agents.iter().filter(|a| a.status == Status::Discovered).count()
     }
 
     pub(crate) fn arm_timer(&mut self) {
@@ -113,6 +128,13 @@ impl State {
                 agent.status_since = now;
                 if status == Status::Working {
                     agent.turns += 1;
+                }
+            }
+            // A discovered row's tool came from the executable name; the hook
+            // reporting in is authoritative and replaces it.
+            if agent.status == Status::Discovered {
+                if let Some(tool) = args.get("tool").filter(|t| !t.is_empty()) {
+                    agent.tool = tool.clone();
                 }
             }
             agent.status = status;
@@ -251,6 +273,65 @@ impl State {
         self.sort_agents();
         self.arm_timer();
         true
+    }
+
+    /// Runs a scan unless one is already in flight or the session name is not
+    /// known yet - without it the scan cannot be scoped and would list agents
+    /// from every session on the machine.
+    pub(crate) fn request_scan(&mut self) {
+        if self.scan_pending || self.session_name.is_empty() || !self.permissions_granted {
+            return;
+        }
+        self.scan_pending = true;
+        crate::discover::dispatch(&self.session_name);
+    }
+
+    /// Merges a process scan into the agent list.
+    ///
+    /// Discovery only ever *adds* rows for panes nothing has reported for. A
+    /// pane that already has an agent keeps everything it reported: the scan
+    /// knows strictly less than a hook does, so letting it write would
+    /// downgrade a live row to `found`.
+    pub(crate) fn apply_scan(&mut self, found: Vec<crate::discover::Found>) -> bool {
+        // A discovered row has no `ended` event coming for it, so a process that
+        // exited is dropped by its absence from the next scan. Hook-reported
+        // rows are untouched: their lifecycle is owned by the hook and by
+        // `reconcile`, and a scan that misses one must not delete it.
+        let before = self.agents.len();
+        self.agents
+            .retain(|a| a.status != Status::Discovered || found.iter().any(|f| f.pane_id == a.pane_id));
+        let mut changed = self.agents.len() != before;
+
+        for f in found {
+            if self.agents.iter().any(|a| a.pane_id == f.pane_id) {
+                continue;
+            }
+            self.agents.push(Agent {
+                pane_id: f.pane_id,
+                tool: f.tool,
+                session_id: String::new(),
+                status: Status::Discovered,
+                cwd: String::new(),
+                task: None,
+                detail: None,
+                turns: 0,
+                status_since: self.now,
+                tab: None,
+                pane_title: String::new(),
+                alive: true,
+                perm_mode: String::new(),
+                subagents: 0,
+                subagent_types: Vec::new(),
+                tasks_total: 0,
+                tasks_done: 0,
+            });
+            changed = true;
+        }
+        if changed {
+            self.clamp_selection();
+            self.sort_agents();
+        }
+        changed
     }
 
     pub(crate) fn handle_label(&mut self, args: &BTreeMap<String, String>) -> bool {
@@ -697,6 +778,125 @@ mod tests {
         s.handle_ask(&ask("1"));
         s.handle_status(&args(&[("pane_id", "1"), ("status", "ended")]));
         assert!(s.asks.is_empty());
+    }
+
+    fn found(pairs: &[(u32, &str)]) -> Vec<crate::discover::Found> {
+        pairs
+            .iter()
+            .map(|(pane_id, tool)| crate::discover::Found {
+                pane_id: *pane_id,
+                tool: tool.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scan_adds_rows_for_silent_agents() {
+        let mut s = state();
+        assert!(s.apply_scan(found(&[(2, "claude"), (6, "codex")])));
+        assert_eq!(s.agents.len(), 2);
+        assert!(s.agents.iter().all(|a| a.status == Status::Discovered));
+        assert_eq!(s.discovered_count(), 2);
+    }
+
+    /// The reported row already knows more than the scan does, so a scan over it
+    /// must neither duplicate it nor overwrite what the hook said.
+    #[test]
+    fn scan_does_not_duplicate_or_downgrade_a_reported_agent() {
+        let mut s = state();
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("status", "working"),
+            ("task", "Fix the parser"),
+        ]));
+        assert!(!s.apply_scan(found(&[(3, "claude")])), "nothing changed");
+        assert_eq!(s.agents.len(), 1, "one row per pane");
+        assert!(s.agents[0].status == Status::Working, "hook status wins");
+        assert_eq!(s.agents[0].task.as_deref(), Some("Fix the parser"));
+    }
+
+    /// The other order: discovery first, then the agent finally acts.
+    #[test]
+    fn hook_upgrades_a_discovered_row_in_place() {
+        let mut s = state();
+        s.apply_scan(found(&[(3, "claude")]));
+        assert_eq!(s.discovered_count(), 1);
+
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("status", "waiting"),
+            ("task", "Approve this"),
+            ("tool", "codex"),
+        ]));
+        assert_eq!(s.agents.len(), 1, "upgrade must not add a second row");
+        assert!(s.agents[0].status == Status::Waiting);
+        assert_eq!(s.agents[0].task.as_deref(), Some("Approve this"));
+        assert_eq!(s.agents[0].tool, "codex", "the hook is authoritative on tool");
+        assert_eq!(s.discovered_count(), 0);
+    }
+
+    /// No `ended` event ever arrives for a discovered row, so the only evidence
+    /// the process is gone is its absence from the next scan.
+    #[test]
+    fn discovered_row_disappears_when_its_process_exits() {
+        let mut s = state();
+        s.apply_scan(found(&[(2, "claude"), (3, "claude")]));
+        assert_eq!(s.agents.len(), 2);
+        assert!(s.apply_scan(found(&[(2, "claude")])));
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.agents[0].pane_id, 2);
+    }
+
+    /// A scan that returns nothing must not wipe agents the hooks reported.
+    #[test]
+    fn empty_scan_never_culls_reported_agents() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.apply_scan(found(&[(2, "claude")]));
+        assert_eq!(s.agents.len(), 2);
+
+        assert!(s.apply_scan(Vec::new()), "the discovered row drops");
+        assert_eq!(s.agents.len(), 1, "the reported one stays");
+        assert_eq!(s.agents[0].pane_id, 1);
+    }
+
+    /// Discovery states nothing about what an agent is doing, so folding it into
+    /// a header bucket would make the summary line assert what it cannot know.
+    #[test]
+    fn discovered_agents_are_absent_from_the_header_counts() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        s.apply_scan(found(&[(2, "claude"), (3, "claude")]));
+        assert_eq!(s.counts(), (0, 1, 0, 0));
+        assert_eq!(s.discovered_count(), 2);
+    }
+
+    /// Least urgent: nothing is known about it.
+    #[test]
+    fn discovered_sorts_last() {
+        let mut s = state();
+        s.apply_scan(found(&[(1, "claude")]));
+        s.handle_status(&args(&[("pane_id", "2"), ("status", "idle")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        let order: Vec<&str> = s.agents.iter().map(|a| a.status.label()).collect();
+        assert_eq!(order, vec!["waiting", "idle", "found"]);
+    }
+
+    /// A shrinking list must not strand the cursor past the end.
+    #[test]
+    fn selection_is_clamped_when_a_scan_removes_rows() {
+        let mut s = state();
+        s.apply_scan(found(&[(1, "claude"), (2, "claude"), (3, "claude")]));
+        s.selected = 2;
+        s.apply_scan(found(&[(1, "claude")]));
+        assert!(s.selected < s.agents.len(), "selection must stay in bounds");
+    }
+
+    /// No hook may claim a state that asserts the opposite of what it means.
+    #[test]
+    fn discovered_is_not_reachable_from_a_pipe() {
+        assert!(Status::parse("found").is_none());
+        assert!(Status::parse("discovered").is_none());
     }
 
     #[test]

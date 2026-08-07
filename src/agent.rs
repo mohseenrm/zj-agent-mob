@@ -60,7 +60,13 @@ impl Agent {
         text.push(' ');
         text.push_str(&format!("{:<7} ", self.tool));
         let label_range = chars(&text)..chars(&text) + chars(label);
-        text.push_str(&format!("{:<9} {:>6}", label, fmt_elapsed(now - self.status_since)));
+        // A discovered agent has never reported, so there is no moment to
+        // measure from; `0s` would claim it just changed state.
+        let elapsed = match self.status {
+            Status::Discovered => "--".to_string(),
+            _ => fmt_elapsed(now - self.status_since),
+        };
+        text.push_str(&format!("{:<9} {:>6}", label, elapsed));
 
         if show_cwd {
             text.push_str(&format!("  {:<10}", truncate(self.project(), 10)));
@@ -107,6 +113,8 @@ impl Agent {
         let mut bits: Vec<String> = Vec::new();
         if kill_armed {
             bits.push("press x again to close pane".to_string());
+        } else if self.status == Status::Discovered {
+            bits.push("no report yet".to_string());
         } else if let Some(d) = self.detail.as_deref().filter(|d| !d.is_empty()) {
             bits.push(d.to_string());
         }
@@ -340,6 +348,44 @@ mod render_tests {
         let short = row(&a, 0, false, "\u{2713}", 0.0, 110, true);
         let at = |s: &str| s.find("dotfiles").or_else(|| s.find("api"));
         assert_eq!(at(&wide), at(&short), "project column must not move");
+    }
+
+    /// Inventing `0s` would claim the agent just changed state; the panel does
+    /// not know when a discovered agent last did anything.
+    #[test]
+    fn discovered_row_shows_no_elapsed_time() {
+        let mut a = agent();
+        a.status = Status::Discovered;
+        a.task = None;
+        a.pane_title = String::new();
+        let r = row(&a, 0, false, "\u{25cc}", 134.0, 110, true);
+        assert!(r.contains("found"), "{:?}", r);
+        assert!(r.contains("--"), "{:?}", r);
+        assert!(!r.contains("2m14s"), "elapsed is unknown, not zero: {:?}", r);
+    }
+
+    /// The row must say why it is bare rather than looking like a broken read.
+    #[test]
+    fn discovered_detail_line_says_no_report_yet() {
+        let mut a = agent();
+        a.status = Status::Discovered;
+        a.detail = None;
+        a.turns = 0;
+        let d = item_text(&a.detail_item(false, 110));
+        assert!(d.contains("no report yet"), "{:?}", d);
+        assert!(d.contains("pane:3"), "{:?}", d);
+    }
+
+    /// The status column is padded to a fixed width; a new label must not push
+    /// the columns after it out of alignment.
+    #[test]
+    fn found_label_does_not_shift_columns() {
+        let mut a = agent();
+        a.status = Status::Discovered;
+        let disc = row(&a, 0, false, "\u{25cc}", 0.0, 110, true);
+        a.status = Status::Done;
+        let done = row(&a, 0, false, "\u{2713}", 0.0, 110, true);
+        assert_eq!(disc.find("api"), done.find("api"), "project column must not move");
     }
 
     #[test]

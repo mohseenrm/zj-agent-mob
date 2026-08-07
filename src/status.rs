@@ -9,9 +9,14 @@ pub(crate) enum Status {
     Compact,
     Done,
     Idle,
+    /// Found by a process scan, with no hook report behind it. Distinct from
+    /// `Idle`, which means the agent reported and then went quiet.
+    Discovered,
 }
 
 impl Status {
+    /// `Discovered` is deliberately absent: it is produced only by the scan, so
+    /// no hook can claim a state that asserts the opposite of what it is.
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "working" => Some(Status::Working),
@@ -34,6 +39,7 @@ impl Status {
             Status::Failed => "failed",
             Status::Done => "done",
             Status::Idle => "idle",
+            Status::Discovered => "found",
         }
     }
 
@@ -48,6 +54,7 @@ impl Status {
             Status::Compact => 4,
             Status::Working => 5,
             Status::Idle => 6,
+            Status::Discovered => 7,
         }
     }
 
@@ -67,7 +74,7 @@ impl Status {
             Status::Waiting | Status::IdleWait => 2,
             Status::Working | Status::Compact => 0,
             Status::Done => 1,
-            Status::Idle | Status::Failed => 3,
+            Status::Idle | Status::Failed | Status::Discovered => 3,
         }
     }
 

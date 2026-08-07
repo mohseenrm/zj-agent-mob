@@ -1,7 +1,8 @@
 # Discovering agents that have not reported
 
-Status: investigation complete, nothing implemented. Findings verified on macOS with
-Zellij 0.44.3 on 2026-08-07.
+Status: **implemented** ([`src/discover.rs`](../src/discover.rs)). Findings verified on macOS
+with Zellij 0.44.3 on 2026-08-07, and the shipped plugin verified against a live session the
+same day.
 
 The panel only knows about an agent once that agent's hook fires. Reload the plugin and it
 starts empty; an idle agent emits no events, so the panel says **"no agents in this session"**
@@ -17,7 +18,8 @@ This doc records what was measured and what the options cost. The recommendation
 - [4. Options considered and rejected](#4-options-considered-and-rejected)
 - [5. UX sketch](#5-ux-sketch)
 - [6. Implementation notes](#6-implementation-notes)
-- [7. Open questions](#7-open-questions)
+- [7. What shipped](#7-what-shipped)
+- [8. Open questions](#8-open-questions)
 
 ## 1. The gap
 
@@ -233,7 +235,41 @@ Test coverage to add:
 - Rust tests for merge/dedup: discovered-then-hook, hook-then-discovered, and a discovered pane
   that disappears.
 
-## 7. Open questions
+## 7. What shipped
+
+Verified against a live session, with a real Codex agent that had never fired a hook:
+
+```
+zj-agent-mob   0 waiting · 0 working ·        <- not counted as active
+▶ 1 ◌ codex   found         --
+```
+
+Then a hook reported for that same pane, and the row upgraded in place rather than doubling:
+
+```
+zj-agent-mob   0 waiting · 1 working ·
+▶ 1 ⠹ codex   working       3s
+```
+
+Killing the agent dropped the row on the next scan, leaving the empty screen.
+
+Decisions taken against the open questions above:
+
+- **Cadence.** On `PaneUpdate` and on first learning the session name, debounced by an
+  in-flight flag. A pane opening or closing is the cheapest signal that the agent set changed;
+  the flag stops overlapping scans.
+- **Header counts.** `found` is its own bucket, shown only when non-zero, exactly like `failed`.
+  Folding it into `waiting`/`working`/`idle` would put a number behind a claim the scan cannot
+  make.
+- **The empty screen** now says `looking for agents` while a scan is in flight. "No agents in
+  this session" is a claim the panel can only make once a scan has come back empty - asserting
+  it earlier is the original bug in miniature.
+- **`Status::Discovered` is unreachable from a pipe.** `Status::parse` has no arm for it, so no
+  hook can claim a state whose whole meaning is "no hook has reported".
+- **A failed scan changes nothing.** Discovery is an enhancement; hook-reported rows are the
+  truth and are never culled by a scan that returns empty or errors.
+
+## 8. Open questions
 
 - ~~**Codex detection is unverified.**~~ **Resolved.** Verified against a real Codex process: a
   pane spawned with `zellij action new-pane -- codex` was detected as `6 codex 43820`, carrying
@@ -248,11 +284,8 @@ Test coverage to add:
   reassigns its id, a moved agent would be attributed to the wrong pane - or to none. One manual
   check: note a pid's `ZELLIJ_PANE_ID`, move the pane, re-run the scan, compare against
   `PaneManifest`.
-- **Scan cadence.** On a timer, on `PaneUpdate`, or only when the agent list is empty? The last
-  is cheapest and covers the reported symptom, but leaves an agent started later invisible until
-  it acts.
-- **Does a discovered agent count in the header?** `3 idle` conflates "known idle" with "found,
-  unknown". The counts drive the summary line, so this changes what the header means.
+- ~~**Scan cadence.**~~ ~~**Does a discovered agent count in the header?**~~ Both settled in
+  section 7.
 - **Killing a discovered agent.** `x kill` targets a pane id, which discovery provides, so it
-  would work. Whether it *should* be offered for a row the panel knows nothing about is a
-  separate call.
+  works today. Whether it *should* be offered for a row the panel knows nothing about is still
+  an open call - it is currently offered.

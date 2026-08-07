@@ -29,6 +29,8 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::PermissionRequestResult,
             EventType::RunCommandResult,
+            // Carries the session name, which scopes the discovery scan.
+            EventType::SessionUpdate,
         ]);
         set_selectable(true);
 
@@ -44,6 +46,7 @@ impl ZellijPlugin for State {
                 // `run_command` only reaches the host after the grant; a refresh
                 // fired from `load` is silently dropped.
                 self.install.refresh();
+                self.request_scan();
                 self.rename_pane();
                 true
             }
@@ -56,12 +59,32 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(manifest) => {
                 self.reconcile(manifest);
+                // A pane appearing or closing is the cheapest signal that the
+                // set of running agents may have changed.
+                self.request_scan();
                 true
+            }
+            Event::SessionUpdate(sessions, _) => {
+                let Some(name) = sessions.iter().find(|s| s.is_current_session).map(|s| s.name.clone()) else {
+                    return false;
+                };
+                if self.session_name == name {
+                    return false;
+                }
+                self.session_name = name;
+                self.request_scan();
+                false
             }
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 let out = String::from_utf8_lossy(&stdout);
                 let err = String::from_utf8_lossy(&stderr);
+                if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::discover::CTX_SCAN) {
+                    self.scan_pending = false;
+                    // A failed scan leaves the list exactly as it was: discovery
+                    // is an enhancement, and hook-reported rows are the truth.
+                    return exit_code.unwrap_or(0) == 0 && self.apply_scan(crate::discover::parse(&out));
+                }
                 self.install.on_command_result(exit_code, &out, &err, &context)
             }
             _ => false,
@@ -172,8 +195,15 @@ impl State {
         self.render_hints(ribbon::SETUP_HINTS, y, width);
     }
 
+    /// "No agents" is a claim the panel can only make once a scan has come back
+    /// empty. Before that it has merely not been told about any.
     fn render_empty(&self, width: usize) {
-        let y = self.render_header("no agents in this session", width);
+        let subtitle = if self.scan_pending {
+            "looking for agents"
+        } else {
+            "no agents in this session"
+        };
+        let y = self.render_header(subtitle, width);
         let rows = vec![
             Text::new("  Start claude or codex in a pane; hooks report status here.").color_range(DIM_LEVEL, ..),
             Text::new("  Press i to check and install the hooks.").color_range(DIM_LEVEL, ..),
@@ -193,6 +223,13 @@ impl State {
             (working, "working", Status::Working),
             (done, "done", Status::Done),
         ]);
+        // Its own bucket rather than folded into one of the above: these agents
+        // have a process and nothing else, so counting them as any real status
+        // would put a number behind a claim the scan cannot make.
+        let discovered = self.discovered_count();
+        if discovered > 0 {
+            parts.push((discovered, "found", Status::Discovered));
+        }
 
         // Built up incrementally so each count's colour range tracks the digits
         // actually written; a two-digit count shifts everything after it.
