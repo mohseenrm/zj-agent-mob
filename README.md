@@ -39,7 +39,7 @@ A Zellij plugin that monitors Claude Code and Codex agents running in your curre
 
 Use `gh` for downloading prebuilt releases ([details](docs/setup.md#from-a-release)):
 
-```sh
+```bash
 mkdir -p target/wasm32-wasip1/release
 gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
   --pattern zj-agent-mob.wasm --dir target/wasm32-wasip1/release
@@ -48,7 +48,7 @@ gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
 
 ### 1.B Or build it yourself:
 
-```sh
+```bash
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
 ./init.sh
