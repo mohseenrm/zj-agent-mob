@@ -133,6 +133,6 @@ Zellij host calls (`focus_terminal_pane`, `hide_self`, `run_command`, ...) are W
 
 ## Rendering note
 
-The panel uses plain ANSI, not Zellij's `Text` / ribbon UI components. Those serialize to a DCS sequence that repositions the cursor itself, so consecutive components collapse onto one grid row. The cost is that colours are fixed 256-colour codes rather than following your Zellij theme.
+The panel is built from Zellij's `Text` and ribbon UI components, so colours resolve from your Zellij theme instead of fixed 256-colour codes, and Zellij owns cursor positioning.
 
-If you do use the component API elsewhere, note that `Text::color_range()` indices are **byte** offsets (`serialize()` encodes via `as_bytes()`), not character offsets. Character counts corrupt the payload for multi-byte glyphs like `▶` or the braille spinner.
+`Text::color_range()` indices are **character** offsets, not byte offsets - `Text::color_substring()` converts a byte position with `chars().count()` before delegating to `color_range()`. Byte offsets shift the highlight right by the extra UTF-8 bytes of any earlier multi-byte glyph (`▶`, `↵`, `·`, the braille spinner), which colours part of the following word rather than the intended one. Use `style::chars()` when computing a range, and assert the covered substring in a test - the drift is invisible to text-only assertions.

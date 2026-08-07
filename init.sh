@@ -33,6 +33,22 @@ WASM_SRC="$WASM_DIR/zj-agent-mob.wasm"
 HOOK_DIR="${ZJ_AGENT_HOOK_DIR:-$HOME/.config/zj-agent-mob}"
 HOOK_DST="$HOOK_DIR/hook.sh"
 SELF_DST="$HOOK_DIR/install.sh"
+
+# The command string written into the agents' settings files. Kept separate from
+# HOOK_DST (the real path, used for filesystem work) so settings can carry a
+# literal `$HOME/...`: both agents run hook commands through a shell, which
+# expands it at call time. That keeps a username out of files people commit to a
+# dotfiles repo. Paths outside $HOME have nothing to substitute and stay absolute.
+case "$HOOK_DST" in
+  "$HOME"/*) HOOK_CMD="\$HOME${HOOK_DST#"$HOME"}" ;;
+  *)         HOOK_CMD="$HOOK_DST" ;;
+esac
+CODEX_CMD="env ZJ_AGENT_TOOL=codex $HOOK_CMD"
+
+# Installs written before the $HOME rewrite hardcoded the absolute path. Match it
+# too, so uninstall and the idempotent re-install still recognize their entries.
+HOOK_CMD_LEGACY="$HOOK_DST"
+CODEX_CMD_LEGACY="env ZJ_AGENT_TOOL=codex $HOOK_DST"
 PLUGIN_DIR="${ZJ_AGENT_PLUGIN_DIR:-$HOME/.config/zellij/plugins}"
 PLUGIN_DST="$PLUGIN_DIR/zj-agent-mob.wasm"
 
@@ -138,7 +154,7 @@ backup() {
 # Build the hooks block. Matchers keep Notification scoped to the events that
 # actually mean "needs you". `async: true` so a hook can never block a turn.
 claude_hooks_json() {
-  jq -n --arg cmd "$HOOK_DST" '
+  jq -n --arg cmd "$HOOK_CMD" '
     def h($extra): {type:"command", command:$cmd, async:true} + $extra;
     {
       SessionStart:     [{matcher:"*",                        hooks:[h({})]}],
@@ -165,12 +181,12 @@ install_claude() {
   _hooks=$(claude_hooks_json)
   # Merge: for each event, drop any entry already pointing at our hook (so
   # re-running is idempotent), then append ours.
-  jq --argjson new "$_hooks" --arg cmd "$HOOK_DST" '
+  jq --argjson new "$_hooks" --arg cmd "$HOOK_CMD" --arg old_cmd "$HOOK_CMD_LEGACY" '
     .hooks = ((.hooks // {}) as $old
       | reduce ($new | keys_unsorted[]) as $ev ($old;
           .[$ev] = (
             (($old[$ev] // [])
-              | map(.hooks |= map(select(.command != $cmd))
+              | map(.hooks |= map(select(.command != $cmd and .command != $old_cmd))
                     | select((.hooks | length) > 0)))
             + $new[$ev]
           )))
@@ -182,10 +198,10 @@ EOF
 uninstall_claude() {
   [ -e "$CLAUDE_SETTINGS" ] || return 0
   say "Claude Code: $CLAUDE_SETTINGS"
-  jq --arg cmd "$HOOK_DST" '
+  jq --arg cmd "$HOOK_CMD" --arg old_cmd "$HOOK_CMD_LEGACY" '
     if .hooks then
       .hooks |= with_entries(
-        .value |= (map(.hooks |= map(select(.command != $cmd))
+        .value |= (map(.hooks |= map(select(.command != $cmd and .command != $old_cmd))
                        | select((.hooks | length) > 0))))
       | .hooks |= with_entries(select((.value | length) > 0))
       | if (.hooks | length) == 0 then del(.hooks) else . end
@@ -198,7 +214,7 @@ uninstall_claude() {
 # Codex has no async flag and SessionEnd defaults to a 1s timeout, so the hook
 # must be fast. ZJ_AGENT_TOOL=codex selects the codex transcript reader.
 codex_hooks_json() {
-  jq -n --arg cmd "env ZJ_AGENT_TOOL=codex $HOOK_DST" '
+  jq -n --arg cmd "$CODEX_CMD" '
     def h: {type:"command", command:$cmd};
     { hooks: {
         SessionStart:     [{matcher:"*", hooks:[h]}],
@@ -213,15 +229,14 @@ codex_hooks_json() {
 
 install_codex() {
   say "Codex: $CODEX_HOOKS"
-  _cmd="env ZJ_AGENT_TOOL=codex $HOOK_DST"
   if [ -e "$CODEX_HOOKS" ]; then
     backup "$CODEX_HOOKS"
-    jq --argjson new "$(codex_hooks_json)" --arg cmd "$_cmd" '
+    jq --argjson new "$(codex_hooks_json)" --arg cmd "$CODEX_CMD" --arg old_cmd "$CODEX_CMD_LEGACY" '
       .hooks = ((.hooks // {}) as $old
         | reduce ($new.hooks | keys_unsorted[]) as $ev ($old;
             .[$ev] = (
               (($old[$ev] // [])
-                | map(.hooks |= map(select(.command != $cmd))
+                | map(.hooks |= map(select(.command != $cmd and .command != $old_cmd))
                       | select((.hooks | length) > 0)))
               + $new.hooks[$ev]
             )))
@@ -234,11 +249,10 @@ install_codex() {
 uninstall_codex() {
   [ -e "$CODEX_HOOKS" ] || return 0
   say "Codex: $CODEX_HOOKS"
-  _cmd="env ZJ_AGENT_TOOL=codex $HOOK_DST"
-  jq --arg cmd "$_cmd" '
+  jq --arg cmd "$CODEX_CMD" --arg old_cmd "$CODEX_CMD_LEGACY" '
     if .hooks then
       .hooks |= with_entries(
-        .value |= (map(.hooks |= map(select(.command != $cmd))
+        .value |= (map(.hooks |= map(select(.command != $cmd and .command != $old_cmd))
                        | select((.hooks | length) > 0))))
       | .hooks |= with_entries(select((.value | length) > 0))
     else . end
@@ -247,19 +261,21 @@ uninstall_codex() {
 
 # ---------------------------------------------------------------------- status
 
-# Does $1 (a settings file) already reference our hook command?
+# Does $1 (a settings file) reference our hook command, in either the current
+# `$HOME`-relative form ($2) or the older absolute one ($3)?
 hooked() {
   [ -e "$1" ] || return 1
-  jq -e --arg cmd "$2" '
-    [(.hooks // {}) | .[]? | .[]? | .hooks[]? | .command] | index($cmd) != null
+  jq -e --arg cmd "$2" --arg old_cmd "$3" '
+    [(.hooks // {}) | .[]? | .[]? | .hooks[]? | .command]
+      | (index($cmd) != null) or (index($old_cmd) != null)
   ' "$(resolve "$1")" >/dev/null 2>&1
 }
 
 # One `key=state` line per target. Parsed by the plugin's install screen, so the
 # format is fixed: state is `installed` or `absent`.
 print_status() {
-  hooked "$CLAUDE_SETTINGS" "$HOOK_DST" && _c=installed || _c=absent
-  hooked "$CODEX_HOOKS" "env ZJ_AGENT_TOOL=codex $HOOK_DST" && _x=installed || _x=absent
+  hooked "$CLAUDE_SETTINGS" "$HOOK_CMD" "$HOOK_CMD_LEGACY" && _c=installed || _c=absent
+  hooked "$CODEX_HOOKS" "$CODEX_CMD" "$CODEX_CMD_LEGACY" && _x=installed || _x=absent
   [ -f "$PLUGIN_DST" ] && _p=installed || _p=absent
   [ -x "$HOOK_DST" ] && _h=installed || _h=absent
   say "claude=$_c"

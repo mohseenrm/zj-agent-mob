@@ -402,6 +402,96 @@ assert_contains "the claude command string runs as configured" \
   "$(cat "$WORK/drive.out")" "tool=claude"
 
 echo
+echo "settings files stay \$HOME-relative"
+# These configs get committed to dotfiles repos, so the hook path must not bake
+# in a username. Everything above runs with the install dirs outside $HOME, which
+# exercises the absolute branch; here $HOME contains them so the rewrite applies.
+CASE=$((CASE + 1))
+FAKE_HOME="$WORK/case$CASE-home"
+mkdir -p "$FAKE_HOME"
+# Deliberately unset the dir overrides so the installer derives them from $HOME.
+home_init() {
+  env -u ZJ_AGENT_HOOK_DIR -u ZJ_AGENT_PLUGIN_DIR -u CLAUDE_CONFIG_DIR -u CODEX_HOME \
+    HOME="$FAKE_HOME" sh "$INIT" "$@"
+}
+HOME_CLAUDE="$FAKE_HOME/.claude/settings.json"
+HOME_CODEX="$FAKE_HOME/.codex/hooks.json"
+HOME_ABS="$FAKE_HOME/.config/zj-agent-mob/hook.sh"
+
+home_init install claude codex >/dev/null 2>&1 || true
+# shellcheck disable=SC2016  # The literal, unexpanded `$HOME` is what we assert.
+assert_eq "claude hook is written \$HOME-relative" \
+  "$(jq -r '.hooks.Stop[0].hooks[0].command' "$HOME_CLAUDE")" \
+  '$HOME/.config/zj-agent-mob/hook.sh'
+# shellcheck disable=SC2016  # The literal, unexpanded `$HOME` is what we assert.
+assert_eq "codex hook is written \$HOME-relative" \
+  "$(jq -r '.hooks.Stop[0].hooks[0].command' "$HOME_CODEX")" \
+  'env ZJ_AGENT_TOOL=codex $HOME/.config/zj-agent-mob/hook.sh'
+# The whole point: no absolute home path anywhere in a file people commit.
+if grep -q "$FAKE_HOME" "$HOME_CLAUDE" "$HOME_CODEX"; then
+  bad "settings leak no absolute home path" "found $FAKE_HOME in a settings file"
+else
+  ok "settings leak no absolute home path"
+fi
+assert_contains "status recognizes the \$HOME form" \
+  "$(home_init status | tr '\n' ' ')" "claude=installed"
+
+# Re-running must not double-register: the filter has to match what it wrote.
+home_init install claude codex >/dev/null 2>&1 || true
+assert_eq "re-install does not duplicate the \$HOME form" \
+  "$(jq '[.hooks.Stop[].hooks[]] | length' "$HOME_CLAUDE")" "1"
+
+# A $HOME-relative command is only useful if the shell can actually run it.
+ZJ_TEST_CAPTURE="$WORK/drive.out"; : > "$ZJ_TEST_CAPTURE"
+home_cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$HOME_CODEX")
+printf '{"hook_event_name":"Stop"}' | env PATH="$WORK/bin:$PATH" ZELLIJ_PANE_ID=7 \
+  HOME="$FAKE_HOME" ZJ_TEST_CAPTURE="$ZJ_TEST_CAPTURE" ZJ_AGENT_PLUGIN=file:/p.wasm \
+  sh -c "$home_cmd" >/dev/null 2>&1 || true
+assert_contains "the \$HOME command string runs once expanded" \
+  "$(cat "$WORK/drive.out")" "tool=codex"
+
+home_init uninstall >/dev/null 2>&1 || true
+assert_contains "uninstall clears the \$HOME form" \
+  "$(home_init status | tr '\n' ' ')" "claude=absent"
+
+echo
+echo "installs predating the \$HOME rewrite still migrate"
+# Entries written by the older installer are absolute. They must still be
+# recognized, replaced rather than duplicated, and removable.
+CASE=$((CASE + 1))
+FAKE_HOME="$WORK/case$CASE-home"
+mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+HOME_CLAUDE="$FAKE_HOME/.claude/settings.json"
+HOME_CODEX="$FAKE_HOME/.codex/hooks.json"
+HOME_ABS="$FAKE_HOME/.config/zj-agent-mob/hook.sh"
+# A legacy install, plus an unrelated user hook that must survive untouched.
+jq -n --arg c "$HOME_ABS" '{hooks:{
+  Stop:[{hooks:[{type:"command",command:$c,async:true}]}],
+  PreToolUse:[{matcher:"*",hooks:[{type:"command",command:"echo mine"}]}]}}' > "$HOME_CLAUDE"
+jq -n --arg c "env ZJ_AGENT_TOOL=codex $HOME_ABS" \
+  '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' > "$HOME_CODEX"
+
+assert_contains "status recognizes a legacy absolute install" \
+  "$(home_init status | tr '\n' ' ')" "claude=installed"
+home_init install claude codex >/dev/null 2>&1 || true
+# shellcheck disable=SC2016  # The literal, unexpanded `$HOME` is what we assert.
+assert_eq "legacy claude entry is replaced, not duplicated" \
+  "$(jq -c '[.hooks.Stop[].hooks[].command]' "$HOME_CLAUDE")" \
+  '["$HOME/.config/zj-agent-mob/hook.sh"]'
+# shellcheck disable=SC2016  # The literal, unexpanded `$HOME` is what we assert.
+assert_eq "legacy codex entry is replaced, not duplicated" \
+  "$(jq -c '[.hooks.Stop[].hooks[].command]' "$HOME_CODEX")" \
+  '["env ZJ_AGENT_TOOL=codex $HOME/.config/zj-agent-mob/hook.sh"]'
+assert_contains "an unrelated user hook survives migration" \
+  "$(jq -c '[.hooks.PreToolUse[].hooks[].command]' "$HOME_CLAUDE")" '"echo mine"'
+
+# And uninstall must clean up a legacy install it never wrote itself.
+jq -n --arg c "$HOME_ABS" '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' > "$HOME_CLAUDE"
+home_init uninstall >/dev/null 2>&1 || true
+assert_eq "uninstall removes a legacy absolute entry" \
+  "$(jq -r '.hooks // "removed"' "$HOME_CLAUDE")" "removed"
+
+echo
 echo "-------------------------------------------"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

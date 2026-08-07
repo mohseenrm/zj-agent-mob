@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::Text;
 
 use crate::host;
-use crate::style::DIM_LEVEL;
+use crate::style::{chars, DIM_LEVEL};
 use crate::util::wrap;
 
 /// `$HOME` is expanded by the shell, not us: the plugin has no environment.
@@ -242,8 +242,8 @@ impl Install {
             .map(|(i, a)| {
                 let marker = if i == self.setup_selected { "\u{25b6}" } else { " " };
                 let text = format!("{} {}  {}", marker, a.hotkey(), a.label());
-                // Byte offset: the cursor marker is multi-byte.
-                let at = marker.len() + 1;
+                // Character offset: the cursor marker is multi-byte.
+                let at = chars(marker) + 1;
                 let text = Text::new(text).color_range(0, at..at + 1);
                 if i == self.setup_selected {
                     text.selected()
@@ -341,8 +341,8 @@ impl Install {
                     st.icon(),
                     st.text()
                 );
-                // Byte offsets: the cursor marker is multi-byte.
-                let key_at = marker.len() + 1;
+                // Character offsets: the cursor marker is multi-byte.
+                let key_at = chars(marker) + 1;
                 let icon_at = key_at + 1 + 2 + 20 + 1;
                 let mut item = Text::new(text).color_range(0, key_at..key_at + 1);
                 item = match st {

@@ -18,10 +18,11 @@ impl Hint {
         format!("{} {}", self.key, self.action)
     }
 
-    /// **Byte** offsets: `Text::serialize` encodes via `as_bytes()`, and the
-    /// enter glyph is multi-byte.
+    /// **Character** offsets, which is what Zellij's colour ranges index. The
+    /// enter glyph is 3 bytes, so `key.len()` would bleed the colour into the
+    /// action word.
     pub(crate) fn key_range(&self) -> std::ops::Range<usize> {
-        0..self.key.len()
+        0..crate::style::chars(self.key)
     }
 }
 
@@ -76,25 +77,20 @@ mod tests {
         assert_eq!(Hint::new("\u{21b5}", "jump").text(), "\u{21b5} jump");
     }
 
-    /// The highlighted range must cover exactly the key and stop before the
-    /// space, and must land on a char boundary so multi-byte keys don't corrupt
-    /// the serialized payload.
+    /// The highlighted range is in characters and must cover exactly the key,
+    /// stopping before the separating space. A byte-length range would spill
+    /// into the action word for the multi-byte enter glyph.
     #[test]
     fn key_range_covers_the_key_only() {
         for h in LIST_HINTS.iter().chain(INSTALL_HINTS).chain(SETUP_HINTS) {
             let text = h.text();
             let r = h.key_range();
-            assert!(
-                text.is_char_boundary(r.start) && text.is_char_boundary(r.end),
-                "range {:?} splits a char in {:?}",
-                r,
-                text
-            );
-            assert_eq!(&text[r.clone()], h.key, "range must cover exactly the key");
+            let covered: String = text.chars().skip(r.start).take(r.end - r.start).collect();
+            assert_eq!(covered, h.key, "range must cover exactly the key in {:?}", text);
             assert_eq!(
-                text.as_bytes().get(r.end),
-                Some(&b' '),
-                "the byte after the range must be the separating space in {:?}",
+                text.chars().nth(r.end),
+                Some(' '),
+                "the char after the range must be the separating space in {:?}",
                 text
             );
         }

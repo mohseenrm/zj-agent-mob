@@ -3,7 +3,7 @@
 use zellij_tile::prelude::Text;
 
 use crate::status::Status;
-use crate::style::DIM_LEVEL;
+use crate::style::{chars, DIM_LEVEL};
 use crate::util::{fmt_elapsed, truncate};
 
 pub(crate) struct Agent {
@@ -44,15 +44,15 @@ impl Agent {
         let marker = if selected { "\u{25b6}" } else { " " };
         let label = self.status.label();
 
-        // Ranges are tracked as the string is built. `Text::serialize` encodes
-        // via `as_bytes()`, so these must be byte offsets, and both the marker
-        // and the spinner icon are multi-byte.
+        // Ranges are tracked as the string is built, in CHARACTER offsets: both
+        // the marker and the spinner icon are multi-byte, so byte offsets would
+        // shift the colour past the icon and into the middle of the next word.
         let mut text = format!("{} {} ", marker, i + 1);
-        let icon_range = text.len()..text.len() + icon.len();
+        let icon_range = chars(&text)..chars(&text) + chars(icon);
         text.push_str(icon);
         text.push(' ');
         text.push_str(&format!("{:<7} ", self.tool));
-        let label_range = text.len()..text.len() + label.len();
+        let label_range = chars(&text)..chars(&text) + chars(label);
         text.push_str(&format!("{:<7} {:>6}", label, fmt_elapsed(now - self.status_since)));
 
         if show_cwd {
@@ -183,23 +183,34 @@ mod render_tests {
         assert!(row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains("api"));
     }
 
-    /// Drifting byte offsets colour the wrong characters, which the text
-    /// assertions above cannot catch.
+    /// Drifting offsets colour the wrong characters, which the text assertions
+    /// above cannot catch. Zellij indexes colour ranges by character, so these
+    /// mirror that: byte offsets here would slide past the multi-byte marker
+    /// and icon and highlight only part of the tool name and status label.
     #[test]
     fn colour_ranges_land_on_the_icon_and_status_label() {
+        fn slice(text: &str, r: std::ops::Range<usize>) -> String {
+            text.chars().skip(r.start).take(r.end - r.start).collect()
+        }
+
         for (i, selected, icon) in [(0usize, true, "\u{280b}"), (9, false, "\u{25cf}"), (2, true, "?")] {
             let a = agent();
             let item = a.list_item(i, selected, icon, 0.0, 110, true);
             let text = item_text(&item);
             let marker = if selected { "\u{25b6}" } else { " " };
 
-            let icon_at = marker.len() + 1 + (i + 1).to_string().len() + 1;
-            assert_eq!(&text[icon_at..icon_at + icon.len()], icon, "icon offset in {:?}", text);
+            let icon_at = chars(marker) + 1 + (i + 1).to_string().len() + 1;
+            assert_eq!(
+                slice(&text, icon_at..icon_at + chars(icon)),
+                icon,
+                "icon offset in {:?}",
+                text
+            );
 
             let label = a.status.label();
-            let label_at = icon_at + icon.len() + 1 + a.tool.len().max(7) + 1;
+            let label_at = icon_at + chars(icon) + 1 + a.tool.chars().count().max(7) + 1;
             assert_eq!(
-                &text[label_at..label_at + label.len()],
+                slice(&text, label_at..label_at + chars(label)),
                 label,
                 "label offset in {:?}",
                 text

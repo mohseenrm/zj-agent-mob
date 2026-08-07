@@ -446,20 +446,21 @@ mod reconcile_tests {
         assert_eq!(s.agents.len(), 1, "plugin panes are not agent panes");
     }
 
-    /// `Text::color_range` takes BYTE offsets, not char offsets.
+    /// `Text::color_range` takes CHAR offsets, not byte offsets. Byte offsets
+    /// slide the range past the multi-byte marker and colour part of the next
+    /// column instead of the icon.
     #[test]
-    fn icon_byte_offset_lands_on_the_icon() {
+    fn icon_char_offset_lands_on_the_icon() {
         for (marker, idx, icon) in [
             ("\u{25b6}", 1usize, "\u{25cf}"),
             (" ", 2, "\u{2713}"),
             ("\u{25b6}", 10, "\u{280b}"),
         ] {
             let line = format!("{} {} {} rest", marker, idx, icon);
-            let start = marker.len() + 1 + idx.to_string().len() + 1;
-            let end = start + icon.len() - 1;
-            assert!(line.is_char_boundary(start), "start must be a char boundary");
-            assert!(line.is_char_boundary(end + 1), "end+1 must be a char boundary");
-            assert_eq!(&line[start..=end], icon, "range must cover exactly the icon");
+            let start = crate::style::chars(marker) + 1 + idx.to_string().len() + 1;
+            let end = start + crate::style::chars(icon);
+            let covered: String = line.chars().skip(start).take(end - start).collect();
+            assert_eq!(covered, icon, "range must cover exactly the icon in {:?}", line);
         }
     }
 }

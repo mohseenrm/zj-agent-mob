@@ -5,7 +5,7 @@ use zellij_tile::prelude::*;
 
 use crate::state::State;
 use crate::status::Status;
-use crate::style::DIM_LEVEL;
+use crate::style::{chars, DIM_LEVEL};
 use crate::util::truncate;
 use crate::{content_width, host, ribbon, PANE_TITLE, TICK};
 
@@ -32,8 +32,7 @@ impl ZellijPlugin for State {
         ]);
         set_selectable(true);
 
-        // Otherwise the frame shows the full wasm path, leaking $HOME.
-        host::rename_own_pane(PANE_TITLE);
+        self.rename_pane();
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -45,6 +44,7 @@ impl ZellijPlugin for State {
                 // `run_command` only reaches the host after the grant; a refresh
                 // fired from `load` is silently dropped.
                 self.install.refresh();
+                self.rename_pane();
                 true
             }
             Event::Timer(_) => {
@@ -110,6 +110,10 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    fn rename_pane(&self) {
+        host::rename_own_pane(PANE_TITLE);
+    }
+
     fn render_install(&self, width: usize) {
         let mut y = self.render_header("install", width);
         y = self.render_rows(self.install.list_items(), y);
@@ -160,7 +164,9 @@ impl State {
                 head.push_str(" \u{b7} ");
             }
             let digits = n.to_string();
-            ranges.push((status.color_level(), head.len()..head.len() + digits.len()));
+            // Character offsets: the `\u{b7}` separator is multi-byte, so byte
+            // offsets would drift right by one per separator already written.
+            ranges.push((status.color_level(), chars(&head)..chars(&head) + digits.len()));
             head.push_str(&digits);
             head.push(' ');
             head.push_str(label);

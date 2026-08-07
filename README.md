@@ -18,8 +18,7 @@ A Zellij plugin that monitors Claude Code and Codex agents running in your curre
 - [Statuses](#statuses)
 - [Known limitations](#known-limitations)
 - Additional docs:
-  - [Setup: install, Zellij registration, configuration](docs/setup.md)
-  - [How it works](docs/how-it-works.md)
+  - [Setup: install, Zellij configuration](docs/setup.md)
   - [Local development](docs/development.md)
   - [Troubleshooting](docs/troubleshooting.md)
 
