@@ -17,7 +17,7 @@
 1. **On disk** — the compiled artifact, under `~/Library/Caches/org.Zellij-Contributors.Zellij/file:<path-to>/zj-agent-mob.wasm/` (macOS) or `~/.cache/zellij/` (Linux).
 2. **In memory** — the Zellij *server* keeps already-instantiated plugins for the lifetime of the session.
 
-Clearing only the first is not enough, which is the trap: `--skip-plugin-cache` bypasses the on-disk cache **only when a new plugin instance is created**. If the session already has one loaded, `launch-or-focus-plugin` focuses the existing instance rather than building a new one, so the flag silently does nothing. Closing the plugin pane does not help either — the server still holds the compiled module.
+Clearing the first alone is not enough, which is the trap: `--skip-plugin-cache` bypasses the on-disk cache **only when a new plugin instance is created**. If the session already has one loaded, `launch-or-focus-plugin` focuses the existing instance rather than building a new one, so the flag silently does nothing. Closing the plugin pane does not help either — the server still holds the compiled module.
 
 **The reliable fix is a brand-new session**, which means a new server process:
 

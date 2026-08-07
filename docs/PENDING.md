@@ -14,6 +14,6 @@ All clear. Recently completed:
 - [x] End-to-end tests for the Claude Code and Codex install path
       (`tests/e2e-install.sh`), run in CI
 
-- [ ] Self contained install script for agent harnesses
-    - [ ] Claude code
+- [ ] Self-contained install script for agent harnesses
+    - [ ] Claude Code
     - [ ] Codex

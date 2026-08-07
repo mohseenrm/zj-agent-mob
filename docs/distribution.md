@@ -40,14 +40,14 @@ replaces the entire download step. Two blockers, both non-technical:
 
 ### 2. `jq` in the hook
 
-This is the hard one, and it is what actually blocks "no external deps".
+This is the hard one, and it is what blocks "no external deps".
 
 `scripts/zj-agent-mob-hook.sh` uses `jq` three times: to parse the hook event on stdin,
 to pull `aiTitle`/`lastPrompt` out of a Claude transcript, and to scan a Codex rollout.
 `init.sh` uses it to merge settings JSON.
 
 The fix is to move parsing out of the shell and into the wasm, which is already a JSON
-consumer's natural home. The hook currently does the work because `zellij pipe --args`
+consumer's natural home. The hook does the work today because `zellij pipe --args`
 takes `key=value` pairs and the plugin's `handle_status` (`src/state.rs:63`) reads
 pre-split fields. But `zellij pipe` can carry an arbitrary payload on stdin, and
 `PipeMessage` exposes it. So:
@@ -118,7 +118,7 @@ explicitly rather than by default.
 
 ## What "config" should mean
 
-Everything currently passed by environment variable or baked into the hook should move
+Everything now passed by environment variable or baked into the hook should move
 into the KDL block, which `load()` already receives as a `BTreeMap<String, String>`
 (`src/plugin.rs:13`). Today only `popup_on_waiting` is read. Proposed surface:
 

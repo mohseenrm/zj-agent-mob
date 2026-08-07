@@ -7,7 +7,7 @@
 
 A Zellij plugin that monitors Claude Code and Codex agents running in your current session: live status, what each agent is working on, jump-to-pane, and kill.
 
-![The agent list: one row per agent with status, elapsed time, project and task, each with an indented detail line](docs/img/02-agent-list.png)
+![The agent list: one row per agent with status, elapsed time, project, and task, each with an indented detail line](docs/img/02-agent-list.png)
 
 Status comes from real agent hooks, not screen scraping. The task summary is pulled from the agent's own transcript.
 
@@ -31,7 +31,7 @@ Status comes from real agent hooks, not screen scraping. The task summary is pul
 |---|---|
 | Zellij 0.44+ | Plugin API (`LaunchOrFocusPlugin`, pipes, `RunCommandResult`) |
 | `jq` | The hook parses hook-event JSON; the installer merges settings |
-| Claude Code and/or Codex | The agents being monitored |
+| Claude Code, Codex, or both | The agents being monitored |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
 
 ## Quick start
@@ -78,7 +78,7 @@ See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install 
 
 ## Screens
 
-**First run.** If neither agent's hooks are installed nothing can report status, so the panel offers to install them rather than sitting empty. Press <kbd>1</kbd>, <kbd>2</kbd> or <kbd>3</kbd> to install without leaving Zellij.
+**First run.** If neither agent's hooks are installed, nothing can report status, so the panel offers to install them rather than sitting empty. Press <kbd>1</kbd>, <kbd>2</kbd>, or <kbd>3</kbd> to install without leaving Zellij.
 
 ![The setup screen listing four quick actions: install for Claude Code, for Codex, for both, or quit](docs/img/01-setup.png)
 
@@ -92,7 +92,7 @@ See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install 
 
 **The install screen** (<kbd>i</kbd>) toggles each target: pressing a row's key installs it when absent and uninstalls it when present.
 
-![The install screen showing Claude Code hooks, Codex hooks and Plugin wasm all installed](docs/img/04-install.png)
+![The install screen showing Claude Code hooks, Codex hooks, and Plugin wasm all installed](docs/img/04-install.png)
 
 Targets are independent, so running only one agent's hooks is a supported state:
 

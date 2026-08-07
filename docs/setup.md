@@ -9,14 +9,14 @@
 
 ## Install
 
-Two options: download the prebuilt `zj-agent-mob.wasm` from a release, or build it yourself. Either way `init.sh` does the rest, and `jq` is required for both.
+Two options: download the prebuilt `zj-agent-mob.wasm` from a release, or build it yourself. Either way, `init.sh` does the rest, and `jq` is required for both.
 
 ### From a release
 
 Grab `zj-agent-mob.wasm` from the [latest release](https://github.com/mohseenrm/zj-agent-mob/releases/latest) ([all releases](https://github.com/mohseenrm/zj-agent-mob/releases)). No Rust toolchain needed.
 
 > [!NOTE]
-> This repository is currently **private**, so release assets need an authenticated download. Plain `curl` gets a 404 until the repo is public. The `gh` commands below work today; the `curl` ones become the simpler path once it is public.
+> This repository is **private**, so release assets need an authenticated download. Plain `curl` gets a 404 until the repo is public. The `gh` commands below work today; the `curl` ones become the simpler path once it is public.
 
 `init.sh` reads the plugin from `target/wasm32-wasip1/release/`, so put the download there and it installs like a local build:
 
@@ -27,7 +27,7 @@ gh release download --repo mohseenrm/zj-agent-mob v0.1.0 \
 ./init.sh
 ```
 
-To skip the repo entirely, put the wasm straight into the plugin directory and install the hooks separately:
+To skip the repo entirely, put the wasm directly into the plugin directory and install the hooks separately:
 
 ```sh
 mkdir -p ~/.config/zellij/plugins
@@ -58,7 +58,7 @@ cargo build --release --target wasm32-wasip1
 ./init.sh install claude   # just Claude Code's hooks
 ./init.sh install codex    # just Codex's hooks
 ./init.sh install plugin   # just copy the built wasm
-./init.sh status           # what is currently installed
+./init.sh status           # what is installed right now
 ./init.sh --dry-run        # preview, write nothing
 ./init.sh uninstall        # remove exactly what was installed
 ./init.sh uninstall codex  # remove one target only
@@ -77,7 +77,9 @@ Each row toggles: pressing its key installs when absent and uninstalls when pres
 
 If neither agent is hooked, the panel skips the empty state and offers the same install directly:
 
-![The setup screen listing four quick actions: install for Claude Code, for Codex, for both, or quit](img/01-setup.png) The screen shells out to the copy of the installer that `init.sh` leaves at `~/.config/zj-agent-mob/install.sh`, so it works regardless of where you cloned the repo. This needs Zellij's "Run commands" permission, which the plugin requests on first load.
+![The setup screen listing four quick actions: install for Claude Code, for Codex, for both, or quit](img/01-setup.png)
+
+The screen shells out to the copy of the installer that `init.sh` leaves at `~/.config/zj-agent-mob/install.sh`, so it works regardless of where you cloned the repo. This needs Zellij's "Run commands" permission, which the plugin requests on first load.
 
 ## Register the plugin with Zellij
 

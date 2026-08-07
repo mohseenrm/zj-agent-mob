@@ -37,11 +37,11 @@ shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh \
 | End-to-end (hook) | [`tests/e2e-hook.sh`](../tests/e2e-hook.sh) | The hook script: hook-event JSON in, `zellij pipe --args` out |
 | End-to-end (installer) | [`tests/e2e-install.sh`](../tests/e2e-install.sh) | `init.sh`: the hook config written for Claude Code and Codex, and the round trip back out |
 
-Between them these cover the two seams the Rust suite cannot reach, and neither needs a running Zellij, a real agent or a pane. Both run in about a second.
+Between them these cover the two seams the Rust suite cannot reach, and neither needs a running Zellij, a real agent, or a pane. Both run in about a second.
 
 `tests/e2e-hook.sh` stubs `zellij` with a script that records its argv, then feeds the hook real-shaped event JSON: event-to-status mapping, the cases that must stay silent (no `$ZELLIJ_PANE_ID`, `ZJ_AGENT_HEARTBEAT=0`, unknown or malformed events), Claude `ai-title` and Codex rollout summaries, sanitizing, shell-injection through the task and `cwd`, and the always-exit-0 contract.
 
-`tests/e2e-install.sh` runs the real `init.sh` against a throwaway set of paths (`ZJ_AGENT_HOOK_DIR`, `ZJ_AGENT_PLUGIN_DIR`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so it never touches your own `~/.claude` or `~/.codex`. What it asserts is the release-critical part: the hook config the agents themselves read.
+`tests/e2e-install.sh` runs the real `init.sh` against a throwaway set of paths (`ZJ_AGENT_HOOK_DIR`, `ZJ_AGENT_PLUGIN_DIR`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so it never touches your own `~/.claude` or `~/.codex`. It asserts the release-critical part: the hook config the agents themselves read.
 
 - **Hook contract**, per agent. Every event Claude Code and Codex need is registered against the hook; every event registered is one the hook actually maps to a status (so no agent pays for a hook that reports nothing); Claude entries are `async` and Codex entries are not; `Notification` stays scoped to `permission_prompt|idle_prompt`; Codex commands carry the `env ZJ_AGENT_TOOL=codex` prefix that selects the right transcript reader.
 - **Non-destructive merge.** An existing `settings.json` keeps its unrelated keys, its own hooks on events we share, and its events we never touch. Uninstall is checked by comparing the file back to the pre-install content, not just by grepping for our command.
@@ -100,7 +100,7 @@ Published releases are listed on the [releases page](https://github.com/mohseenr
 
 ## Why a bin target
 
-The crate builds a **bin** target (`src/main.rs`), not just a cdylib. Zellij's loader needs the WASI `_start` export, which only a bin provides; a bare cdylib fails at load with `could not find exported function`. `register_plugin!` also generates its own `fn main()`, so it must be invoked in `main.rs`. The lib target (`src/lib.rs`) holds all the logic purely so `cargo test` can run it natively.
+The crate builds a **bin** target (`src/main.rs`), not just a cdylib. Zellij's loader needs the WASI `_start` export, which only a bin provides; a bare cdylib fails at load with `could not find exported function`. `register_plugin!` also generates its own `fn main()`, so it must be invoked in `main.rs`. The lib target (`src/lib.rs`) holds all the logic so `cargo test` can run it natively.
 
 To check a build has the right exports:
 
