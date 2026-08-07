@@ -69,7 +69,20 @@ Check which situation you are in with `readlink ~/.config/zellij/plugins/zj-agen
 
 ## The panel says "no agents in this session"
 
-Work through these in order:
+**First, check whether the panel says `found` instead.** A row like
+
+```
+  1 ◌ claude  found         --   no report yet
+```
+
+means the plugin located a running agent by scanning process environments, but that agent has
+never fired a hook - normally because it was already running when the hooks were installed, or
+because the plugin was reloaded. The row fills in the moment the agent next does anything. This
+is not a broken install.
+
+A discovered agent is found whether it was launched from a layout or typed into an existing
+shell, so an empty panel with agents visibly running usually means the hooks are genuinely not
+firing. Work through these in order:
 
 1. **Are the hooks installed?** Press <kbd>i</kbd>, or run `./init.sh status`.
 2. **Did you restart the agent?** Hooks are read at session start. An agent that was already running when you installed them reports nothing.

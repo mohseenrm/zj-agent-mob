@@ -1,6 +1,7 @@
 //! Zellij plugin that monitors Claude Code and Codex agents in the current session.
 
 mod agent;
+mod discover;
 mod host;
 mod install;
 mod keys;
