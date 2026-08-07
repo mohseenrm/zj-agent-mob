@@ -153,7 +153,14 @@ claude_hooks_json() {
 
 install_claude() {
   say "Claude Code: $CLAUDE_SETTINGS"
-  [ -e "$CLAUDE_SETTINGS" ] || { mkdir -p "$(dirname "$CLAUDE_SETTINGS")"; echo '{}' > "$CLAUDE_SETTINGS"; }
+  # A dry run must not create the settings file it is only pretending to edit,
+  # so seed on disk for a real install and merge into an in-memory `{}` otherwise.
+  if [ -e "$CLAUDE_SETTINGS" ]; then
+    _current=$(cat "$(resolve "$CLAUDE_SETTINGS")")
+  else
+    [ "$DRY" = 1 ] || { mkdir -p "$(dirname "$CLAUDE_SETTINGS")"; echo '{}' > "$CLAUDE_SETTINGS"; }
+    _current='{}'
+  fi
   backup "$CLAUDE_SETTINGS"
   _hooks=$(claude_hooks_json)
   # Merge: for each event, drop any entry already pointing at our hook (so
@@ -167,7 +174,9 @@ install_claude() {
                     | select((.hooks | length) > 0)))
             + $new[$ev]
           )))
-  ' "$(resolve "$CLAUDE_SETTINGS")" | write_atomic "$CLAUDE_SETTINGS"
+  ' <<EOF | write_atomic "$CLAUDE_SETTINGS"
+$_current
+EOF
 }
 
 uninstall_claude() {
