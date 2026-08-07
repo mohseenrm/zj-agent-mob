@@ -285,15 +285,23 @@ assert_eq "the backup holds the pre-install content" \
 
 echo
 echo "plugin target"
+# These cases turn on whether a built wasm exists beside the installer, so they
+# run against a copy of the source tree rather than the repo: otherwise they
+# would pass or fail depending on whether someone had run cargo build.
+UNBUILT="$WORK/unbuilt"
+mkdir -p "$UNBUILT/scripts"
+cp "$INIT" "$UNBUILT/init.sh"
+cp "$ROOT/scripts/zj-agent-mob-hook.sh" "$UNBUILT/scripts/"
+
 fresh
 # Not built: the full install must still wire up the agents and only warn.
-init install || true
+sh "$UNBUILT/init.sh" install >/dev/null 2>&1 || true
 assert_contains "a missing wasm only warns during a full install" \
-  "$(sh "$INIT" install 2>&1 || true)" "plugin not built"
+  "$(sh "$UNBUILT/init.sh" install 2>&1 || true)" "plugin not built"
 assert_contains "the agents are installed anyway" \
   "$(sh "$INIT" status | tr '\n' ' ')" "claude=installed"
 # Asking for the plugin alone is explicit, so a missing build is a hard error.
-rc=0; sh "$INIT" install plugin >/dev/null 2>&1 || rc=$?
+rc=0; sh "$UNBUILT/init.sh" install plugin >/dev/null 2>&1 || rc=$?
 assert_eq "install plugin alone fails when unbuilt" "$rc" "1"
 
 fresh
