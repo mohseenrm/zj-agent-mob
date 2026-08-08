@@ -65,15 +65,24 @@ impl ZellijPlugin for State {
                 true
             }
             Event::SessionUpdate(sessions, _) => {
-                let Some(name) = sessions.iter().find(|s| s.is_current_session).map(|s| s.name.clone()) else {
-                    return false;
+                let live: Vec<String> = sessions
+                    .iter()
+                    .map(|s| crate::agent::sanitize_session(&s.name))
+                    .collect();
+                let changed = self.apply_sessions(live);
+                let Some(name) = sessions
+                    .iter()
+                    .find(|s| s.is_current_session)
+                    .map(|s| crate::agent::sanitize_session(&s.name))
+                else {
+                    return changed;
                 };
                 if self.session_name == name {
-                    return false;
+                    return changed;
                 }
                 self.session_name = name;
                 self.request_scan();
-                false
+                changed
             }
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
@@ -265,13 +274,23 @@ impl State {
         let mut items = Vec::new();
         for (i, agent) in self.agents.iter().enumerate() {
             let icon = self.icon_for(agent);
-            items.push(agent.list_item(i, i == self.selected, icon, self.now, width, show_cwd));
+            items.push(agent.list_item(
+                i,
+                crate::agent::RowCtx {
+                    selected: i == self.selected,
+                    icon,
+                    now: self.now,
+                    cols: width,
+                    show_cwd,
+                    home: &self.session_name,
+                },
+            ));
             if detail_lines {
-                items.push(agent.detail_item(self.kill_armed == Some(agent.pane_id), width));
+                items.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), width));
             }
             // The prompt belongs to one agent, so it renders under that row.
             if i == self.selected {
-                if let Some(ask) = self.ask_for(agent.pane_id) {
+                if let Some(ask) = self.ask_for(&agent.id) {
                     items.extend(ask_rows(ask, width));
                 }
             }
@@ -281,7 +300,7 @@ impl State {
         let selected_has_ask = self
             .agents
             .get(self.selected)
-            .is_some_and(|a| self.ask_for(a.pane_id).is_some());
+            .is_some_and(|a| self.ask_for(&a.id).is_some());
         let hints = if selected_has_ask {
             ribbon::ASK_HINTS
         } else {

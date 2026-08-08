@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentId};
 use crate::host;
 use crate::install::Install;
 use crate::status::Status;
@@ -11,7 +11,7 @@ use crate::{SPINNER, TICK};
 
 /// A permission prompt parked by a blocked hook, waiting on a verdict.
 pub(crate) struct Ask {
-    pub(crate) pane_id: u32,
+    pub(crate) id: AgentId,
     pub(crate) verdict_file: String,
     pub(crate) tool_name: String,
     pub(crate) tool_arg: String,
@@ -26,14 +26,15 @@ pub struct State {
     pub(crate) frame: usize,
     pub(crate) now: f64,
     pub(crate) permissions_granted: bool,
-    pub(crate) kill_armed: Option<u32>,
+    pub(crate) kill_armed: Option<AgentId>,
     pub(crate) timer_running: bool,
     pub(crate) popup_on_waiting: bool,
     pub(crate) hidden: bool,
     pub(crate) install: Install,
-    /// Needed to scope the scan; the plugin is not told this at load, it
-    /// arrives with the first `SessionUpdate`.
+    /// The panel's own session; rows from anywhere else are foreign.
     pub(crate) session_name: String,
+    /// Every session Zellij currently lists, used to spot dead ones.
+    pub(crate) live_sessions: Vec<String>,
     /// A scan is in flight, so a second one would be wasted work.
     pub(crate) scan_pending: bool,
 }
@@ -55,6 +56,7 @@ impl State {
             Status::Done => "\u{2713}",
             Status::Idle => "\u{25cb}",
             Status::Discovered => "\u{25cc}",
+            Status::Unknown => "?",
         }
     }
 
@@ -72,7 +74,7 @@ impl State {
                 Status::Waiting | Status::IdleWait => c.1 += 1,
                 Status::Working | Status::Compact => c.2 += 1,
                 Status::Done => c.3 += 1,
-                Status::Idle | Status::Discovered => {}
+                Status::Idle | Status::Discovered | Status::Unknown => {}
             }
         }
         c
@@ -90,16 +92,52 @@ impl State {
         }
     }
 
+    /// Messages from before the hook carried `session=` fall back to the
+    /// panel's own session, which is where they must have come from.
+    fn id_from(&self, args: &BTreeMap<String, String>) -> Option<AgentId> {
+        let pane_id = args.get("pane_id").and_then(|v| v.parse::<u32>().ok())?;
+        let session = args
+            .get("session")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.session_name.clone());
+        Some(AgentId { session, pane_id })
+    }
+
+    /// Rows whose session is gone go `unknown` rather than disappearing.
+    pub(crate) fn apply_sessions(&mut self, live: Vec<String>) -> bool {
+        if live.is_empty() {
+            return false;
+        }
+        self.live_sessions = live;
+        let mut changed = false;
+        for agent in self.agents.iter_mut() {
+            let alive = self.live_sessions.contains(&agent.id.session);
+            if agent.session_alive != alive {
+                agent.session_alive = alive;
+                changed = true;
+            }
+            if !alive && agent.status != Status::Unknown {
+                agent.status = Status::Unknown;
+                changed = true;
+            }
+        }
+        if changed {
+            self.sort_agents();
+        }
+        changed
+    }
+
     pub(crate) fn handle_status(&mut self, args: &BTreeMap<String, String>) -> bool {
-        let Some(pane_id) = args.get("pane_id").and_then(|v| v.parse::<u32>().ok()) else {
+        let Some(id) = self.id_from(args) else {
             return false;
         };
         let raw_status = args.get("status").map(|s| s.as_str()).unwrap_or("");
 
         if raw_status == "ended" {
             let before = self.agents.len();
-            self.agents.retain(|a| a.pane_id != pane_id);
-            self.asks.retain(|k| k.pane_id != pane_id);
+            self.agents.retain(|a| a.id != id);
+            self.asks.retain(|k| k.id != id);
             self.clamp_selection();
             return self.agents.len() != before;
         }
@@ -107,7 +145,7 @@ impl State {
         // Subagent and task events carry no status: they adjust counters on a row
         // that already exists rather than describing the pane's own state.
         if raw_status.is_empty() {
-            return self.handle_counters(pane_id, args);
+            return self.handle_counters(&id, args);
         }
 
         let Some(status) = Status::parse(raw_status) else {
@@ -121,7 +159,7 @@ impl State {
         let now = self.now;
 
         let newly_waiting;
-        if let Some(agent) = self.agents.iter_mut().find(|a| a.pane_id == pane_id) {
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
             let changed = agent.status != status;
             newly_waiting = changed && status == Status::Waiting;
             if changed {
@@ -153,7 +191,7 @@ impl State {
             // The agent moved on by itself, so the parked prompt is moot: the
             // hook timed out and fell through to its own prompt.
             if changed && status != Status::Waiting {
-                self.asks.retain(|k| k.pane_id != pane_id);
+                self.asks.retain(|k| k.id != id);
             }
             // A new turn retires the previous turn's fan-out and task list.
             if changed && status == Status::Working {
@@ -163,10 +201,11 @@ impl State {
                 agent.tasks_done = 0;
             }
             agent.alive = true;
+            agent.session_alive = true;
         } else {
             newly_waiting = status == Status::Waiting;
             self.agents.push(Agent {
-                pane_id,
+                id: id.clone(),
                 tool: args.get("tool").cloned().unwrap_or_else(|| "agent".into()),
                 session_id: args.get("session_id").cloned().unwrap_or_default(),
                 status,
@@ -183,6 +222,7 @@ impl State {
                 subagent_types: Vec::new(),
                 tasks_total: 0,
                 tasks_done: 0,
+                session_alive: true,
             });
         }
 
@@ -190,7 +230,7 @@ impl State {
         self.arm_timer();
 
         if newly_waiting && self.popup_on_waiting && self.hidden {
-            if let Some(idx) = self.agents.iter().position(|a| a.pane_id == pane_id) {
+            if let Some(idx) = self.agents.iter().position(|a| a.id == id) {
                 self.selected = idx;
             }
             self.hidden = false;
@@ -201,13 +241,13 @@ impl State {
 
     /// Applies a subagent / task-progress delta to an existing row. Counters are
     /// sent as deltas because the hook is stateless.
-    fn handle_counters(&mut self, pane_id: u32, args: &BTreeMap<String, String>) -> bool {
+    fn handle_counters(&mut self, id: &AgentId, args: &BTreeMap<String, String>) -> bool {
         let delta = |k: &str| args.get(k).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
         let (sub, created, done) = (delta("subagent_delta"), delta("task_delta"), delta("task_done_delta"));
         if sub == 0 && created == 0 && done == 0 {
             return false;
         }
-        let Some(agent) = self.agents.iter_mut().find(|a| a.pane_id == pane_id) else {
+        let Some(agent) = self.agents.iter_mut().find(|a| &a.id == id) else {
             return false;
         };
         agent.subagents = agent.subagents.saturating_add_signed(sub);
@@ -229,15 +269,15 @@ impl State {
     /// A blocked hook parking a permission prompt. Replaces any earlier ask for
     /// the same pane: only the newest can still be answered.
     pub(crate) fn handle_ask(&mut self, args: &BTreeMap<String, String>) -> bool {
-        let Some(pane_id) = args.get("pane_id").and_then(|v| v.parse::<u32>().ok()) else {
+        let Some(id) = self.id_from(args) else {
             return false;
         };
         let Some(verdict_file) = args.get("verdict_file").filter(|f| !f.is_empty()) else {
             return false;
         };
-        self.asks.retain(|a| a.pane_id != pane_id);
+        self.asks.retain(|a| a.id != id);
         self.asks.push(Ask {
-            pane_id,
+            id,
             verdict_file: verdict_file.clone(),
             tool_name: args.get("tool_name").cloned().unwrap_or_default(),
             tool_arg: args.get("tool_arg").cloned().unwrap_or_default(),
@@ -245,24 +285,24 @@ impl State {
         true
     }
 
-    pub(crate) fn ask_for(&self, pane_id: u32) -> Option<&Ask> {
-        self.asks.iter().find(|a| a.pane_id == pane_id)
+    pub(crate) fn ask_for(&self, id: &AgentId) -> Option<&Ask> {
+        self.asks.iter().find(|a| &a.id == id)
     }
 
     /// Writes the verdict the hook is polling for. The hook treats a missing
     /// file as "no answer" and falls through to its own prompt, so a failed
     /// write degrades to the normal flow rather than wedging the turn.
     pub(crate) fn answer_selected(&mut self, allow: bool) -> bool {
-        let Some(pane_id) = self.agents.get(self.selected).map(|a| a.pane_id) else {
+        let Some(id) = self.agents.get(self.selected).map(|a| a.id.clone()) else {
             return false;
         };
-        let Some(ask) = self.asks.iter().find(|a| a.pane_id == pane_id) else {
+        let Some(ask) = self.asks.iter().find(|a| a.id == id) else {
             return false;
         };
         let verdict = if allow { "allow" } else { "deny" };
         host::write_verdict(&ask.verdict_file, verdict);
-        self.asks.retain(|a| a.pane_id != pane_id);
-        if let Some(agent) = self.agents.iter_mut().find(|a| a.pane_id == pane_id) {
+        self.asks.retain(|a| a.id != id);
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
             agent.status = Status::Working;
             agent.status_since = self.now;
             agent.detail = Some(match allow {
@@ -279,11 +319,11 @@ impl State {
     /// known yet - without it the scan cannot be scoped and would list agents
     /// from every session on the machine.
     pub(crate) fn request_scan(&mut self) {
-        if self.scan_pending || self.session_name.is_empty() || !self.permissions_granted {
+        if self.scan_pending || !self.permissions_granted {
             return;
         }
         self.scan_pending = true;
-        crate::discover::dispatch(&self.session_name);
+        crate::discover::dispatch();
     }
 
     /// Merges a process scan into the agent list.
@@ -298,16 +338,24 @@ impl State {
         // rows are untouched: their lifecycle is owned by the hook and by
         // `reconcile`, and a scan that misses one must not delete it.
         let before = self.agents.len();
-        self.agents
-            .retain(|a| a.status != Status::Discovered || found.iter().any(|f| f.pane_id == a.pane_id));
+        self.agents.retain(|a| {
+            a.status != Status::Discovered
+                || found
+                    .iter()
+                    .any(|f| f.pane_id == a.pane_id() && f.session == a.id.session)
+        });
         let mut changed = self.agents.len() != before;
 
         for f in found {
-            if self.agents.iter().any(|a| a.pane_id == f.pane_id) {
+            let id = AgentId {
+                session: f.session,
+                pane_id: f.pane_id,
+            };
+            if self.agents.iter().any(|a| a.id == id) {
                 continue;
             }
             self.agents.push(Agent {
-                pane_id: f.pane_id,
+                id,
                 tool: f.tool,
                 session_id: String::new(),
                 status: Status::Discovered,
@@ -324,6 +372,7 @@ impl State {
                 subagent_types: Vec::new(),
                 tasks_total: 0,
                 tasks_done: 0,
+                session_alive: true,
             });
             changed = true;
         }
@@ -335,13 +384,13 @@ impl State {
     }
 
     pub(crate) fn handle_label(&mut self, args: &BTreeMap<String, String>) -> bool {
-        let Some(pane_id) = args.get("pane_id").and_then(|v| v.parse::<u32>().ok()) else {
+        let Some(id) = self.id_from(args) else {
             return false;
         };
         let Some(label) = args.get("label") else {
             return false;
         };
-        if let Some(agent) = self.agents.iter_mut().find(|a| a.pane_id == pane_id) {
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
             agent.task = Some(label.clone());
             return true;
         }
@@ -349,8 +398,11 @@ impl State {
     }
 
     pub(crate) fn reconcile(&mut self, manifest: PaneManifest) {
+        let home = self.session_name.clone();
         for agent in self.agents.iter_mut() {
-            agent.alive = false;
+            if agent.id.session == home {
+                agent.alive = false;
+            }
         }
         let mut saw_any_terminal = false;
         for (tab, panes) in manifest.panes {
@@ -360,7 +412,11 @@ impl State {
                     continue;
                 }
                 saw_any_terminal = true;
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.pane_id == pane.id) {
+                if let Some(agent) = self
+                    .agents
+                    .iter_mut()
+                    .find(|a| a.pane_id() == pane.id && a.id.session == home)
+                {
                     agent.alive = true;
                     agent.tab = Some(tab);
                     agent.pane_title = pane.title.clone();
@@ -370,9 +426,9 @@ impl State {
         // Drop agents whose pane is gone, but only once we've actually seen a
         // terminal pane: a pipe can land before the first PaneUpdate.
         if saw_any_terminal {
-            self.agents.retain(|a| a.alive);
+            self.agents.retain(|a| a.alive || a.id.session != home);
             // A prompt whose pane is gone can never be answered.
-            self.asks.retain(|k| self.agents.iter().any(|a| a.pane_id == k.pane_id));
+            self.asks.retain(|k| self.agents.iter().any(|a| a.id == k.id));
         }
         self.clamp_selection();
         self.sort_agents();
@@ -380,7 +436,7 @@ impl State {
 
     pub(crate) fn sort_agents(&mut self) {
         self.agents
-            .sort_by(|a, b| a.status.rank().cmp(&b.status.rank()).then(a.pane_id.cmp(&b.pane_id)));
+            .sort_by(|a, b| a.status.rank().cmp(&b.status.rank()).then(a.id.cmp(&b.id)));
         self.clamp_selection();
     }
 
@@ -405,7 +461,16 @@ mod tests {
         State {
             permissions_granted: true,
             popup_on_waiting: false,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
             ..Default::default()
+        }
+    }
+
+    fn id(pane_id: u32) -> AgentId {
+        AgentId {
+            session: "mob".into(),
+            pane_id,
         }
     }
 
@@ -705,8 +770,11 @@ mod tests {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
         assert!(s.handle_ask(&ask("1")));
-        assert_eq!(s.ask_for(1).map(|a| a.tool_arg.as_str()), Some("rm -rf node_modules"));
-        assert!(s.ask_for(2).is_none());
+        assert_eq!(
+            s.ask_for(&id(1)).map(|a| a.tool_arg.as_str()),
+            Some("rm -rf node_modules")
+        );
+        assert!(s.ask_for(&id(2)).is_none());
     }
 
     /// Without a verdict file the hook has nowhere to read an answer from, so
@@ -728,7 +796,7 @@ mod tests {
         second.insert("tool_arg".into(), "git push --force".into());
         s.handle_ask(&second);
         assert_eq!(s.asks.len(), 1, "one prompt per pane");
-        assert_eq!(s.ask_for(1).map(|a| a.tool_arg.as_str()), Some("git push --force"));
+        assert_eq!(s.ask_for(&id(1)).map(|a| a.tool_arg.as_str()), Some("git push --force"));
     }
 
     #[test]
@@ -737,7 +805,7 @@ mod tests {
         s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
         s.handle_ask(&ask("1"));
         assert!(s.answer_selected(true));
-        assert!(s.ask_for(1).is_none());
+        assert!(s.ask_for(&id(1)).is_none());
         assert!(s.agents[0].status == Status::Working);
         assert_eq!(s.agents[0].detail.as_deref(), Some("approved from panel"));
     }
@@ -768,7 +836,7 @@ mod tests {
         s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
         s.handle_ask(&ask("1"));
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
-        assert!(s.ask_for(1).is_none());
+        assert!(s.ask_for(&id(1)).is_none());
     }
 
     #[test]
@@ -784,6 +852,7 @@ mod tests {
         pairs
             .iter()
             .map(|(pane_id, tool)| crate::discover::Found {
+                session: "mob".to_string(),
                 pane_id: *pane_id,
                 tool: tool.to_string(),
             })
@@ -844,7 +913,7 @@ mod tests {
         assert_eq!(s.agents.len(), 2);
         assert!(s.apply_scan(found(&[(2, "claude")])));
         assert_eq!(s.agents.len(), 1);
-        assert_eq!(s.agents[0].pane_id, 2);
+        assert_eq!(s.agents[0].pane_id(), 2);
     }
 
     /// A scan that returns nothing must not wipe agents the hooks reported.
@@ -857,7 +926,7 @@ mod tests {
 
         assert!(s.apply_scan(Vec::new()), "the discovered row drops");
         assert_eq!(s.agents.len(), 1, "the reported one stays");
-        assert_eq!(s.agents[0].pane_id, 1);
+        assert_eq!(s.agents[0].pane_id(), 1);
     }
 
     /// Discovery states nothing about what an agent is doing, so folding it into
@@ -1007,5 +1076,285 @@ mod reconcile_tests {
             let covered: String = line.chars().skip(start).take(end - start).collect();
             assert_eq!(covered, icon, "range must cover exactly the icon in {:?}", line);
         }
+    }
+}
+
+/// The whole point of keying by (session, pane): two sessions routinely hand out
+/// the same pane number, and every one of these collapsed into one row before.
+#[cfg(test)]
+mod cross_session_tests {
+    use super::*;
+    use crate::agent::{sanitize_session, AgentId};
+
+    fn state() -> State {
+        State {
+            permissions_granted: true,
+            popup_on_waiting: false,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into(), "other".into()],
+            ..Default::default()
+        }
+    }
+
+    fn args(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn same_pane_id_in_two_sessions_are_separate_agents() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
+        assert_eq!(s.agents.len(), 2, "one row per (session, pane)");
+        let waiting = s.agents.iter().find(|a| a.session() == "other").unwrap();
+        assert_eq!(waiting.status, Status::Waiting);
+        let working = s.agents.iter().find(|a| a.session() == "mob").unwrap();
+        assert_eq!(working.status, Status::Working, "the foreign row must not overwrite it");
+    }
+
+    /// `ended` from one session must not delete the other's identically
+    /// numbered pane.
+    #[test]
+    fn ending_one_session_leaves_the_other() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "ended")]));
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.agents[0].session(), "mob");
+    }
+
+    /// The dangerous one: a pane-only key let an approval answer a different
+    /// session's prompt.
+    #[test]
+    fn a_verdict_answers_only_its_own_session() {
+        let mut s = state();
+        for sess in ["mob", "other"] {
+            s.handle_status(&args(&[("pane_id", "3"), ("session", sess), ("status", "waiting")]));
+            s.handle_ask(&args(&[
+                ("pane_id", "3"),
+                ("session", sess),
+                ("verdict_file", &format!("/tmp/verdict.{}.3", sess)),
+                ("tool_name", "Bash"),
+            ]));
+        }
+        assert_eq!(s.asks.len(), 2, "one parked prompt per session");
+
+        let target = s.agents.iter().position(|a| a.session() == "mob").unwrap();
+        s.selected = target;
+        assert!(s.answer_selected(true));
+
+        assert_eq!(s.asks.len(), 1, "only the selected agent's prompt is answered");
+        assert_eq!(s.asks[0].id.session, "other", "the other session still waits");
+    }
+
+    /// Reconcile only sees the panel's own session's panes, so a missing foreign
+    /// pane is absence of evidence, not a dead agent.
+    #[test]
+    fn reconcile_never_culls_foreign_rows() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+
+        let mut panes = std::collections::HashMap::new();
+        panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 4,
+                is_plugin: false,
+                title: "claude".into(),
+                ..Default::default()
+            }],
+        );
+        s.reconcile(PaneManifest { panes });
+
+        assert_eq!(s.agents.len(), 2, "the foreign row survives a local pane sweep");
+        assert!(s.agents.iter().any(|a| a.session() == "other"));
+    }
+
+    #[test]
+    fn a_dead_session_turns_its_rows_unknown_without_dropping_them() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        assert!(s.apply_sessions(vec!["mob".into()]));
+        assert_eq!(s.agents.len(), 1, "the row persists");
+        assert_eq!(s.agents[0].status, Status::Unknown);
+        assert!(!s.agents[0].session_alive);
+    }
+
+    /// An empty session list means Zellij told us nothing, not that every
+    /// session died; acting on it would blank the whole panel.
+    #[test]
+    fn an_empty_session_list_changes_nothing() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        assert!(!s.apply_sessions(Vec::new()));
+        assert_eq!(s.agents[0].status, Status::Working);
+    }
+
+    #[test]
+    fn a_session_coming_back_clears_unknown() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_sessions(vec!["mob".into()]);
+        assert_eq!(s.agents[0].status, Status::Unknown);
+        assert!(s.apply_sessions(vec!["mob".into(), "other".into()]));
+        assert!(s.agents[0].session_alive);
+    }
+
+    /// Messages predating the `session=` arg must land on the panel's own
+    /// session rather than creating a second, unreachable row.
+    #[test]
+    fn a_message_without_a_session_falls_back_to_home() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "working")]));
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.agents[0].session(), "mob");
+    }
+
+    /// The hook folds unusual characters before sending; the plugin gets the raw
+    /// name from Zellij and must fold identically or the two never match.
+    #[test]
+    fn session_sanitizing_matches_the_hook() {
+        assert_eq!(sanitize_session("my session"), "my_session");
+        assert_eq!(sanitize_session("a,b=c"), "a_b_c");
+        assert_eq!(sanitize_session("../evil"), ".._evil");
+        assert_eq!(sanitize_session("mob-2.1_x"), "mob-2.1_x");
+    }
+
+    #[test]
+    fn scan_rows_from_several_sessions_all_appear() {
+        let mut s = state();
+        let found = vec![
+            crate::discover::Found {
+                session: "mob".into(),
+                pane_id: 3,
+                tool: "claude".into(),
+            },
+            crate::discover::Found {
+                session: "other".into(),
+                pane_id: 3,
+                tool: "codex".into(),
+            },
+        ];
+        assert!(s.apply_scan(found));
+        assert_eq!(s.agents.len(), 2);
+    }
+
+    /// A scan only ever reports live sessions, so its absence list must not
+    /// delete a discovered row belonging to another session.
+    #[test]
+    fn a_scan_only_culls_discovered_rows_it_could_have_seen() {
+        let mut s = state();
+        s.apply_scan(vec![
+            crate::discover::Found {
+                session: "mob".into(),
+                pane_id: 3,
+                tool: "claude".into(),
+            },
+            crate::discover::Found {
+                session: "other".into(),
+                pane_id: 3,
+                tool: "claude".into(),
+            },
+        ]);
+        assert_eq!(s.agents.len(), 2);
+        s.apply_scan(vec![crate::discover::Found {
+            session: "mob".into(),
+            pane_id: 3,
+            tool: "claude".into(),
+        }]);
+        assert_eq!(s.agents.len(), 1, "the vanished process drops");
+        assert_eq!(s.agents[0].session(), "mob");
+    }
+
+    #[test]
+    fn kill_is_refused_for_a_foreign_row() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.selected = 0;
+        assert!(!s.can_kill_selected(), "x must not signal another session's pane");
+
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+        s.selected = s.agents.iter().position(|a| a.session() == "mob").unwrap();
+        assert!(s.can_kill_selected());
+    }
+
+    /// Renders the real row-building path with a mixed list, which is what the
+    /// panel actually shows: local rows keep their project, foreign rows name
+    /// their session, and both are present at once.
+    #[test]
+    fn a_mixed_list_renders_local_and_foreign_rows_together() {
+        use crate::agent::RowCtx;
+        use crate::util::testing::item_text;
+
+        let mut s = state();
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("session", "mob"),
+            ("status", "working"),
+            ("cwd", "/Users/x/Projects/api"),
+            ("task", "local work"),
+        ]));
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("session", "other"),
+            ("status", "waiting"),
+            ("cwd", "/Users/x/Projects/web"),
+            ("task", "foreign work"),
+        ]));
+
+        let rendered: Vec<String> = s
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let icon = s.icon_for(a);
+                item_text(&a.list_item(
+                    i,
+                    RowCtx {
+                        selected: false,
+                        icon,
+                        now: s.now,
+                        cols: 110,
+                        show_cwd: true,
+                        home: &s.session_name,
+                    },
+                ))
+            })
+            .collect();
+
+        assert_eq!(rendered.len(), 2);
+        let all = rendered.join("\n");
+        assert!(all.contains("local work") && all.contains("foreign work"));
+        assert!(all.contains("api"), "the local row keeps its project: {}", all);
+        assert!(all.contains("other"), "the foreign row names its session: {}", all);
+        assert!(
+            !all.contains("web"),
+            "the foreign row shows session, not project: {}",
+            all
+        );
+        // Waiting sorts above working, so the foreign row leads.
+        assert!(rendered[0].contains("foreign work"), "{:?}", rendered);
+    }
+
+    #[test]
+    fn ask_lookup_is_session_scoped() {
+        let mut s = state();
+        s.handle_ask(&args(&[
+            ("pane_id", "3"),
+            ("session", "other"),
+            ("verdict_file", "/tmp/v"),
+        ]));
+        let home = AgentId {
+            session: "mob".into(),
+            pane_id: 3,
+        };
+        let foreign = AgentId {
+            session: "other".into(),
+            pane_id: 3,
+        };
+        assert!(s.ask_for(&home).is_none());
+        assert!(s.ask_for(&foreign).is_some());
     }
 }

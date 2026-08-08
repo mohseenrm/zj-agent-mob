@@ -6,8 +6,42 @@ use crate::status::Status;
 use crate::style::{chars, DIM_LEVEL};
 use crate::util::{fmt_elapsed, truncate};
 
-pub(crate) struct Agent {
+/// Pane ids are only unique within a session, so the session name is part of
+/// an agent's identity.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub(crate) struct AgentId {
+    pub(crate) session: String,
     pub(crate) pane_id: u32,
+}
+
+/// Mirrors the hook's `tr -c '[:alnum:]._-' '_'`. The hook sanitizes because the
+/// name reaches a file path and a comma-separated arg string; Zellij hands the
+/// plugin the raw name, so both sides must fold it the same way or a session
+/// with a space in its name never matches its own agents.
+pub(crate) fn sanitize_session(name: &str) -> String {
+    name.chars()
+        .map(|c| match c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            true => c,
+            false => '_',
+        })
+        .collect()
+}
+
+/// Everything a row needs that is not the agent itself. `home` is the panel's
+/// own session: a row from anywhere else shows where it lives, since a bare
+/// pane number is ambiguous across sessions.
+#[derive(Clone, Copy)]
+pub(crate) struct RowCtx<'a> {
+    pub(crate) selected: bool,
+    pub(crate) icon: &'a str,
+    pub(crate) now: f64,
+    pub(crate) cols: usize,
+    pub(crate) show_cwd: bool,
+    pub(crate) home: &'a str,
+}
+
+pub(crate) struct Agent {
+    pub(crate) id: AgentId,
     pub(crate) tool: String,
     #[allow(dead_code)]
     pub(crate) session_id: String,
@@ -27,9 +61,19 @@ pub(crate) struct Agent {
     pub(crate) subagent_types: Vec<String>,
     pub(crate) tasks_total: u32,
     pub(crate) tasks_done: u32,
+    /// False once the agent's session stops being listed by Zellij.
+    pub(crate) session_alive: bool,
 }
 
 impl Agent {
+    pub(crate) fn pane_id(&self) -> u32 {
+        self.id.pane_id
+    }
+
+    pub(crate) fn session(&self) -> &str {
+        &self.id.session
+    }
+
     /// Falls back to the pane title when there is no transcript summary.
     pub(crate) fn display_task(&self) -> &str {
         match self.task.as_deref() {
@@ -39,15 +83,15 @@ impl Agent {
     }
 
     /// One agent's row. The icon and status label are themed; the rest is plain.
-    pub(crate) fn list_item(
-        &self,
-        i: usize,
-        selected: bool,
-        icon: &str,
-        now: f64,
-        cols: usize,
-        show_cwd: bool,
-    ) -> Text {
+    pub(crate) fn list_item(&self, i: usize, ctx: RowCtx) -> Text {
+        let RowCtx {
+            selected,
+            icon,
+            now,
+            cols,
+            show_cwd,
+            home,
+        } = ctx;
         let marker = if selected { "\u{25b6}" } else { " " };
         let label = self.status.label();
 
@@ -68,8 +112,20 @@ impl Agent {
         };
         text.push_str(&format!("{:<9} {:>6}", label, elapsed));
 
+        let foreign = !home.is_empty() && self.session() != home;
+        let mut session_range = None;
         if show_cwd {
-            text.push_str(&format!("  {:<10}", truncate(self.project(), 10)));
+            let col = match foreign {
+                true => self.session(),
+                false => self.project(),
+            };
+            text.push_str("  ");
+            let start = chars(&text);
+            let cell = format!("{:<10}", truncate(col, 10));
+            if foreign {
+                session_range = Some(start..start + chars(cell.trim_end()));
+            }
+            text.push_str(&cell);
         }
         // Only rendered when the mode is risky enough to differ from `default`,
         // and only when it fits: a narrow pane drops it like the other columns.
@@ -100,6 +156,9 @@ impl Agent {
         }
         if let Some(r) = mode_range {
             text = text.color_range(2, r);
+        }
+        if let Some(r) = session_range {
+            text = text.color_range(DIM_LEVEL, r);
         }
         if selected {
             text.selected()
@@ -133,8 +192,10 @@ impl Agent {
         if let Some(t) = self.tab {
             bits.push(format!("tab:{}", t + 1));
         }
-        bits.push(format!("pane:{}", self.pane_id));
-        if !self.alive {
+        bits.push(format!("pane:{}", self.pane_id()));
+        if !self.session_alive {
+            bits.push("(session exited)".to_string());
+        } else if !self.alive {
             bits.push("(pane gone)".to_string());
         }
         // Indented under the row it belongs to, matching the documented layout.
@@ -160,7 +221,10 @@ mod render_tests {
 
     fn agent() -> Agent {
         Agent {
-            pane_id: 3,
+            id: AgentId {
+                session: "mob".into(),
+                pane_id: 3,
+            },
             tool: "claude".into(),
             session_id: "s".into(),
             status: Status::Working,
@@ -177,11 +241,23 @@ mod render_tests {
             subagent_types: Vec::new(),
             tasks_total: 0,
             tasks_done: 0,
+            session_alive: true,
+        }
+    }
+
+    fn ctx<'a>(selected: bool, icon: &'a str, now: f64, cols: usize, show_cwd: bool, home: &'a str) -> RowCtx<'a> {
+        RowCtx {
+            selected,
+            icon,
+            now,
+            cols,
+            show_cwd,
+            home,
         }
     }
 
     fn row(a: &Agent, i: usize, selected: bool, icon: &str, now: f64, cols: usize, cwd: bool) -> String {
-        item_text(&a.list_item(i, selected, icon, now, cols, cwd))
+        item_text(&a.list_item(i, ctx(selected, icon, now, cols, cwd, "mob")))
     }
 
     #[test]
@@ -204,8 +280,8 @@ mod render_tests {
     #[test]
     fn selected_row_is_marked_and_flagged() {
         let a = agent();
-        let sel = a.list_item(0, true, "\u{25cf}", 0.0, 110, true);
-        let unsel = a.list_item(0, false, "\u{25cf}", 0.0, 110, true);
+        let sel = a.list_item(0, ctx(true, "\u{25cf}", 0.0, 110, true, "mob"));
+        let unsel = a.list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "mob"));
         assert!(is_selected(&sel));
         assert!(!is_selected(&unsel));
         assert!(
@@ -244,7 +320,7 @@ mod render_tests {
 
         for (i, selected, icon) in [(0usize, true, "\u{280b}"), (9, false, "\u{25cf}"), (2, true, "?")] {
             let a = agent();
-            let item = a.list_item(i, selected, icon, 0.0, 110, true);
+            let item = a.list_item(i, ctx(selected, icon, 0.0, 110, true, "mob"));
             let text = item_text(&item);
             let marker = if selected { "\u{25b6}" } else { " " };
 
@@ -401,6 +477,57 @@ mod render_tests {
             let d = item_text(&agent().detail_item(false, cols));
             assert!(d.chars().count() <= cols, "cols={} got {:?}", cols, d);
         }
+    }
+
+    /// A bare pane number is ambiguous once rows span sessions, so a foreign row
+    /// says where it lives instead of showing its project.
+    #[test]
+    fn a_foreign_row_shows_its_session_instead_of_the_project() {
+        let a = agent();
+        let home = item_text(&a.list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "mob")));
+        assert!(home.contains("api"), "own session shows the project: {:?}", home);
+        assert!(!home.contains("mob"), "and not its own name: {:?}", home);
+
+        let away = item_text(&a.list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "elsewhere")));
+        assert!(away.contains("mob"), "foreign row names its session: {:?}", away);
+    }
+
+    /// The session replaces the project column rather than adding one, so the
+    /// width contract and every column after it must be unmoved.
+    #[test]
+    fn the_session_column_does_not_shift_later_columns() {
+        let mut a = agent();
+        a.task = Some("Add retry to webhook client".into());
+        let home = item_text(&a.list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "mob")));
+        let away = item_text(&a.list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "elsewhere")));
+        assert_eq!(
+            home.find("Add retry"),
+            away.find("Add retry"),
+            "task column must not move"
+        );
+        for cols in [40usize, 50, 60, 80, 110] {
+            let r = item_text(&a.list_item(0, ctx(true, "\u{25cf}", 0.0, cols, cols >= 50, "elsewhere")));
+            assert!(r.chars().count() <= cols, "cols={} produced {:?}", cols, r);
+        }
+    }
+
+    /// With no session known yet every row would otherwise read as foreign.
+    #[test]
+    fn an_unknown_home_session_leaves_rows_local() {
+        let r = item_text(&agent().list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "")));
+        assert!(r.contains("api"), "{:?}", r);
+    }
+
+    #[test]
+    fn a_dead_session_row_says_so() {
+        let mut a = agent();
+        a.session_alive = false;
+        a.status = Status::Unknown;
+        let row = item_text(&a.list_item(0, ctx(false, "?", 0.0, 110, true, "mob")));
+        assert!(row.contains("unknown"), "{:?}", row);
+        let d = item_text(&a.detail_item(false, 110));
+        assert!(d.contains("(session exited)"), "{:?}", d);
+        assert!(!d.contains("(pane gone)"), "the session is the bigger fact: {:?}", d);
     }
 
     /// An embedded newline would desync every coordinate below the row.

@@ -116,19 +116,19 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 |---|---|---|---|
 | `main.rs` | 6 | | `register_plugin!` + WASI entry point |
 | `lib.rs` | 34 | | Module wiring and shared constants |
-| `plugin.rs` | 362 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box |
-| `state.rs` | 392 | 45 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan merge |
+| `plugin.rs` | 381 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box |
+| `state.rs` | 451 | 59 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan merge, cross-session identity |
 | `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 195 | 12 | Keyboard: selection, jump-to-pane, two-step kill, approve/reject |
-| `agent.rs` | 155 | 19 | One agent, and how its row is built |
-| `status.rs` | 86 | | The agent states and their presentation |
+| `keys.rs` | 219 | 12 | Keyboard: selection, jump-to-pane (and cross-session switch), two-step kill, approve/reject |
+| `agent.rs` | 216 | 23 | One agent, its `(session, pane)` identity, and how its row is built |
+| `status.rs` | 92 | | The agent states and their presentation |
 | `ribbon.rs` | 77 | 7 | Ribbon line serialization |
-| `discover.rs` | 76 | 10 | Process-environment scan for agents that have not reported |
-| `host.rs` | 46 | | Host-call shim |
+| `discover.rs` | 78 | 10 | Process-environment scan for agents that have not reported, across every session |
+| `host.rs` | 48 | | Host-call shim |
 | `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
 | `style.rs` | 23 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover, 117 in total, none needing a running Zellij, plus 168 end-to-end cases across `tests/e2e-hook.sh` (78) and `tests/e2e-install.sh` (90).
+Line counts exclude tests. Tests live beside the code they cover, 135 in total, none needing a running Zellij, plus 183 end-to-end cases across `tests/e2e-hook.sh` (85) and `tests/e2e-install.sh` (98).
 
 Six of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps`, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
 

@@ -104,6 +104,30 @@ firing. Work through these in order:
      --args "pane_id=$ZELLIJ_PANE_ID,tool=claude,status=waiting,task=manual test"
    ```
 
+## An agent in another Zellij session shows `found` but never live status
+
+Expected. The panel finds agents in every session by scanning process environments, so they appear
+and <kbd>Enter</kbd> jumps to them. But the hook only pipes to the plugin in its *own* session, so
+a foreign agent's live status (`working`, `waiting`, task summaries) only arrives while a panel is
+open in the session that agent is running in.
+
+Open the panel once in each session you care about, or accept `found` rows as a jump list.
+
+## <kbd>x</kbd> does nothing on an agent from another session
+
+Deliberate. Zellij's interrupt and close-pane calls act on the *current* session only, and pane ids
+repeat across sessions - so signalling pane 3 from here would hit this session's pane 3, not the
+one on the row. Press <kbd>Enter</kbd> to jump there first, then <kbd>x</kbd>.
+
+## A row says `unknown` / `(session exited)`
+
+Its Zellij session is no longer running, so nothing can report on it and its real state is
+unknowable. The row is kept rather than dropped: an agent silently vanishing hides whether it
+finished, crashed, or was never there.
+
+<kbd>Enter</kbd> on such a row attaches (resurrects) the session rather than focusing a pane - the
+pane no longer exists. <kbd>x</kbd> is refused: there is no process left to signal.
+
 ## The install screen says "Installer not found"
 
 The plugin drives `~/.config/zj-agent-mob/install.sh`, which `init.sh` puts there. Nothing else creates it, so this means `init.sh` has never completed a run on this machine.

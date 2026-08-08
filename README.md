@@ -5,11 +5,11 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Zellij 0.44+](https://img.shields.io/badge/zellij-0.44%2B-green.svg)
 
-A Zellij plugin that monitors Claude Code and Codex agents running in your current session: live status, what each agent is working on, jump-to-pane, and ability to kill agents.
+A Zellij plugin that monitors Claude Code and Codex agents across all your Zellij sessions: live status, what each agent is working on, jump-to-pane (across sessions), and ability to kill agents.
 
 ![Agents appear as they start work, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm and install screen](demo/tour.gif)
 
-<sub>The full tour: agents appearing, subagent fan-out and task progress, a permission prompt approved without leaving the panel, every status, the two-step kill, and the install screen. Statuses here are piped in rather than driven by live agents, so the recording is reproducible - see [docs/demo.md](docs/demo.md).</sub>
+<sub>The full tour: agents appearing, subagent fan-out and task progress, a permission prompt approved without leaving the panel, every status, the two-step kill, and the install screen.</sub>
 
 ## Contents
 
@@ -24,7 +24,6 @@ A Zellij plugin that monitors Claude Code and Codex agents running in your curre
   - [How it works: status transport, task summaries](docs/how-it-works.md)
   - [Local development](docs/development.md)
   - [Troubleshooting](docs/troubleshooting.md)
-  - [Recording the demo](docs/demo.md)
   - Design notes:
     - [Richer hook data and UX sketches](docs/roadmap-ux.md) (shipped)
     - [Discovering agents that have not reported](docs/agent-discovery.md) (shipped)
@@ -128,9 +127,9 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | Key | Action |
 |---|---|
 | <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | Move selection |
-| <kbd>Enter</kbd> | Jump to that agent's pane (works across tabs) and hide the panel |
+| <kbd>Enter</kbd> | Jump to that agent's pane (across tabs *and* sessions) and hide the panel |
 | <kbd>1</kbd>–<kbd>9</kbd> | Jump straight to agent N |
-| <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane |
+| <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (own session only) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
 | <kbd>d</kbd> | Dismiss a `done` badge |
 | <kbd>i</kbd> | Open the install screen |
@@ -160,6 +159,7 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `compact` | Compacting context (looks like a hang otherwise) | `PreCompact`, cleared by `PostCompact` |
 | `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
+| `unknown` | Its Zellij session is gone, so its state is unknowable | - |
 
 Rows sort in that order, so whatever needs you most is at the top.
 
@@ -193,6 +193,7 @@ so a mis-keyed dismiss can never answer a prompt.
 ## Known limitations
 
 - Agents started before `init.sh` ran aren't tracked (no hooks installed yet). Restart them.
+- Agents in other Zellij sessions are found by the process scan and can be jumped to, but they only report live status while a panel is open in their own session. <kbd>x</kbd> is refused for them: Zellij's kill and interrupt calls act on the current session only, so jump first.
 - Claude has no "permission granted" event, so `waiting` to `working` relies on the next tool-event heartbeat. With `ZJ_AGENT_HEARTBEAT=0`, `waiting` persists until the turn ends.
 
 Hitting something not listed here? See [docs/troubleshooting.md](docs/troubleshooting.md).

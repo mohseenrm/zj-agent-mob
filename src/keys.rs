@@ -92,6 +92,15 @@ impl State {
         }
     }
 
+    /// Kill acts on the current session only, so a foreign row cannot be killed
+    /// from here without hitting an unrelated pane.
+    pub(crate) fn can_kill_selected(&self) -> bool {
+        self.agents
+            .get(self.selected)
+            .map(|a| self.session_name.is_empty() || a.id.session == self.session_name)
+            .unwrap_or(false)
+    }
+
     /// Moves the agent cursor, wrapping at both ends, and disarms a pending kill.
     fn move_selection(&mut self, delta: isize) {
         if !self.agents.is_empty() {
@@ -101,19 +110,29 @@ impl State {
     }
 
     pub(crate) fn focus_selected(&mut self) {
-        if let Some(agent) = self.agents.get(self.selected) {
-            let pane_id = agent.pane_id;
-            if let Some(a) = self.agents.iter_mut().find(|a| a.pane_id == pane_id) {
-                if a.status == Status::Done {
-                    a.status = Status::Idle;
-                    a.status_since = self.now;
-                }
+        let Some(agent) = self.agents.get(self.selected) else {
+            return;
+        };
+        let (id, tab, session_alive) = (agent.id.clone(), agent.tab, agent.session_alive);
+        let foreign = id.session != self.session_name && !self.session_name.is_empty();
+
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
+            if a.status == Status::Done {
+                a.status = Status::Idle;
+                a.status_since = self.now;
             }
-            host::focus_terminal_pane(pane_id, true, false);
-            self.hidden = true;
-            self.sort_agents();
-            host::hide_self();
         }
+
+        if foreign {
+            // A dead session has no pane to land on; attaching resurrects it.
+            let target = if session_alive { Some((id.pane_id, false)) } else { None };
+            host::switch_session_with_focus(&id.session, tab.filter(|_| session_alive), target);
+        } else {
+            host::focus_terminal_pane(id.pane_id, true, false);
+        }
+        self.hidden = true;
+        self.sort_agents();
+        host::hide_self();
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyWithModifier) -> bool {
@@ -154,15 +173,20 @@ impl State {
             // First x interrupts, second closes the pane.
             BareKey::Char('x') => {
                 if let Some(agent) = self.agents.get(self.selected) {
-                    let pane_id = agent.pane_id;
-                    if self.kill_armed == Some(pane_id) {
-                        host::close_terminal_pane(pane_id);
-                        self.agents.retain(|a| a.pane_id != pane_id);
+                    // Both host calls act on the current session only, so a
+                    // foreign pane id here would signal an unrelated pane.
+                    if !self.can_kill_selected() {
+                        return false;
+                    }
+                    let id = agent.id.clone();
+                    if self.kill_armed.as_ref() == Some(&id) {
+                        host::close_terminal_pane(id.pane_id);
+                        self.agents.retain(|a| a.id != id);
                         self.kill_armed = None;
                         self.clamp_selection();
                     } else {
-                        host::send_sigint_to_pane_id(PaneId::Terminal(pane_id));
-                        self.kill_armed = Some(pane_id);
+                        host::send_sigint_to_pane_id(PaneId::Terminal(id.pane_id));
+                        self.kill_armed = Some(id);
                     }
                 }
                 true
@@ -206,6 +230,8 @@ mod tests {
     fn state_with_one_agent() -> State {
         let mut s = State {
             permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
             ..Default::default()
         };
         let args: BTreeMap<String, String> = [("pane_id", "7"), ("status", "idle")]
@@ -245,7 +271,13 @@ mod tests {
     fn opening_install_screen_disarms_a_pending_kill() {
         let mut s = state_with_one_agent();
         s.handle_key(key('x'));
-        assert_eq!(s.kill_armed, Some(7));
+        assert_eq!(
+            s.kill_armed,
+            Some(crate::agent::AgentId {
+                session: "mob".into(),
+                pane_id: 7
+            })
+        );
         s.handle_key(key('i'));
         assert_eq!(s.kill_armed, None);
     }

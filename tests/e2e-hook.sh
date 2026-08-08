@@ -434,10 +434,11 @@ approve_with() {
   ZJ_TEST_CAPTURE="$WORK/capture.$$"
   export ZJ_TEST_CAPTURE
   : > "$ZJ_TEST_CAPTURE"
-  _vf="${TMPDIR:-/tmp}/zj-agent-mob/verdict.3"
+  _vf="${TMPDIR:-/tmp}/zj-agent-mob/verdict.${ZELLIJ_SESSION_NAME:-}.3"
   ( sleep 1; mkdir -p "$(dirname "$_vf")"; printf '%s' "$_want" > "$_vf" ) &
   _planter=$!
   env ZELLIJ_PANE_ID=3 ZJ_AGENT_PLUGIN=file:/plugin.wasm \
+      ZELLIJ_SESSION_NAME="${ZELLIJ_SESSION_NAME:-}" \
       ZJ_TEST_CAPTURE="$ZJ_TEST_CAPTURE" ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=8 \
       sh "$HOOK" <<EOF 2>/dev/null || true
 $perm
@@ -458,6 +459,44 @@ then
   ok "the approval path still exits 0"
 else
   bad "the approval path still exits 0" "non-zero exit would fail the tool call"
+fi
+
+echo
+echo "cross-session identity"
+
+# Pane ids repeat across sessions, so every message says which one it is from.
+out=$(run '{"hook_event_name":"Stop"}' ZELLIJ_SESSION_NAME=mob)
+assert_contains "the report names its session" "$out" "session=mob"
+
+# The name reaches a file path and a comma-separated arg string, so anything
+# that would split either is folded first. src/agent.rs mirrors this exactly.
+out=$(run '{"hook_event_name":"Stop"}' ZELLIJ_SESSION_NAME="my session")
+assert_contains "spaces in a session name are folded" "$out" "session=my_session"
+out=$(run '{"hook_event_name":"Stop"}' ZELLIJ_SESSION_NAME="a,b=c")
+assert_contains "a comma cannot split the args string" "$out" "session=a_b_c"
+case "$out" in
+  *"session=a,b"*) bad "a comma cannot inject an arg" "raw comma survived: $out" ;;
+  *) ok "a comma cannot inject an arg" ;;
+esac
+out=$(run '{"hook_event_name":"Stop"}' ZELLIJ_SESSION_NAME="../evil")
+sess=$(printf '%s' "$out" | tr ',' '\n' | grep '^session=' || true)
+case "$sess" in
+  *"/"*) bad "a session name cannot traverse paths" "slash survived: $sess" ;;
+  *) ok "a session name cannot traverse paths" ;;
+esac
+
+# The correctness fix: two sessions sharing a pane number must not share a
+# verdict file, or approving one answers the other's prompt.
+perm_ask='{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf node_modules"}}'
+a=$(run "$perm_ask" ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=1 ZELLIJ_SESSION_NAME=mob)
+b=$(run "$perm_ask" ZJ_AGENT_APPROVE=1 ZJ_AGENT_APPROVE_TIMEOUT=1 ZELLIJ_SESSION_NAME=other)
+va=$(printf '%s' "$a" | tr ',' '\n' | grep '^verdict_file=' || true)
+vb=$(printf '%s' "$b" | tr ',' '\n' | grep '^verdict_file=' || true)
+assert_contains "the verdict file is session-qualified" "$va" "verdict.mob.3"
+if [ -n "$va" ] && [ "$va" != "$vb" ]; then
+  ok "same pane in two sessions gets two verdict files"
+else
+  bad "same pane in two sessions gets two verdict files" "both were: $va"
 fi
 
 echo

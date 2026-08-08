@@ -1,6 +1,7 @@
 # Cross-session agents
 
-Status: proposal. Nothing here is implemented yet.
+Status: **implemented** (items 1-9 and 12). Items 10-11, the live-status transport
+for agents in sessions with no panel open, remain open - see Decisions below.
 
 Today the panel shows agents in the session it is running in. The goal: show every
 Claude Code and Codex agent across every live Zellij session, and have <kbd>Enter</kbd>
@@ -84,7 +85,7 @@ zellij pipe --name agent-status --plugin "$PLUGIN" --args "..."
   zellij --session "$ZJ_AGENT_HUB" pipe --name agent-status --plugin "$PLUGIN" --args "..."
 ```
 
-At most two spawns, constant regardless of session count. Recommended.
+At most two spawns, constant regardless of session count.
 
 The hub is opt-in via `ZJ_AGENT_HUB` in the agent's environment, or a `hub` key in the
 plugin's KDL block written into the hook by `init.sh`.
@@ -93,6 +94,11 @@ plugin's KDL block written into the hook by `init.sh`.
 > the hub session has no panel open, the hook hangs until the pipe is torn down. The hook
 > must background this call and cap it (`timeout 2` or `&`), or a closed hub panel stalls
 > every agent on the machine. This is the single biggest implementation risk here.
+
+**C. The panel polls (chosen - see decision 1).** Instead of agents pushing to a hub, the
+panel runs a periodic `run_command` that collects status for foreign sessions. Same live
+status, but the blocking risk lives inside one plugin the user is watching rather than on
+every agent's hot path. B stays available as opt-in for push latency.
 
 ### 3. Discovery scans all sessions
 
@@ -131,9 +137,14 @@ if agent.id.session == self.session_name {
 The `bool` in `pane_id: Option<(u32, bool)>` is `is_plugin`; agents are terminal panes, so
 `false`.
 
-Switching sessions detaches the client from the current one. That is a much bigger
-context switch than focusing a pane, and it is not obviously reversible - worth a
-confirmation step or at least a distinct visual treatment on foreign rows.
+Switching sessions detaches the client from the current one. Per decision 2 this happens
+immediately, with no confirmation: jumping is the primary action of the panel and a
+prompt on every jump costs more than the occasional accidental detach. Foreign rows carry
+a distinct visual treatment (item 6) so the switch is never a surprise.
+
+For a row whose session has exited, `switch_session_with_focus` would resurrect it and
+land on a pane with no agent in it. Those rows attach the session instead and skip the
+pane focus - see decision 3.
 
 ### 5. Kill and approve become session-aware
 
@@ -148,9 +159,13 @@ confirmation step or at least a distinct visual treatment on foreign rows.
 
 ### 6. The list shows where each agent lives
 
-With agents from several sessions, the row needs to say which. The `project` column
-already shows the cwd basename; a foreign agent gets its session name alongside, and
-rows group by session with the current one first.
+With agents from several sessions, the row needs to say which. A foreign row shows its
+session name *in place of* the project column, dimmed, so no column shifts and the width
+contract holds.
+
+Rows are **not** grouped by session. The existing sort puts whatever needs you most at
+the top, and that matters more than locality: an agent blocked on a permission prompt in
+another session is exactly the one you want at row 1.
 
 ## Work items
 
@@ -159,35 +174,81 @@ their own change, before anything user-visible.
 
 | # | Item | Blocks | Notes |
 |---|---|---|---|
-| 1 | Key agents by `(session, pane_id)` | all | Pure refactor, no behavior change while single-session |
-| 2 | Session-qualify the verdict file | - | Correctness fix; a collision here answers the wrong prompt |
-| 3 | Hook sends `session=` | 4, 6 | One arg; harmless to the current plugin, which ignores unknown args |
-| 4 | Discovery scans all sessions | 6 | Delete a filter, add a field. Gets cross-session rows working with no transport change |
-| 5 | Keep every `SessionInfo`, not just current | 6, 7 | `src/plugin.rs:67`; needed for foreign tab positions |
-| 6 | Render session on foreign rows; group by session | 7 | |
-| 7 | Enter switches sessions | - | `switch_session_with_focus` |
-| 8 | Hub piping in the hook (`ZJ_AGENT_HUB`), backgrounded | - | Only needed for *live status* of agents in panel-less sessions; item 4 already lists them |
-| 9 | Decide kill/approve policy for foreign agents | - | Recommend: refuse, require jump first |
+| 1&nbsp;✅ | Key agents by `(session, pane_id)` | all | Pure refactor, no behavior change while single-session |
+| 2&nbsp;✅ | Session-qualify the verdict file | - | Correctness fix; a collision here answers the wrong prompt |
+| 3&nbsp;✅ | Hook sends `session=` | 4, 6 | One arg; harmless to the current plugin, which ignores unknown args |
+| 4&nbsp;✅ | Discovery scans all sessions | 6 | Delete a filter, add a field. Gets cross-session rows working with no transport change |
+| 5&nbsp;✅ | Keep every `SessionInfo`, not just current | 6, 7 | `src/plugin.rs:67`; needed for foreign tab positions |
+| 6&nbsp;✅ | Render session on foreign rows | 7 | Foreign rows show their session in place of the project column. Not grouped by session: the existing needs-attention-first sort is more useful than locality |
+| 7&nbsp;✅ | Enter switches sessions, no confirmation | - | `switch_session_with_focus` (decision 2) |
+| 8&nbsp;✅ | `Status::Unknown`; rows persist when a session stops being listed | 9 | Decision 3 |
+| 9&nbsp;✅ | Enter on a dead session resurrects rather than focuses; kill refused there | - | Decision 3's correction |
+| 10 | Foreign-session polling on a timer (`run_command`) | - | Decision 1, preferred form |
+| 11 | Optional `ZJ_AGENT_HUB` push, backgrounded and timeout-capped | - | Decision 1, opt-in; must never block the hook |
+| 12&nbsp;✅ | Kill/approve policy for foreign agents: refuse, require jump first | - | Unchanged recommendation |
 
-Items 1-7 need no hook transport change at all: discovery alone populates cross-session
-rows, and Enter jumps to them. **Item 8 is what upgrades those rows from "discovered" to
-live status**, and it is also the riskiest piece. Shipping 1-7 first gives most of the
-value with none of the hang risk.
+✅ = shipped. Items 1-9 and 12 are in. They need no hook transport change: discovery
+alone populates cross-session rows, and Enter jumps to them. **Items 10-11 are what
+upgrade those rows from `found` to live status**, and they carry the hang risk described
+above, so they were deliberately left out of this pass.
 
-## Open questions
+## Decisions
 
-- **Is the hub worth it?** Items 1-7 give a cross-session list where foreign agents show
-  as `discovered` (name, session, pane) but not live status. The hub adds live status at
-  the cost of a blocking pipe on the hook's hot path. A middle option: the panel polls
-  foreign sessions itself via `run_command` on a timer, keeping the risk in the plugin
-  where a hang is visible rather than in every agent's hook.
-- **Should Enter into another session confirm first?** It detaches the current client.
-- **What happens to a row whose session dies?** `SessionUpdate` will stop listing it;
-  rows should drop rather than linger pointing at a dead session.
+All three answered. Recorded here because each one changes the work items above.
+
+### 1. The hub ships. Yes.
+
+Live status for agents in panel-less sessions is worth the transport. Item 8 is in scope,
+with the mandatory backgrounding from the caveat above - the hook must never block on a
+hub that has no panel open.
+
+**Prefer the middle option**: the panel polls foreign sessions on a timer via
+`run_command` rather than every hook pushing to the hub. Same result, but a hang shows up
+in one plugin the user is looking at instead of stalling every agent on the machine. The
+`ZJ_AGENT_HUB` push stays available as opt-in for anyone who wants push latency over
+poll safety.
+
+### 2. Enter switches immediately. No confirmation.
+
+Jumping is the primary action and a prompt on every jump would be worse than the
+occasional accidental detach. Foreign rows still get a distinct visual treatment (item 6)
+so the switch is never a surprise, but nothing blocks it.
+
+### 3. A dead agent goes to `unknown`, it does not disappear.
+
+Rows persist when their session stops being listed, moving to an `unknown` status rather
+than vanishing. An agent silently dropping off the list is worse than a stale row: the
+user cannot tell whether it finished, crashed, or was never there.
+
+> **One correction to the stated intent.** The answer asks that the user still be able to
+> jump to or kill an `unknown` agent. When a Zellij session has genuinely exited there is
+> no pane to focus and no process to signal - `list-sessions` shows those as
+> `EXITED - attach to resurrect`, and their panes and processes are gone. Kill on such a
+> row cannot do anything, and `switch_session_with_focus` into a dead session resurrects
+> it to a pane that no longer holds an agent.
+>
+> The distinction that makes the request work is **why** the row went `unknown`:
+>
+> - **Session still alive, agent gone** (process exited, pane closed): jump works, kill is
+>   a no-op. Keep both enabled.
+> - **Session itself exited**: nothing to jump to. Enter should offer to *resurrect* the
+>   session (`switch_session` does attach a dead session) rather than pretend to focus a
+>   pane, and kill should be disabled with the reason shown.
+>
+> So: rows persist as `unknown` in both cases, per the decision. Enter stays enabled but
+> means "resurrect" rather than "focus" for a dead session, and kill is refused there
+> because there is no process. Flagging because "jump to pane or kill it" is not
+> achievable as written for the exited case, and silently doing nothing would be worse
+> than saying why.
+
+`Status::Unknown` is a new variant alongside the existing `Discovered` (`src/status.rs:14`),
+which is also scan-produced and never arrives from a hook.
 
 ## What this does not address
 
 - Sessions that are not running (`EXITED - attach to resurrect`) have no panes and no
-  processes; agents in them are gone, not hidden.
+  processes; agents in them are gone, not hidden. Their rows persist as `unknown` per
+  decision 3, but the panel cannot report what those agents were doing when the session
+  died - only that they were there.
 - The plugin still monitors only Claude Code and Codex, and only where the hook or a
   `ps` scan can see them. Remote/SSH agents are out of scope.

@@ -26,6 +26,8 @@ command -v zellij >/dev/null 2>&1 || exit 0
 
 PLUGIN="${ZJ_AGENT_PLUGIN:-file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm}"
 TOOL="${ZJ_AGENT_TOOL:-claude}"
+# Pane ids are only unique within a session, so identity is (session, pane).
+SESSION=$(printf '%s' "${ZELLIJ_SESSION_NAME:-}" | tr -c '[:alnum:]._-' '_')
 
 json=$(cat)
 [ -n "$json" ] || exit 0
@@ -167,7 +169,7 @@ if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
 fi
 
 zellij pipe --name agent-status --plugin "$PLUGIN" \
-  --args "pane_id=$ZELLIJ_PANE_ID,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta" \
+  --args "pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta" \
   >/dev/null 2>&1 || true
 
 # Answering a permission prompt from the panel. Opt-in, because this is the one
@@ -179,12 +181,12 @@ zellij pipe --name agent-status --plugin "$PLUGIN" \
 # case must be the normal interactive experience, never a wedged turn.
 if [ "$event" = PermissionRequest ] && [ "${ZJ_AGENT_APPROVE:-0}" = "1" ]; then
   vdir="${TMPDIR:-/tmp}/zj-agent-mob"
-  vfile="$vdir/verdict.$ZELLIJ_PANE_ID"
+  vfile="$vdir/verdict.$SESSION.$ZELLIJ_PANE_ID"
   mkdir -p "$vdir" 2>/dev/null || true
   rm -f "$vfile" 2>/dev/null || true
 
   zellij pipe --name agent-ask --plugin "$PLUGIN" \
-    --args "pane_id=$ZELLIJ_PANE_ID,verdict_file=$vfile,tool_name=$tool_name,tool_arg=$tool_arg" \
+    --args "pane_id=$ZELLIJ_PANE_ID,session=$SESSION,verdict_file=$vfile,tool_name=$tool_name,tool_arg=$tool_arg" \
     >/dev/null 2>&1 || true
 
   # Poll rather than block on a FIFO: a FIFO open() with no reader hangs past

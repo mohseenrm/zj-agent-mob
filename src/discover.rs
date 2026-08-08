@@ -30,7 +30,7 @@ pub(crate) fn scan_script(tools: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(" && ");
     format!(
-        r#"ps axeww -o pid=,command= 2>/dev/null | awk -v want="$1" '
+        r#"ps axeww -o pid=,command= 2>/dev/null | awk '
 {{
   cmd = $2; sub(/.*\//, "", cmd)
   if ({guard}) next
@@ -39,20 +39,20 @@ pub(crate) fn scan_script(tools: &[&str]) -> String {
     if ($i ~ /^ZELLIJ_PANE_ID=/)      pane = substr($i, 16)
     if ($i ~ /^ZELLIJ_SESSION_NAME=/) sess = substr($i, 21)
   }}
-  if (pane != "" && sess == want) print pane, cmd
-}}' | sort -un"#
+  if (pane != "" && sess != "") print sess, pane, cmd
+}}' | sort -u"#
     )
 }
 
-/// Session name is passed as a positional arg so it is never parsed by a shell.
-pub(crate) fn dispatch(session: &str) {
+pub(crate) fn dispatch() {
     let mut ctx = BTreeMap::new();
     ctx.insert(crate::install::CTX_KEY.to_string(), CTX_SCAN.to_string());
-    host::run_command(&["sh", "-c", &scan_script(&TOOLS), "sh", session], ctx);
+    host::run_command(&["sh", "-c", &scan_script(&TOOLS)], ctx);
 }
 
-/// A `pane_id tool` pair from the scan.
+/// A `session pane_id tool` triple from the scan.
 pub(crate) struct Found {
+    pub(crate) session: String,
     pub(crate) pane_id: u32,
     pub(crate) tool: String,
 }
@@ -64,9 +64,11 @@ pub(crate) fn parse(stdout: &str) -> Vec<Found> {
         .lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
+            let session = parts.next()?;
             let pane_id = parts.next()?.parse::<u32>().ok()?;
             let tool = parts.next()?;
             TOOLS.contains(&tool).then(|| Found {
+                session: crate::agent::sanitize_session(session),
                 pane_id,
                 tool: tool.to_string(),
             })
@@ -79,19 +81,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_pane_and_tool_pairs() {
-        let found = parse("2 claude\n3 codex\n11 claude\n");
+    fn parses_session_pane_and_tool_triples() {
+        let found = parse("mob 2 claude\nmob 3 codex\nother 11 claude\n");
         assert_eq!(found.len(), 3);
+        assert_eq!(found[0].session, "mob");
         assert_eq!(found[0].pane_id, 2);
         assert_eq!(found[0].tool, "claude");
         assert_eq!(found[1].tool, "codex");
+        assert_eq!(found[2].session, "other");
     }
 
     #[test]
     fn ignores_malformed_and_unknown_lines() {
-        let found = parse("2 claude\nnotanumber claude\n4\n\n5 nvim\n6 codex\n");
+        let found = parse("mob 2 claude\nmob notanumber claude\nmob 4\n\nmob 5 nvim\nmob 6 codex\n");
         let ids: Vec<u32> = found.iter().map(|f| f.pane_id).collect();
         assert_eq!(ids, vec![2, 6], "only well-formed known tools survive");
+    }
+
+    /// Same pane number in two sessions is normal and must stay distinct.
+    #[test]
+    fn identical_pane_ids_in_different_sessions_are_separate() {
+        let found = parse("mob 3 claude\nother 3 claude\n");
+        assert_eq!(found.len(), 2);
+        assert_ne!(found[0].session, found[1].session);
     }
 
     #[test]
@@ -120,7 +132,7 @@ mod tests {
         ///
         /// `tag` keeps each case's stub in its own directory: tests run in
         /// parallel, and a shared path means one case's `ps` answers another's.
-        fn run(tag: &str, ps_output: &str, session: &str) -> String {
+        fn run(tag: &str, ps_output: &str) -> String {
             let dir = std::env::temp_dir().join(format!("zj-scan-{}-{}", std::process::id(), tag));
             std::fs::create_dir_all(&dir).unwrap();
             let ps = dir.join("ps");
@@ -136,8 +148,6 @@ mod tests {
             let out = Command::new("sh")
                 .arg("-c")
                 .arg(scan_script(&TOOLS))
-                .arg("sh")
-                .arg(session)
                 .env("PATH", path)
                 .output()
                 .expect("sh runs");
@@ -154,19 +164,24 @@ mod tests {
             "5678 claude SOME=thing\n",
         );
 
+        /// Every session at once: the scan is no longer scoped to one.
         #[test]
-        fn finds_agents_only_in_the_named_session() {
-            assert_eq!(run("named", PROCS, "mob"), "2 claude\n3 claude\n6 codex\n");
+        fn finds_agents_across_every_session() {
+            assert_eq!(
+                run("all", PROCS),
+                "mob 2 claude\nmob 3 claude\nmob 6 codex\nother 11 claude\n"
+            );
         }
 
+        /// `sort -u` keys on the whole line, so a pane number repeated in another
+        /// session must survive rather than being deduplicated away.
         #[test]
-        fn other_sessions_get_their_own_agents() {
-            assert_eq!(run("other", PROCS, "other"), "11 claude\n");
-        }
-
-        #[test]
-        fn a_session_with_no_agents_prints_nothing() {
-            assert_eq!(run("empty", PROCS, "empty"), "");
+        fn same_pane_id_in_two_sessions_both_survive() {
+            let procs = concat!(
+                "1 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=mob\n",
+                "2 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n",
+            );
+            assert_eq!(run("dup", procs), "mob 3 claude\nother 3 claude\n");
         }
 
         /// An agent typed into an existing shell is a child of that shell. It is
@@ -176,8 +191,8 @@ mod tests {
         fn finds_a_shell_launched_agent() {
             let procs = "999 /opt/homebrew/bin/claude ZELLIJ_PANE_ID=4 ZELLIJ_SESSION_NAME=mob\n";
             assert_eq!(
-                run("shell", procs, "mob"),
-                "4 claude\n",
+                run("shell", procs),
+                "mob 4 claude\n",
                 "absolute paths must match on basename"
             );
         }
@@ -187,14 +202,14 @@ mod tests {
         #[test]
         fn a_process_outside_zellij_is_skipped() {
             let procs = "5678 claude SOME=thing\n";
-            assert_eq!(run("nozellij", procs, "mob"), "");
+            assert_eq!(run("nozellij", procs), "");
         }
 
-        /// Session names are compared whole: `mob` must not match `mob-2`.
+        /// A pane id with no session cannot be attributed to anything.
         #[test]
-        fn session_match_is_exact_not_a_prefix() {
-            let procs = "1 claude ZELLIJ_PANE_ID=2 ZELLIJ_SESSION_NAME=mob-2\n";
-            assert_eq!(run("prefix", procs, "mob"), "");
+        fn a_pane_without_a_session_is_skipped() {
+            let procs = "1 claude ZELLIJ_PANE_ID=2\n";
+            assert_eq!(run("nosess", procs), "");
         }
     }
 }

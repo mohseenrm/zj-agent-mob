@@ -1,6 +1,6 @@
 //! The agent states and how each is presented.
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Status {
     Failed,
     Working,
@@ -12,6 +12,10 @@ pub(crate) enum Status {
     /// Found by a process scan, with no hook report behind it. Distinct from
     /// `Idle`, which means the agent reported and then went quiet.
     Discovered,
+    /// The agent's session is no longer listed, so its real state is unknowable.
+    /// The row persists rather than vanishing: silently dropping it hides
+    /// whether the agent finished, crashed, or was never there.
+    Unknown,
 }
 
 impl Status {
@@ -40,6 +44,7 @@ impl Status {
             Status::Done => "done",
             Status::Idle => "idle",
             Status::Discovered => "found",
+            Status::Unknown => "unknown",
         }
     }
 
@@ -55,6 +60,7 @@ impl Status {
             Status::Working => 5,
             Status::Idle => 6,
             Status::Discovered => 7,
+            Status::Unknown => 8,
         }
     }
 
@@ -74,7 +80,7 @@ impl Status {
             Status::Waiting | Status::IdleWait => 2,
             Status::Working | Status::Compact => 0,
             Status::Done => 1,
-            Status::Idle | Status::Failed | Status::Discovered => 3,
+            Status::Idle | Status::Failed | Status::Discovered | Status::Unknown => 3,
         }
     }
 
