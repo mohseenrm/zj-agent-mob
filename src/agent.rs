@@ -51,6 +51,8 @@ pub(crate) struct Agent {
     pub(crate) detail: Option<String>,
     pub(crate) turns: u32,
     pub(crate) status_since: f64,
+    /// When a pipe last said anything about this row, change or not.
+    pub(crate) last_report: f64,
     pub(crate) tab: Option<usize>,
     pub(crate) pane_title: String,
     pub(crate) alive: bool,
@@ -233,6 +235,7 @@ mod render_tests {
             detail: Some("Edit src/webhook.rs".into()),
             turns: 4,
             status_since: 0.0,
+            last_report: 0.0,
             tab: Some(1),
             pane_title: "claude".into(),
             alive: true,

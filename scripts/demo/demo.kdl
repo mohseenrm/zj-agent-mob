@@ -1,0 +1,12 @@
+// Recording layout: no tab bar, no status bar.
+//
+// The stock `default` layout stacks a tab-bar above and a status-bar below the
+// viewport. In a recording that costs two rows to chrome the demo never refers
+// to, and - because the tape records a Zellij running inside another Zellij -
+// the frame ends up with two near-identical status bars at the bottom.
+//
+// Used by every session the tour creates, including the ones it hops into, so
+// the frame looks the same before and after the jump.
+layout {
+    pane
+}

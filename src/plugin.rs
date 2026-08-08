@@ -55,8 +55,9 @@ impl ZellijPlugin for State {
                 self.timer_running = false;
                 self.frame = self.frame.wrapping_add(1);
                 self.now += TICK;
+                let aged = self.age_foreign_rows();
                 self.arm_timer();
-                self.agents.iter().any(|a| a.status.is_active())
+                aged || self.agents.iter().any(|a| a.status.is_active())
             }
             Event::PaneUpdate(manifest) => {
                 self.reconcile(manifest);

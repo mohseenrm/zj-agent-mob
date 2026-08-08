@@ -7,7 +7,7 @@ use crate::agent::{Agent, AgentId};
 use crate::host;
 use crate::install::Install;
 use crate::status::Status;
-use crate::{SPINNER, TICK};
+use crate::{SPINNER, STALE_AFTER, TICK};
 
 /// A permission prompt parked by a blocked hook, waiting on a verdict.
 pub(crate) struct Ask {
@@ -37,6 +37,9 @@ pub struct State {
     pub(crate) live_sessions: Vec<String>,
     /// A scan is in flight, so a second one would be wasted work.
     pub(crate) scan_pending: bool,
+    /// Set by the first successful scan. Until then the panel has piped rows and
+    /// no cross-session evidence at all, so culling would wipe them.
+    pub(crate) scan_completed: bool,
     /// The process scan, off until `load()` reads the `discover` key (default
     /// on). A bool that defaults false is deliberate: `register_plugin!` builds
     /// the state with `Default`, and `load()` always runs before any event.
@@ -90,7 +93,17 @@ impl State {
     }
 
     pub(crate) fn arm_timer(&mut self) {
-        if !self.timer_running && self.agents.iter().any(|a| a.status.is_active()) {
+        if self.timer_running {
+            return;
+        }
+        // Foreign rows also need ticks, or one left mid-decay never reaches
+        // `unknown` because nothing else advances `now`.
+        let home = &self.session_name;
+        let needed = self
+            .agents
+            .iter()
+            .any(|a| a.status.is_active() || (a.id.session != *home && a.status.is_reported()));
+        if needed {
             self.timer_running = true;
             host::set_timeout(TICK);
         }
@@ -123,6 +136,26 @@ impl State {
             }
             if !alive && agent.status != Status::Unknown {
                 agent.status = Status::Unknown;
+                changed = true;
+            }
+        }
+        if changed {
+            self.sort_agents();
+        }
+        changed
+    }
+
+    /// A foreign row's status is a snapshot: the hook only pipes into its own
+    /// session, so nothing refreshes it. Past `STALE_AFTER` the panel says
+    /// `unknown` rather than keeping a `working` it can no longer vouch for.
+    pub(crate) fn age_foreign_rows(&mut self) -> bool {
+        let (now, home) = (self.now, self.session_name.clone());
+        let mut changed = false;
+        for agent in self.agents.iter_mut() {
+            let stale = now - agent.last_report >= STALE_AFTER;
+            if agent.id.session != home && stale && agent.status.is_reported() {
+                agent.status = Status::Unknown;
+                agent.status_since = now;
                 changed = true;
             }
         }
@@ -206,6 +239,7 @@ impl State {
             }
             agent.alive = true;
             agent.session_alive = true;
+            agent.last_report = now;
         } else {
             newly_waiting = status == Status::Waiting;
             self.agents.push(Agent {
@@ -218,6 +252,7 @@ impl State {
                 detail,
                 turns: if status == Status::Working { 1 } else { 0 },
                 status_since: now,
+                last_report: now,
                 tab: None,
                 pane_title: String::new(),
                 alive: true,
@@ -330,23 +365,31 @@ impl State {
 
     /// Merges a process scan into the agent list.
     ///
-    /// Discovery only ever *adds* rows for panes nothing has reported for. A
-    /// pane that already has an agent keeps everything it reported: the scan
-    /// knows strictly less than a hook does, so letting it write would
-    /// downgrade a live row to `found`.
+    /// The scan only ever *adds* rows for panes nothing has reported for: it
+    /// knows strictly less than a hook, so letting it write would downgrade a
+    /// live row to `found`.
+    ///
+    /// Culling is asymmetric. Home rows are owned by the hook and `reconcile`,
+    /// so only scan-discovered ones are the scan's to remove. Foreign rows have
+    /// no such owner - the scan is the only thing that ever sees them exit - so
+    /// it culls them regardless of status.
     pub(crate) fn apply_scan(&mut self, found: Vec<crate::discover::Found>) -> bool {
-        // A discovered row has no `ended` event coming for it, so a process that
-        // exited is dropped by its absence from the next scan. Hook-reported
-        // rows are untouched: their lifecycle is owned by the hook and by
-        // `reconcile`, and a scan that misses one must not delete it.
         let before = self.agents.len();
+        let home = self.session_name.clone();
+        let cull_foreign = self.scan_completed;
         self.agents.retain(|a| {
-            a.status != Status::Discovered
-                || found
-                    .iter()
-                    .any(|f| f.pane_id == a.pane_id() && f.session == a.id.session)
+            let seen = found
+                .iter()
+                .any(|f| f.pane_id == a.pane_id() && f.session == a.id.session);
+            if a.id.session == home {
+                return a.status != Status::Discovered || seen;
+            }
+            // A dead session's processes are gone, so the scan cannot see them;
+            // `apply_sessions` already marked the row `unknown`.
+            !cull_foreign || seen || !a.session_alive
         });
         let mut changed = self.agents.len() != before;
+        self.scan_completed = true;
 
         for f in found {
             let id = AgentId {
@@ -366,6 +409,7 @@ impl State {
                 detail: None,
                 turns: 0,
                 status_since: self.now,
+                last_report: self.now,
                 tab: None,
                 pane_title: String::new(),
                 alive: true,
@@ -1357,6 +1401,204 @@ mod cross_session_tests {
 
         s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "working")]));
         assert_eq!(s.agents.len(), 1, "hook reports still land");
+    }
+
+    fn found(pairs: &[(&str, u32)]) -> Vec<crate::discover::Found> {
+        pairs
+            .iter()
+            .map(|(session, pane_id)| crate::discover::Found {
+                session: session.to_string(),
+                pane_id: *pane_id,
+                tool: "claude".to_string(),
+            })
+            .collect()
+    }
+
+    /// The reported symptom: a panel that learned an agent by pipe and one that
+    /// learned it by scan must agree after seeing the same scan.
+    #[test]
+    fn two_panels_with_different_histories_converge() {
+        let mut by_pipe = state();
+        by_pipe.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        let mut by_scan = state();
+
+        for s in [&mut by_pipe, &mut by_scan] {
+            s.apply_scan(found(&[("other", 3)]));
+        }
+        assert_eq!(by_pipe.agents.len(), 1);
+        assert_eq!(by_scan.agents.len(), 1);
+
+        for s in [&mut by_pipe, &mut by_scan] {
+            s.apply_scan(Vec::new());
+        }
+        let rows = |s: &State| -> Vec<AgentId> { s.agents.iter().map(|a| a.id.clone()).collect() };
+        assert_eq!(rows(&by_pipe), rows(&by_scan), "both panels agree");
+        assert!(by_pipe.agents.is_empty(), "the vanished agent is gone from both");
+    }
+
+    /// The bug: a hook-reported foreign row outlived its process forever,
+    /// because only the agent's own panel ever saw the `ended`.
+    #[test]
+    fn a_scan_culls_a_hook_reported_foreign_row_whose_process_is_gone() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_scan(found(&[("other", 3)]));
+        assert_eq!(s.agents.len(), 1);
+
+        assert!(s.apply_scan(Vec::new()), "the foreign row drops");
+        assert!(s.agents.is_empty());
+    }
+
+    /// The existing protection, which the fix must not regress: the hook owns
+    /// the home session, so a scan that raced it must not delete its row.
+    #[test]
+    fn a_scan_never_culls_a_hook_reported_home_row() {
+        let mut s = state();
+        s.apply_scan(Vec::new());
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+        assert!(!s.apply_scan(Vec::new()), "nothing changed");
+        assert_eq!(s.agents.len(), 1, "the home row survives a scan that missed it");
+    }
+
+    /// A panel that has piped rows but has never completed a scan has no
+    /// evidence of absence, so the first scan must not wipe them.
+    #[test]
+    fn the_first_scan_does_not_cull_foreign_rows() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        assert!(!s.apply_scan(Vec::new()), "the first scan only records that it ran");
+        assert_eq!(s.agents.len(), 1);
+
+        assert!(s.apply_scan(Vec::new()), "the second one culls");
+        assert!(s.agents.is_empty());
+    }
+
+    /// A failed `ps` produces no output, which is indistinguishable from "no
+    /// agents anywhere". Applying it would wipe every foreign row, so the
+    /// nonzero exit must be dropped before it reaches `apply_scan`.
+    #[test]
+    fn a_failed_scan_never_culls() {
+        use zellij_tile::prelude::ZellijPlugin;
+
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_scan(Vec::new());
+        assert_eq!(s.agents.len(), 1);
+
+        let mut ctx = BTreeMap::new();
+        ctx.insert(
+            crate::install::CTX_KEY.to_string(),
+            crate::discover::CTX_SCAN.to_string(),
+        );
+        s.update(Event::RunCommandResult(
+            Some(1),
+            Vec::new(),
+            b"ps: command not found".to_vec(),
+            ctx,
+        ));
+        assert_eq!(s.agents.len(), 1, "a failed scan leaves the list alone");
+    }
+
+    /// A dead session's processes are gone, so the scan cannot see them. The row
+    /// stays `unknown` rather than vanishing.
+    #[test]
+    fn a_scan_does_not_cull_a_row_whose_session_died() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_scan(found(&[("other", 3)]));
+        s.apply_sessions(vec!["mob".into()]);
+        assert_eq!(s.agents[0].status, Status::Unknown);
+
+        assert!(!s.apply_scan(Vec::new()));
+        assert_eq!(s.agents.len(), 1, "the row persists to show the agent existed");
+    }
+
+    /// `ended` is unchanged: it still removes the row in the agent's own panel.
+    #[test]
+    fn ended_still_removes_the_row_locally() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "working")]));
+        assert!(s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "ended")])));
+        assert!(s.agents.is_empty());
+    }
+
+    /// A foreign row's status is frozen the moment it arrives, so past the
+    /// threshold the panel stops asserting it.
+    #[test]
+    fn a_stale_foreign_row_decays_to_unknown() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+
+        s.now = STALE_AFTER - TICK;
+        assert!(!s.age_foreign_rows(), "not stale yet");
+
+        s.now = STALE_AFTER;
+        assert!(s.age_foreign_rows());
+        let foreign = s.agents.iter().find(|a| a.session() == "other").unwrap();
+        assert_eq!(foreign.status, Status::Unknown);
+        let home = s.agents.iter().find(|a| a.session() == "mob").unwrap();
+        assert_eq!(home.status, Status::Working, "the home row is refreshed by its hook");
+    }
+
+    /// A foreign agent that keeps heartbeating is not stale. `status_since` only
+    /// moves on a change, so aging must key on the last report instead.
+    #[test]
+    fn a_heartbeating_foreign_row_does_not_decay() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        for _ in 0..3 {
+            s.now += STALE_AFTER - TICK;
+            s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+            assert!(!s.age_foreign_rows(), "a fresh heartbeat resets the clock");
+        }
+        assert_eq!(s.agents[0].status, Status::Working);
+        assert_eq!(s.agents[0].turns, 1, "heartbeats are not new turns");
+    }
+
+    /// `found` asserts nothing about state, so there is nothing to decay to and
+    /// the row must keep saying `found`.
+    #[test]
+    fn a_discovered_foreign_row_does_not_decay() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        s.now = STALE_AFTER * 2.0;
+        assert!(!s.age_foreign_rows());
+        assert_eq!(s.agents[0].status, Status::Discovered);
+    }
+
+    /// The spinner's own condition is not enough: a foreign `waiting` row still
+    /// needs ticks to reach its decay.
+    #[test]
+    fn the_timer_runs_for_a_foreign_row_that_is_not_spinning() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(s.timer_running, "a foreign row must keep the clock running");
+
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "waiting")]));
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(!s.timer_running, "a home row needs no clock: its hook refreshes it");
+    }
+
+    /// The widened `arm_timer` must not leave a panel ticking forever: once a
+    /// foreign row has decayed there is nothing left for the clock to do.
+    #[test]
+    fn the_clock_stops_once_foreign_rows_have_decayed() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(s.timer_running);
+
+        s.now = STALE_AFTER;
+        assert!(s.age_foreign_rows());
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(!s.timer_running, "no permanent wakeup");
     }
 
     #[test]

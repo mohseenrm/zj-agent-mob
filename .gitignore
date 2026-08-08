@@ -21,3 +21,11 @@ target
 #.idea/
 
 .DS_Store
+
+docs/
+!docs/troubleshooting.md
+!docs/setup.md
+!docs/how-it-works.md
+!docs/development.md
+!docs/img/
+!docs/img/*.png

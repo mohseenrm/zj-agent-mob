@@ -68,6 +68,12 @@ impl Status {
     pub(crate) fn is_active(&self) -> bool {
         matches!(self, Status::Working | Status::Compact)
     }
+
+    /// A state a hook asserted, so one that can go stale. `Discovered` and
+    /// `Unknown` assert nothing and have nothing to decay to.
+    pub(crate) fn is_reported(&self) -> bool {
+        !matches!(self, Status::Discovered | Status::Unknown)
+    }
 }
 
 impl Status {
