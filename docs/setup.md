@@ -26,16 +26,6 @@ curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0
 less init.sh && sh init.sh
 ```
 
-> [!NOTE]
-> **Getting a 404?** While this repository is private, unauthenticated `curl` cannot reach release assets. Use `gh`, which authenticates:
->
-> ```sh
-> gh release download --repo mohseenrm/zj-agent-mob v0.2.0 --pattern init.sh
-> sh init.sh
-> ```
->
-> `init.sh` falls back to `gh` for its own downloads too, so this works end to end. Once the repository is public the `curl` commands above work as written and this note no longer applies.
-
 The URL names an explicit tag rather than `latest` on purpose. The installer, hook script, and wasm are versioned together, so a moving `latest` could pair a new plugin with an older hook on disk, and Zellij caches remote plugins by URL, which would keep serving a stale binary. Grab the newest tag from the [releases page](https://github.com/mohseenrm/zj-agent-mob/releases) and substitute it.
 
 Pin a different release with `--version`:
