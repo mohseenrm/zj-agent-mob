@@ -5,9 +5,11 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Zellij 0.44+](https://img.shields.io/badge/zellij-0.44%2B-green.svg)
 
-A Zellij plugin that monitors Claude Code and Codex agents across all your Zellij sessions: live status, what each agent is working on, jump-to-pane (across sessions), and ability to kill agents.
+A Zellij plugin that monitors Claude Code and Codex agents across all your Zellij sessions: live status, what each agent is working on, jump-to-pane (across sessions), notifying you of agents in need, and ability to kill agents.
 
 ![Four agents appear across three Zellij sessions, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm, the install screen, and finally Enter jumps into an agent in another session](demo/tour.gif)
+
+> Inspired by [herdr](https://herdr.dev) without the entire new multiplexer.
 
 ## Contents
 
@@ -32,9 +34,6 @@ A Zellij plugin that monitors Claude Code and Codex agents across all your Zelli
 | `curl` or `wget` | Only for the one-line install; not needed from a clone |
 | Claude Code, Codex, or both | The agents being monitored |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
-
-> [!NOTE]
-> This repository is currently **private**, so the `curl` commands below return 404 until it is made public. Until then, install from a clone (1.B), or use `gh` - see [docs/setup.md](docs/setup.md#from-a-release).
 
 
 ## Quick start
@@ -101,7 +100,7 @@ See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install 
 
 ![The agent list: one row per agent with status, elapsed time, project, and task, each with an indented detail line](docs/img/02-agent-list.png)
 
-**Killing an agent.** <kbd>x</kbd> sends an interrupt and arms the row; pressing it again closes the pane. The armed row says so in red, so the destructive step is never one keystroke away.
+**Killing an agent.** <kbd>x</kbd> sends an interrupt and arms the row; pressing it again closes the pane.
 
 ![The agent list with the selected row showing "press x again to close pane" in red](docs/img/03-kill-armed.png)
 
@@ -154,13 +153,8 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
 | `unknown` | Its Zellij session is gone, so its state is unknowable | - |
 
-Rows sort in that order, so whatever needs you most is at the top.
 
-The detail line under each row carries the tool call with its argument (`Edit src/webhook.rs`,
-`Bash cargo test`), a running subagent count with types, native task progress (`4/7 tasks`), and
-the closing message once a turn finishes. A non-default permission mode shows as a badge on the
-row itself (`[bypassPermissions]`, `[plan]`), so an agent running unattended is visible at a
-glance.
+Rows sort in that order, so whatever needs you most is at the top.
 
 ### Answering permission prompts from the panel
 
