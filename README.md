@@ -5,11 +5,22 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Zellij 0.44+](https://img.shields.io/badge/zellij-0.44%2B-green.svg)
 
-A Zellij plugin that monitors Claude Code and Codex agents across all your Zellij sessions: live status, what each agent is working on, jump-to-pane (across sessions), notifying you of agents in need, and ability to kill agents.
+**Keep track of every coding agent you have running, from one floating panel.**
+
+Run enough Claude Code and Codex agents and they scatter across panes, tabs, and whole Zellij sessions. This panel shows all of them at once: who is working, who is blocked waiting on you, and who finished while you were elsewhere. Press <kbd>Enter</kbd> to jump straight to any of them, even in another session.
 
 ![Four agents appear across three Zellij sessions, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm, the install screen, and finally Enter jumps into an agent in another session](demo/tour.gif)
 
-> Inspired by [herdr](https://herdr.dev) without the entire new multiplexer.
+Without it, a blocked agent is invisible until you happen to cycle past its pane. Rows sort by urgency, so whatever needs you the most, sits at the top.
+
+- **See every agent at once**, across sessions, with live status and the task each one is on.
+- **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
+- **Get pulled in when needed**: the panel can pop itself open the moment an agent blocks.
+- **Answer permission prompts in place** with <kbd>a</kbd> / <kbd>r</kbd>, without leaving the panel (opt-in).
+- **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident.
+- **No daemon, socket, or state file.** Agent hooks pipe straight to the plugin.
+
+> Inspired by [herdr](https://herdr.dev), without adopting an entire new multiplexer.
 
 ## Contents
 
@@ -35,27 +46,31 @@ A Zellij plugin that monitors Claude Code and Codex agents across all your Zelli
 | Claude Code, Codex, or both | The agents being monitored |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
 
-
 ## Quick start
 
-### 1.A. Install (no clone, no Rust toolchain)
+Three steps: install, bind a key, restart your agents.
 
-```bash
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+### 1. Install
+
+No clone and no Rust toolchain required:
+
+```sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0/init.sh | sh
 ```
 
 This downloads the plugin and hook script for that release, wires up whichever of Claude Code and Codex you have, and leaves an installer at `~/.config/zj-agent-mob/install.sh` so the in-panel install screen works from then on.
 
 Prefer to read before running? Same thing in two steps:
 
-```bash
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh
+```sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0/init.sh
 less init.sh && sh init.sh
 ```
 
-### 1.B Or build it yourself:
+<details>
+<summary>Or build it from source</summary>
 
-```bash
+```sh
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
 ./init.sh
@@ -63,7 +78,11 @@ cargo build --release --target wasm32-wasip1
 
 From a clone, `./init.sh` uses your local build and downloads nothing.
 
-### 2. Add keybinding to `~/.config/zellij/config.kdl`:
+</details>
+
+### 2. Bind a key
+
+Add to `~/.config/zellij/config.kdl`:
 
 ```kdl
 keybinds {
@@ -81,8 +100,12 @@ keybinds {
 
 Press <kbd>Ctrl</kbd>+<kbd>s</kbd> then <kbd>c</kbd> to open the panel.
 
+### 3. Restart your agents
+
 > [!IMPORTANT]
 > Restart any running `claude` / `codex` sessions after installing. Hooks are read at session start, so existing sessions won't report status.
+
+Then start an agent in any pane and open the panel: it shows up within a turn. If the panel stays empty, [troubleshooting](docs/troubleshooting.md#the-panel-says-no-agents-in-this-session) walks through it in order.
 
 See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install screen, layout registration, and every config knob.
 
@@ -127,7 +150,6 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | <kbd>i</kbd> | Open the install screen |
 | <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel |
 
-
 ### Install screen
 
 | Key | Action |
@@ -138,9 +160,7 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | <kbd>r</kbd> | Re-read install state |
 | <kbd>i</kbd> / <kbd>q</kbd> / <kbd>Esc</kbd> | Back to the agent list |
 
-
 ## Statuses
-
 
 | Status | Meaning | Hook event |
 |---|---|---|
@@ -151,10 +171,10 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `compact` | Compacting context (looks like a hang otherwise) | `PreCompact`, cleared by `PostCompact` |
 | `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
+| `found` | Spotted by the process scan, but it has never fired a hook | - |
 | `unknown` | Its Zellij session is gone, so its state is unknowable | - |
 
-
-Rows sort in that order, so whatever needs you most is at the top.
+Rows sort in that order, so whatever needs you most is at the top. A `found` row is normal rather than broken: the agent was already running when hooks were installed, and it fills in the moment it next does anything.
 
 ### Answering permission prompts from the panel
 
@@ -175,7 +195,6 @@ This is the one hook that blocks the agent's turn, which is why it is opt-in. It
 `ZJ_AGENT_APPROVE_TIMEOUT` seconds (default 30) and then falls through to the agent's own prompt,
 so the worst case is the normal interactive experience. Reject is <kbd>r</kbd>, not <kbd>d</kbd>,
 so a mis-keyed dismiss can never answer a prompt.
-
 
 ## Known limitations
 

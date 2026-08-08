@@ -9,14 +9,14 @@
 #   ./init.sh install claude codex   install several targets
 #   ./init.sh uninstall codex    remove one target only
 #   ./init.sh --from-release     fetch hook + plugin from a GitHub release
-#   ./init.sh --version v0.1.0   pin a release; implies --from-release
+#   ./init.sh --version v0.2.0   pin a release; implies --from-release
 #   ./init.sh --no-download      fail rather than fetch anything (offline)
 #
 # Targets: claude, codex, plugin. Omitting the target means all of them.
 #
 # Run without a clone, downloading everything it needs:
 #
-#   curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+#   curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0/init.sh | sh
 #
 # By default only what the source tree lacks is downloaded: from a clone with a
 # built wasm nothing is fetched, and piped through `sh` (where there is no repo
@@ -49,7 +49,7 @@ SELF_DST="$HOOK_DIR/install.sh"
 # pin to this tag rather than `latest`: a `latest` wasm can outrun the hook
 # script that a half-finished install left on disk, and Zellij caches remote
 # plugins by URL, so a moving URL serves a stale binary until that cache clears.
-VERSION="${ZJ_AGENT_VERSION:-v0.1.0}"
+VERSION="${ZJ_AGENT_VERSION:-v0.2.0}"
 REPO="${ZJ_AGENT_REPO:-mohseenrm/zj-agent-mob}"
 # Overridable so the e2e suite can point at a local tree instead of the network.
 # Recomputed by --version below, so this is a function rather than a constant.
@@ -135,7 +135,7 @@ say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-[ -z "$WANT_VERSION" ] || die "--version needs a value, e.g. --version v0.1.0"
+[ -z "$WANT_VERSION" ] || die "--version needs a value, e.g. --version v0.2.0"
 
 command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
 

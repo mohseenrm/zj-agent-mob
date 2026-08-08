@@ -16,25 +16,27 @@ Two options: let `init.sh` download a release for you, or build the wasm yoursel
 Each release ships three assets: `init.sh`, `zj-agent-mob-hook.sh`, and `zj-agent-mob.wasm`. The installer fetches the two it needs from the same tag it was downloaded from, so one command is the whole install:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0/init.sh | sh
 ```
 
 No clone, no Rust toolchain, no manual `target/` directory. To inspect the script first:
 
 ```sh
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0/init.sh
 less init.sh && sh init.sh
 ```
 
 > [!NOTE]
-> This repository is currently **private**, so those `curl` commands return 404. Until it is public, use `gh`, which authenticates:
+> **Getting a 404?** While this repository is private, unauthenticated `curl` cannot reach release assets. Use `gh`, which authenticates:
 >
 > ```sh
-> gh release download --repo mohseenrm/zj-agent-mob v0.1.0 --pattern init.sh
+> gh release download --repo mohseenrm/zj-agent-mob v0.2.0 --pattern init.sh
 > sh init.sh
 > ```
 >
-> `init.sh` falls back to `gh` for its own downloads too, so this works end to end today.
+> `init.sh` falls back to `gh` for its own downloads too, so this works end to end. Once the repository is public the `curl` commands above work as written and this note no longer applies.
+
+The URL names an explicit tag rather than `latest` on purpose. The installer, hook script, and wasm are versioned together, so a moving `latest` could pair a new plugin with an older hook on disk, and Zellij caches remote plugins by URL, which would keep serving a stale binary. Grab the newest tag from the [releases page](https://github.com/mohseenrm/zj-agent-mob/releases) and substitute it.
 
 Pin a different release with `--version`:
 
@@ -66,7 +68,7 @@ From a clone with a local build, `init.sh` downloads nothing.
 ./init.sh uninstall        # remove exactly what was installed
 ./init.sh uninstall codex  # remove one target only
 ./init.sh --from-release   # prefer the released wasm over a local build
-./init.sh --version v0.1.0 # pin a release; implies --from-release
+./init.sh --version v0.2.0 # pin a release; implies --from-release
 ./init.sh --no-download    # fail rather than fetch anything (offline)
 ```
 
@@ -167,14 +169,19 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 
 | Key | Default | Meaning |
 |---|---|---|
-| `popup_on_waiting` | `true` | Auto-show the panel when an agent needs input |
+| `popup_on_waiting` | `true` | Auto-show the panel when an agent needs input. Set `false` to only ever open it yourself |
+| `discover` | `true` | Scan process environments for agents that have not fired a hook yet, including ones in other sessions. Set `false` to show only agents that have reported |
 
 ### Hook script environment
+
+Set these in the environment the *agent* runs in, not the panel's.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ZJ_AGENT_TOOL` | `claude` | Which transcript reader to use (`claude` / `codex`) |
 | `ZJ_AGENT_HEARTBEAT` | `1` | Set `0` to skip `PreToolUse`/`PostToolUse` (halves hook volume) |
+| `ZJ_AGENT_APPROVE` | `0` | Set `1` to park permission prompts in the panel for <kbd>a</kbd> / <kbd>r</kbd> |
+| `ZJ_AGENT_APPROVE_TIMEOUT` | `30` | Seconds a parked prompt waits before falling through to the agent's own prompt |
 | `ZJ_AGENT_PLUGIN` | `file:~/.config/zellij/plugins/zj-agent-mob.wasm` | Plugin path |
 | `ZJ_AGENT_DEBUG` | `0` | Set `1` to log events to `~/.cache/zj-agent-mob/hook.log` |
 

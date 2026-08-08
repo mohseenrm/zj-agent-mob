@@ -1,8 +1,13 @@
 # Troubleshooting
 
+**Nothing showing up?** Start with [the panel says "no agents in this session"](#the-panel-says-no-agents-in-this-session).
+
 - [Changes to the plugin seem to have no effect](#changes-to-the-plugin-seem-to-have-no-effect)
 - [The plugin wasm in my dotfiles repo is out of date](#the-plugin-wasm-in-my-dotfiles-repo-is-out-of-date)
 - [The panel says "no agents in this session"](#the-panel-says-no-agents-in-this-session)
+- [An agent in another Zellij session shows `found` but never live status](#an-agent-in-another-zellij-session-shows-found-but-never-live-status)
+- [<kbd>x</kbd> does nothing on an agent from another session](#x-does-nothing-on-an-agent-from-another-session)
+- [A row says `unknown` / `(session exited)`](#a-row-says-unknown--session-exited)
 - [The install screen says "Installer not found"](#the-install-screen-says-installer-not-found)
 - [The install screen shows `?` / "unknown" for everything](#the-install-screen-shows---unknown-for-everything)
 - [Zellij fails to load the plugin](#zellij-fails-to-load-the-plugin)
@@ -15,10 +20,10 @@
 
 **Zellij caches compiled plugins, in two places.** Zellij compiles the wasm to native code and caches it keyed by the plugin's *file path*. That path is identical on every rebuild, so the cache key never changes and a rebuilt plugin looks unchanged:
 
-1. **On disk** — the compiled artifact, under `~/Library/Caches/org.Zellij-Contributors.Zellij/file:<path-to>/zj-agent-mob.wasm/` (macOS) or `~/.cache/zellij/` (Linux).
-2. **In memory** — the Zellij *server* keeps already-instantiated plugins for the lifetime of the session.
+1. **On disk**: the compiled artifact, under `~/Library/Caches/org.Zellij-Contributors.Zellij/file:<path-to>/zj-agent-mob.wasm/` (macOS) or `~/.cache/zellij/` (Linux).
+2. **In memory**: the Zellij *server* keeps already-instantiated plugins for the lifetime of the session.
 
-Clearing the first alone is not enough, which is the trap: `--skip-plugin-cache` bypasses the on-disk cache **only when a new plugin instance is created**. If the session already has one loaded, `launch-or-focus-plugin` focuses the existing instance rather than building a new one, so the flag silently does nothing. Closing the plugin pane does not help either — the server still holds the compiled module.
+Clearing the first alone is not enough, which is the trap: `--skip-plugin-cache` bypasses the on-disk cache **only when a new plugin instance is created**. If the session already has one loaded, `launch-or-focus-plugin` focuses the existing instance rather than building a new one, so the flag silently does nothing. Closing the plugin pane does not help either: the server still holds the compiled module.
 
 **The reliable fix is a brand-new session**, which means a new server process:
 
@@ -47,7 +52,7 @@ zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
   "file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
 ```
 
-**How to tell which build you are looking at.** Compare the installed artifact against what you just built — if these differ, the problem is the install step, not the cache:
+**How to tell which build you are looking at.** Compare the installed artifact against what you just built. If these differ, the problem is the install step, not the cache:
 
 ```sh
 md5 -q target/wasm32-wasip1/release/zj-agent-mob.wasm \
@@ -65,7 +70,7 @@ cp ~/.config/zellij/plugins/zj-agent-mob.wasm \
    ~/dotfiles/.config/zellij/plugins/zj-agent-mob.wasm
 ```
 
-Check which situation you are in with `readlink ~/.config/zellij/plugins/zj-agent-mob.wasm` — no output means it is a regular file, so the two copies can drift.
+Check which situation you are in with `readlink ~/.config/zellij/plugins/zj-agent-mob.wasm`: no output means it is a regular file, so the two copies can drift.
 
 ## The panel says "no agents in this session"
 
@@ -137,7 +142,7 @@ The usual cause is a partial install: the wasm was copied into `~/.config/zellij
 Re-run the installer to bootstrap it:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.1.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.2.0/init.sh | sh
 ```
 
 or `./init.sh` from a clone. Then press <kbd>r</kbd> on the install screen to re-read state.

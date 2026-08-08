@@ -2,6 +2,8 @@
 
 - [Status transport](#status-transport)
 - [Task summaries](#task-summaries)
+- [Counter events](#counter-events)
+- [Answering permission prompts](#answering-permission-prompts)
 - [The install screen](#the-install-screen)
 
 ## Status transport
