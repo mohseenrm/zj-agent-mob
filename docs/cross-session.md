@@ -244,6 +244,13 @@ user cannot tell whether it finished, crashed, or was never there.
 `Status::Unknown` is a new variant alongside the existing `Discovered` (`src/status.rs:14`),
 which is also scan-produced and never arrives from a hook.
 
+## Known bug
+
+Panels in different sessions do not agree on the list: a row can appear in one and not another,
+and foreign rows linger after the agent is gone. Root cause and fix are in
+[cross-session-consistency.md](cross-session-consistency.md). Items 10-11 below are part of the
+story but not the whole of it - two of the three mechanisms are in the plugin, not the transport.
+
 ## What this does not address
 
 - Sessions that are not running (`EXITED - attach to resurrect`) have no panes and no

@@ -7,9 +7,9 @@
 
 A Zellij plugin that monitors Claude Code and Codex agents across all your Zellij sessions: live status, what each agent is working on, jump-to-pane (across sessions), and ability to kill agents.
 
-![Agents appear as they start work, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm and install screen](demo/tour.gif)
+![Four agents appear across three Zellij sessions, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm, the install screen, and finally Enter jumps into an agent in another session](demo/tour.gif)
 
-<sub>The full tour: agents appearing, subagent fan-out and task progress, a permission prompt approved without leaving the panel, every status, the two-step kill, and the install screen.</sub>
+<sub>The full tour, in order: agents appearing with their tool calls, subagent fan-out and task progress, a permission prompt approved without leaving the panel, every status, the two-step kill, the install screen, then agents in two <em>other</em> Zellij sessions - and <kbd>Enter</kbd> switching sessions to land on the one that needs you. Statuses are piped in rather than driven by live agents, so the recording is reproducible - see <a href="docs/demo.md">docs/demo.md</a>.</sub>
 
 ## Contents
 
@@ -24,10 +24,12 @@ A Zellij plugin that monitors Claude Code and Codex agents across all your Zelli
   - [How it works: status transport, task summaries](docs/how-it-works.md)
   - [Local development](docs/development.md)
   - [Troubleshooting](docs/troubleshooting.md)
+  - [Recording the demo](docs/demo.md)
   - Design notes:
     - [Richer hook data and UX sketches](docs/roadmap-ux.md) (shipped)
     - [Discovering agents that have not reported](docs/agent-discovery.md) (shipped)
-    - [Agents across Zellij sessions](docs/cross-session.md) (proposed)
+    - [Agents across Zellij sessions](docs/cross-session.md) (shipped)
+    - [Cross-session rows are inconsistent between panels](docs/cross-session-consistency.md) (proposed)
     - [System notifications when an agent needs you](docs/notifications.md) (proposed)
 
 ## Requirements

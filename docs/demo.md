@@ -8,10 +8,12 @@ How the README demo is produced, and what it cost to get there.
 >
 > ```
 > scripts/demo/
->   lib.sh           # zellij-action helpers: emit, pane_ids, show_panel, wait_for, key
->   stage-tour.sh    # the 7-act tour, driven from outside the session
+>   lib.sh           # zellij-action helpers: emit, pane_ids, show_panel, wait_for, key,
+>                    #   spawn_session, open_agent, mock_in
+>   mock-agent.sh    # a stand-in Claude/Codex transcript for the prop panes
+>   stage-tour.sh    # the 11-act tour, driven from outside the session
 >   tour.tape        # VHS tape: starts Zellij, backgrounds the staging script, records
->   render.sh        # entry point; fails if fewer than 8 act markers are logged
+>   render.sh        # entry point; fails if fewer than 12 act markers are logged
 > ```
 >
 > The rest of this document is the investigation behind those four files. The traps in
@@ -163,6 +165,41 @@ has focus is swallowed by that pane, which is the other way the tour froze.
 floating pane back to its default size, putting the prop panes back in frame. `key()` re-asserts
 the geometry after every keystroke via `fill_frame`.
 
+**12. A different `--configuration` is a different plugin.** Zellij routes both launches and
+pipes by (url, configuration). The tour passes `discover=false` to suppress the process scan
+(otherwise the panel also lists the real agents on the recording machine). Passing it to
+`launch-or-focus-plugin` but not to `pipe` produced **two** Agent Mob panes: one holding every
+row, one empty. `lib.sh` keeps a single `PLUGIN_CONF` used by all three call sites, and
+`stage-tour.sh` asserts at the end that no session has more than one panel.
+
+**13. `--stacked` and `-d` are mutually exclusive.** `zellij action new-pane -d down --stacked`
+exits with `The argument '--direction <DIRECTION>' cannot be used with '--stacked'` - and because
+every helper ended in `|| true`, four pane creations failed in total silence. Instrumenting the
+helpers to log `new-pane`'s output is what found it; that logging is worth restoring the moment
+anything looks wrong.
+
+**14. `$0` inside a sourced file is the caller.** `MOCK="$(dirname "$0")/mock-agent.sh"` in
+`lib.sh` resolved relative to `stage-tour.sh`, then to the repo root, and every prop pane silently
+fell back to a bare shell. `stage-tour.sh` now exports `ZJ_DEMO_DIR` and `lib.sh` reads that.
+
+**15. A nested session is not "live" to the plugin.** `spawn_session` creates the extra sessions
+by running `zellij attach --create` inside a pane. Those sessions appear in `zellij list-sessions`
+but **not** in the plugin's `SessionUpdate`, which only reports sessions with a directly-attached
+client - so their rows render `unknown · (session exited)`. Verified three ways:
+`attach --create-background` (no client at all) is worse, and a `ttyd` host never starts without a
+browser connecting. This is a real property of Zellij, not a demo artifact: a user whose sessions
+are attached in their own terminals sees live status. The demo shows the `unknown` state honestly
+and still demonstrates the jump, which works either way.
+
+**16. Two things that look like session state are not.** After act 9 the recorded client is in
+another session, so (a) `PANEL_PANE` is stale - it names a pane in the session just left - and
+(b) `zellij list-sessions | grep (current)` reports the session the *staging script* runs from,
+which never moved. Use `za_in <session> list-clients` to find where the client actually landed.
+
+**17. The startup-tip modal is created lazily.** Hiding it in `spawn_session` is too early: it
+appears when a client first attaches, which is the jump itself. Hide it *after* the jump, in every
+candidate session.
+
 ### Decision: record against the real stowed config
 
 Recording uses the real `~/.config/zellij` (stowed from `~/dotfiles`) rather than a hermetic
@@ -257,6 +294,7 @@ first. The seven acts:
 
 | Act | Shows |
 |---|---|
+| 0 setup | The panel on first open |
 | 1 appear | Agents arriving mid-turn, tool call on the detail line, `[bypassPermissions]` badge |
 | 2 fan-out | Subagent counters and native task progress (`2 subagents: explore · 4/7 tasks`) |
 | 3 waiting | `waiting` sorting to the top on its own, then the approve/reject box, approved with `a` |
@@ -264,6 +302,13 @@ first. The seven acts:
 | 5 nav | `j`/`k` moving the selection |
 | 6 kill | `x` arming the row, with the red "press x again" confirm, then backing out |
 | 7 install | The install screen and back |
+| 8 cross-session | Agents in two *other* Zellij sessions, each with its own panes |
+| 9 hop | `Enter` on a foreign row switching sessions and landing on that agent's pane |
+| 10 back | The same panel from inside the session jumped to |
+
+The panes behind the panel run [`mock-agent.sh`](../scripts/demo/mock-agent.sh) rather than a
+bare `sleep`, so the moment act 9 jumps into one it shows a plausible transcript. With
+`ZJ_MOCK_PROMPT` set it ends on a permission prompt, which is what a `waiting` row means.
 
 Not done, and deliberately left:
 

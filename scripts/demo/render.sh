@@ -19,21 +19,31 @@ command -v vhs >/dev/null 2>&1 || {
 }
 
 # A leftover session from an interrupted run would be attached rather than
-# created, and the tape would record someone else's panes.
-zellij kill-session zjdemo 2>/dev/null || true
-zellij delete-session zjdemo 2>/dev/null || true
+# created, and the tape would record someone else's panes. The tour also builds
+# two extra sessions for the cross-session acts; stale ones would show as
+# `unknown` rows the moment the new run recreated them.
+for s in zjdemo checkout-api platform-infra; do
+  zellij kill-session "$s" 2>/dev/null || true
+  zellij delete-session "$s" --force 2>/dev/null || true
+done
 
 mkdir -p demo
 : > /tmp/zj-demo-stage.log
+: > /tmp/zj-acts.log
 
 vhs scripts/demo/tour.tape
 
 # The staging script logs act boundaries; a short log means it died early and the
 # recording is of a frozen panel.
 acts=$(grep -c '^act:' /tmp/zj-acts.log 2>/dev/null || echo 0)
-if [ "$acts" -lt 8 ]; then
-  echo "WARNING: only $acts/8 acts recorded - see /tmp/zj-demo-stage.log" >&2
+if [ "$acts" -lt 12 ]; then
+  echo "WARNING: only $acts/12 acts recorded - see /tmp/zj-demo-stage.log" >&2
   exit 1
 fi
+
+# The tour leaves both extra sessions running; they are props, not state.
+for s in checkout-api platform-infra; do
+  zellij delete-session "$s" --force >/dev/null 2>&1 || true
+done
 
 echo "demo/tour.gif written ($(du -h demo/tour.gif | cut -f1))"

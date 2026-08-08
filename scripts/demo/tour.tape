@@ -29,9 +29,10 @@ Sleep 500ms
 Type "clear" Enter
 Sleep 500ms
 Type "ZJ_SESSION=zjdemo ZJ_DEMO_LOG=/tmp/zj-acts.log sh scripts/demo/stage-tour.sh >/tmp/zj-demo-stage.log 2>&1 &" Enter
-# Let the first act land so recording opens on a populated panel.
-Sleep 10s
+# Spawning two extra sessions and four agent panes happens before anything is
+# worth showing; start recording once the panel is up (act 0).
+Sleep 20s
 Show
 
-# Staging runs ~51s end to end; this covers the rest of it plus a beat to land on.
-Sleep 46s
+# Staging runs ~85s from act 0 (measured); this covers it plus a beat to land on.
+Sleep 96s

@@ -37,6 +37,10 @@ pub struct State {
     pub(crate) live_sessions: Vec<String>,
     /// A scan is in flight, so a second one would be wasted work.
     pub(crate) scan_pending: bool,
+    /// The process scan, off until `load()` reads the `discover` key (default
+    /// on). A bool that defaults false is deliberate: `register_plugin!` builds
+    /// the state with `Default`, and `load()` always runs before any event.
+    pub(crate) discover: bool,
 }
 
 impl State {
@@ -315,11 +319,9 @@ impl State {
         true
     }
 
-    /// Runs a scan unless one is already in flight or the session name is not
-    /// known yet - without it the scan cannot be scoped and would list agents
-    /// from every session on the machine.
+    /// Runs a scan unless one is already in flight, or discovery is switched off.
     pub(crate) fn request_scan(&mut self) {
-        if self.scan_pending || !self.permissions_granted {
+        if self.scan_pending || !self.permissions_granted || !self.discover {
             return;
         }
         self.scan_pending = true;
@@ -463,6 +465,7 @@ mod tests {
             popup_on_waiting: false,
             session_name: "mob".into(),
             live_sessions: vec!["mob".into()],
+            discover: true,
             ..Default::default()
         }
     }
@@ -1092,6 +1095,7 @@ mod cross_session_tests {
             popup_on_waiting: false,
             session_name: "mob".into(),
             live_sessions: vec!["mob".into(), "other".into()],
+            discover: true,
             ..Default::default()
         }
     }
@@ -1336,6 +1340,23 @@ mod cross_session_tests {
         );
         // Waiting sorts above working, so the foreign row leads.
         assert!(rendered[0].contains("foreign work"), "{:?}", rendered);
+    }
+
+    /// `discover false` leaves hook-reported rows untouched and only stops the
+    /// scan, so a panel with it set still tracks everything that reports in.
+    #[test]
+    fn discovery_can_be_switched_off() {
+        let mut on = state();
+        on.request_scan();
+        assert!(on.scan_pending, "the default must actually scan");
+
+        let mut s = state();
+        s.discover = false;
+        s.request_scan();
+        assert!(!s.scan_pending, "no scan should be dispatched");
+
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "working")]));
+        assert_eq!(s.agents.len(), 1, "hook reports still land");
     }
 
     #[test]

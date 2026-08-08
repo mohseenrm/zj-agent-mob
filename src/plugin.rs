@@ -15,6 +15,7 @@ impl ZellijPlugin for State {
             .get("popup_on_waiting")
             .map(|v| v != "false")
             .unwrap_or(true);
+        self.discover = configuration.get("discover").map(|v| v != "false").unwrap_or(true);
 
         request_permission(&[
             PermissionType::ReadApplicationState,

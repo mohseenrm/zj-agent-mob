@@ -8,11 +8,33 @@
 # Requires: ZJ_SESSION set by the caller.
 
 WASM="$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
+# `$0` inside a sourced file is the CALLER, not this file, so `dirname "$0"`
+# silently resolves to wherever the caller lives. Callers set ZJ_DEMO_DIR; the
+# fallback keeps a hand-run `sh scripts/demo/lib.sh` working.
+MOCK="${ZJ_DEMO_DIR:-scripts/demo}/mock-agent.sh"
+
+# `discover false` turns off the process scan for the recording only: without it
+# the panel also lists the real agents running on the recording machine, which is
+# correct behaviour and wrong for a demo.
+#
+# Zellij treats "same url, different configuration" as a DIFFERENT plugin, for
+# both launching and pipe routing. So this string has to be passed identically to
+# every launch AND every pipe, or the tour ends up with two Agent Mob panes: one
+# holding the rows and one that was launched with no config.
+PLUGIN_CONF="discover=false"
 
 # `zellij action` with stdin closed. Without </dev/null, `pipe` with no PAYLOAD
 # argument listens on stdin and blocks forever.
 za() {
   zellij -s "$ZJ_SESSION" action "$@" </dev/null
+}
+
+# Same, against a named session. The cross-session acts drive two other
+# sessions without moving the recorded session's focus.
+za_in() {
+  _s=$1
+  shift
+  zellij -s "$_s" action "$@" </dev/null
 }
 
 # Send one agent-status message to the plugin. `pipe --plugin` auto-launches the
@@ -22,12 +44,72 @@ za() {
 # message was delivered, and callers run under `set -e`. Without it the tour dies
 # mid-act with an empty stderr, which looks exactly like a hang.
 emit() {
-  za pipe --name agent-status --plugin "file:$WASM" --args "$1" >/dev/null 2>&1 || true
+  za pipe --name agent-status --plugin "file:$WASM" \
+    --plugin-configuration "$PLUGIN_CONF" --args "$1" >/dev/null 2>&1 || true
 }
 
 # Park a permission prompt in the panel (the `a`/`r` approve-reject box).
 emit_ask() {
-  za pipe --name agent-ask --plugin "file:$WASM" --args "$1" >/dev/null 2>&1 || true
+  za pipe --name agent-ask --plugin "file:$WASM" \
+    --plugin-configuration "$PLUGIN_CONF" --args "$1" >/dev/null 2>&1 || true
+}
+
+# Create another Zellij session, attached from a pane of the recorded one.
+#
+# KNOWN LIMIT, verified three ways: the panel will show this session's agents as
+# `unknown`, not live. `SessionUpdate` - the only way a plugin learns which
+# sessions exist - does not report a session whose sole client is nested inside
+# another session, which is the only kind this script can create headlessly.
+# `zellij attach --create-background` is worse (no client at all), and a ttyd
+# host never starts without a browser.
+#
+# That is honest for the demo: it is exactly what a user sees for a session that
+# is not currently attached anywhere, and `Enter` on such a row attaches it.
+# What it cannot show is a foreign row streaming live status.
+spawn_session() {
+  _name=$1
+  zellij delete-session "$_name" --force >/dev/null 2>&1 || true
+  za new-pane -d down --name "$_name" -- sh -c "zellij attach --create $_name" >/dev/null 2>&1 || true
+  _i=0
+  while [ "$_i" -lt 60 ]; do
+    if zellij list-sessions 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -q "^$_name "; then
+      sleep 0.8
+      # Every fresh session opens the "About Zellij / Zellij Tip" modal, which
+      # sits squarely over the pane this session exists to show. It is a
+      # FLOATING plugin pane: `close-pane` does not remove it (verified) and an
+      # Esc has to reach the right client, but toggling floating panes hides it
+      # outright.
+      za_in "$_name" toggle-floating-panes >/dev/null 2>&1 || true
+      sleep 0.4
+      # `zellij attach` runs INSIDE a pane of the recorded session, so focus is
+      # now in the nested session. Everything after this drives the outer one.
+      za focus-next-pane >/dev/null 2>&1 || true
+      sleep 0.3
+      return 0
+    fi
+    sleep 0.25
+    _i=$((_i + 1))
+  done
+  echo "spawn_session: $_name never appeared" >&2
+  return 1
+}
+
+# Run a mock agent transcript in a pane of another session.
+#
+#   mock_in <session> <tool> <task> [prompt] [step...]
+#
+# `prompt` non-empty leaves the pane on a permission prompt, which is what the
+# panel's `waiting` row means and what the cross-session jump lands on.
+mock_in() {
+  _sess=$1 _tool=$2 _task=$3 _prompt=$4
+  shift 4
+  _args=""
+  for _s in "$@"; do
+    _args="$_args '$_s'"
+  done
+  za_in "$_sess" new-pane --stacked --name "$_tool" -- sh -c \
+    "ZJ_MOCK_PROMPT='$_prompt' sh '$MOCK' '$_tool' '$_task'$_args" >/dev/null 2>&1 || true
+  sleep 0.8
 }
 
 # Space-separated list of REAL terminal pane ids, ascending.
@@ -40,26 +122,30 @@ pane_ids() {
     | sort -n | tr '\n' ' '
 }
 
-# Open n terminal panes that stay alive.
+# Open one agent pane, stacked with the others.
 #
-# The pane only has to exist: reconcile() culls any agent whose pane is gone, and
-# nothing reads what runs inside. So run an explicit `sleep` rather than a shell.
-# An interactive shell here is a liability - it inherits the user's profile, which
-# both prints a banner into frame and can exit non-zero, taking the pane (and the
-# agent row with it) down a second after it appears.
-open_panes() {
-  n=$1
-  i=0
-  while [ "$i" -lt "$n" ]; do
-    za new-pane -d down -- sh -c 'sleep 100000' >/dev/null 2>&1
-    sleep 0.5
-    # The pane title defaults to the command, and `sh -c sleep 100000` in frame
-    # gives away that these are props. Name them after what they stand in for.
-    za rename-pane "agent $((i + 1))" >/dev/null 2>&1 || true
-    sleep 0.2
-    i=$((i + 1))
+#   open_agent <tool> <task> [prompt] [step...]
+#
+# The pane has to exist for reconcile() to keep its agent row, and it has to
+# *look* like an agent for the moment the demo jumps into one - so each runs a
+# mock transcript rather than a bare `sleep`. Never an interactive shell: it
+# inherits the user's profile, which prints a banner into frame and can exit
+# non-zero, taking the pane and its agent row with it.
+#
+# `--stacked` keeps them as one collapsed stack instead of tiling the viewport
+# into ever-smaller slivers, which is also how a real multi-agent session is
+# usually arranged.
+open_agent() {
+  _tool=$1 _task=$2 _prompt=$3
+  shift 3
+  _args=""
+  for _s in "$@"; do
+    _args="$_args '$_s'"
   done
-  sleep 0.5
+  [ -f "$MOCK" ] || echo "open_agent: MOCK missing at $MOCK" >&2
+  za new-pane --stacked --name "$_tool" -- sh -c \
+    "ZJ_MOCK_PROMPT='$_prompt' sh '$MOCK' '$_tool' '$_task'$_args" >/dev/null 2>&1 || true
+  sleep 0.8
 }
 
 # Bring the panel up, size it, and leave it focused so `send-keys` reaches the
@@ -70,7 +156,8 @@ open_panes() {
 # demo is about the panel, so tiled shell prompts behind it are clutter rather
 # than context. The panes stay alive (reconcile() needs them), just out of shot.
 show_panel() {
-  PANEL_PANE=$(za launch-or-focus-plugin --floating --move-to-focused-tab "file:$WASM" 2>/dev/null | tr -d '[:space:]')
+  PANEL_PANE=$(za launch-or-focus-plugin --floating --move-to-focused-tab \
+    --configuration "$PLUGIN_CONF" "file:$WASM" 2>/dev/null | tr -d '[:space:]')
   sleep 1.5
   [ -n "$PANEL_PANE" ] || PANEL_PANE=$(za list-panes 2>/dev/null | awk '/zj-agent-mob\.wasm/ { print $1; exit }')
   [ -n "$PANEL_PANE" ] || return 1
