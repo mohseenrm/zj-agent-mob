@@ -11,7 +11,7 @@ Run enough Claude Code and Codex agents and they scatter across panes, tabs, and
 
 ![Four agents appear across three Zellij sessions, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm, the install screen, and finally Enter jumps into an agent in another session](demo/tour.gif)
 
-Without it, a blocked agent is invisible until you happen to cycle past its pane. Rows sort by urgency, so whatever needs you the most, sits at the top.
+A blocked agent is invisible until you happen to cycle past its pane. Rows sort by urgency, so whatever needs you the most, sits at the top.
 
 - **See every agent at once**, across sessions, with live status and the task each one is on.
 - **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
