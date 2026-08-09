@@ -6,6 +6,7 @@
 - [The plugin wasm in my dotfiles repo is out of date](#the-plugin-wasm-in-my-dotfiles-repo-is-out-of-date)
 - [The panel says "no agents in this session"](#the-panel-says-no-agents-in-this-session)
 - [An agent in another Zellij session shows `found` but never live status](#an-agent-in-another-zellij-session-shows-found-but-never-live-status)
+- [Task text from other sessions is visible to other users](#task-text-from-other-sessions-is-visible-to-other-users)
 - [<kbd>x</kbd> does nothing on an agent from another session](#x-does-nothing-on-an-agent-from-another-session)
 - [A row says `unknown` / `(session exited)`](#a-row-says-unknown--session-exited)
 - [The install screen says "Installer not found"](#the-install-screen-says-installer-not-found)
@@ -111,12 +112,42 @@ firing. Work through these in order:
 
 ## An agent in another Zellij session shows `found` but never live status
 
-Expected. The panel finds agents in every session by scanning process environments, so they appear
-and <kbd>Enter</kbd> jumps to them. But the hook only pipes to the plugin in its *own* session, so
-a foreign agent's live status (`working`, `waiting`, task summaries) only arrives while a panel is
-open in the session that agent is running in.
+Agents in other sessions report status through a file in `$TMPDIR` rather than the pipe, which
+reaches only their own session. A row stuck on `found` means that file is missing or not being
+read. In order:
 
-Open the panel once in each session you care about, or accept `found` rows as a jump list.
+1. **Was the agent restarted since the spool shipped?** The hook is read at session start, so an
+   agent started with an older hook writes nothing. This is the usual cause.
+2. **Is anything being written?** Each agent gets one file:
+
+   ```sh
+   ls -la "${TMPDIR:-/tmp}/zj-agent-mob-$(id -u)/status/"
+   ```
+
+   One file per live agent, named `<session>.<pane_id>`. No files means the hook is not writing:
+   check `ZJ_AGENT_SPOOL` is not set to `0`, and see
+   [the panel says "no agents"](#the-panel-says-no-agents-in-this-session) for whether the hook
+   runs at all.
+3. **Is the record fresh?** Records older than 60s are ignored on read, so a paused agent falls
+   back to `found`. `cat` one and check its `ts=` against `date +%s`.
+4. **Did the pane id get recycled?** A record whose `session_id` disagrees with the running agent
+   is ignored on purpose - it belongs to a previous agent on that pane. Restarting the agent
+   rewrites it.
+
+`found` is never wrong, only incomplete: the agent is really there and <kbd>Enter</kbd> still
+jumps to it.
+
+## Task text from other sessions is visible to other users
+
+Only possible on a shared `/tmp`. The spool directory is created `0700` and namespaced by uid, so
+another user cannot read it. If your `$TMPDIR` predates this and has looser permissions:
+
+```sh
+chmod 700 "${TMPDIR:-/tmp}/zj-agent-mob-$(id -u)"
+```
+
+Set `ZJ_AGENT_SPOOL=0` in the agent's environment to opt out of the spool entirely; status for
+that agent's own session keeps working through the pipe.
 
 ## <kbd>x</kbd> does nothing on an agent from another session
 

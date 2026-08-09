@@ -1,6 +1,7 @@
 # How it works
 
 - [Status transport](#status-transport)
+- [Cross-session status: the spool](#cross-session-status-the-spool)
 - [Task summaries](#task-summaries)
 - [Counter events](#counter-events)
 - [Answering permission prompts](#answering-permission-prompts)
@@ -17,7 +18,61 @@ zellij pipe --name agent-status --plugin file:...wasm \
 
 `$ZELLIJ_PANE_ID` is set by Zellij in every terminal pane and is inherited by processes started there, so it identifies the exact pane. If it isn't set, the hook exits immediately, which is what scopes monitoring to the current session: agents outside Zellij are ignored, and each session's plugin instance only sees its own panes.
 
-`zellij pipe --plugin` auto-launches the plugin if it isn't running, so there's no daemon, socket, or state file.
+`zellij pipe --plugin` auto-launches the plugin if it isn't running, so there's no daemon and no socket.
+
+## Cross-session status: the spool
+
+The pipe above reaches only the plugin in the agent's *own* session. To give a panel live status
+for agents everywhere, the hook also writes one file per agent:
+
+```
+$TMPDIR/zj-agent-mob-<uid>/status/<session>.<pane_id>
+```
+
+One line, the same `key=value` payload plus a `ts=`. The write is a `printf` to a `.tmp` and a
+`mv` into place - no subprocess, nothing to block on, and `rename(2)` is atomic within a
+filesystem, so a reader sees the old record or the new one but never a half-written one. That
+matters because this runs on the critical path of every tool call.
+
+The panel reads the directory on the same `run_command` that already runs the process scan, so
+polling costs one command rather than two.
+
+### Who owns which row
+
+Three sources can say something about an agent, and they are deliberately not equal:
+
+| Source | Owns | Beats |
+|---|---|---|
+| Pipe (the agent's own session) | status for home rows | everything, for home rows |
+| Spool | status for foreign rows | the scan |
+| Process scan | whether a row exists at all | nothing; it asserts existence only |
+
+**The rule that makes this safe: a spool record never creates a row.** Existence comes from the
+process scan; the spool only refines a row the scan already justified. So a leftover file cannot
+resurrect an agent that exited, and losing the spool degrades to the pre-existing behaviour
+(`found` rows) rather than breaking anything.
+
+A home row is skipped by the spool merge entirely: its hook pipes straight into this session, so
+the pipe is both fresher and authoritative, and letting a poll overwrite it would flap the row.
+
+Four defences keep a stale record from showing wrong data:
+
+| Defence | Stops |
+|---|---|
+| No process, no row | A record for an agent that has exited |
+| `session_id` must match | A recycled pane id inheriting the previous agent's status |
+| `ts` older than `STALE_AFTER` is ignored | A record from a previous boot or a long-idle agent |
+| Filename must match the record's own `session`/`pane_id` | A malformed or mislabelled file |
+
+Records are dated relative to the newest one seen rather than against a wall clock: the plugin has
+no clock, and this makes a host clock jump unable to pin a row as permanently current.
+
+`SessionEnd` removes the file. A killed agent fires no `SessionEnd`, so the scan also sweeps
+records older than a day - far past `STALE_AFTER`, so they could never render anyway.
+
+The directory is created `0700` and namespaced by uid, because on a shared `/tmp` these records
+contain task summaries, which are the user's own prompts. Set `ZJ_AGENT_SPOOL=0` to opt out
+entirely; the pipe keeps working for the agent's own session.
 
 ## Task summaries
 

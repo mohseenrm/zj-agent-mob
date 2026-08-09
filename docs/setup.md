@@ -172,6 +172,8 @@ Set these in the environment the *agent* runs in, not the panel's.
 | `ZJ_AGENT_HEARTBEAT` | `1` | Set `0` to skip `PreToolUse`/`PostToolUse` (halves hook volume) |
 | `ZJ_AGENT_APPROVE` | `0` | Set `1` to park permission prompts in the panel for <kbd>a</kbd> / <kbd>r</kbd> |
 | `ZJ_AGENT_APPROVE_TIMEOUT` | `30` | Seconds a parked prompt waits before falling through to the agent's own prompt |
+| `ZJ_AGENT_SPOOL` | `1` | Set `0` to stop writing the cross-session status file. Agents in other sessions then show `found` instead of live status |
+| `ZJ_AGENT_SPOOL_DIR` | `$TMPDIR/zj-agent-mob-<uid>/status` | Where status files are written. Created `0700`, since records contain task summaries |
 | `ZJ_AGENT_PLUGIN` | `file:~/.config/zellij/plugins/zj-agent-mob.wasm` | Plugin path |
 | `ZJ_AGENT_DEBUG` | `0` | Set `1` to log events to `~/.cache/zj-agent-mob/hook.log` |
 

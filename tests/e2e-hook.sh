@@ -499,6 +499,209 @@ else
   bad "same pane in two sessions gets two verdict files" "both were: $va"
 fi
 
+# ---------------------------------------------------------------------------
+# The cross-session status spool.
+#
+# The pipe above only reaches the agent's own session, so a panel elsewhere
+# reads status from these files instead. The write must be a plain filesystem
+# side effect: no subprocess, and never able to block a turn.
+# ---------------------------------------------------------------------------
+
+SPOOL="$WORK/spool"
+
+# spool_run <json> [env...] -> runs the hook with the spool pointed at $SPOOL
+spool_run() {
+  _j=$1
+  shift
+  run "$_j" ZJ_AGENT_SPOOL_DIR="$SPOOL" "$@" >/dev/null
+}
+
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"UserPromptSubmit","session_id":"uuid-1","cwd":"/Users/x/Projects/web"}' \
+  ZELLIJ_SESSION_NAME=mob
+if [ -f "$SPOOL/mob.3" ]; then
+  ok "a status event writes a spool record"
+else
+  bad "a status event writes a spool record" "no file at $SPOOL/mob.3: $(ls -A "$SPOOL" 2>/dev/null)"
+fi
+
+rec=$(cat "$SPOOL/mob.3" 2>/dev/null || true)
+assert_contains "the record carries a timestamp" "$rec" "ts="
+assert_contains "the record carries its pane" "$rec" "pane_id=3"
+assert_contains "the record carries its session" "$rec" "session=mob"
+assert_contains "the record carries the status" "$rec" "status=working"
+# Pane ids are recycled, so this is what stops a stale record colouring a new
+# agent on the same pane.
+assert_contains "the record carries the agent session id" "$rec" "session_id=uuid-1"
+
+# The plugin keys identity off the filename, so a record must agree with it.
+name_pane=$(printf '%s' "$rec" | tr ',' '\n' | grep '^pane_id=' | cut -d= -f2)
+name_sess=$(printf '%s' "$rec" | tr ',' '\n' | grep '^session=' | cut -d= -f2)
+if [ "$name_sess.$name_pane" = "mob.3" ]; then
+  ok "the record agrees with its filename"
+else
+  bad "the record agrees with its filename" "got $name_sess.$name_pane for file mob.3"
+fi
+
+# One line only: the plugin reads the first and treats extra lines as malformed.
+lines=$(wc -l < "$SPOOL/mob.3" | tr -d ' ')
+if [ "$lines" = "1" ]; then
+  ok "the record is exactly one line"
+else
+  bad "the record is exactly one line" "got $lines lines"
+fi
+
+# On a shared /tmp another user must not be able to read prompt text.
+# GNU `stat -f` means "filesystem info" and exits 0 printing a block dump, so a
+# `-f || -c` fallback silently takes the wrong branch on Linux. Pick by probing
+# for GNU first instead of relying on a failure that never comes.
+if stat -c '%a' . >/dev/null 2>&1; then
+  mode=$(stat -c '%a' "$SPOOL" 2>/dev/null || echo "?")
+else
+  mode=$(stat -f '%Lp' "$SPOOL" 2>/dev/null || echo "?")
+fi
+if [ "$mode" = "700" ]; then
+  ok "the spool directory is private (0700)"
+else
+  bad "the spool directory is private (0700)" "mode was $mode"
+fi
+
+# The rename into place is what publishes a record, so a reader never sees a
+# partial one and no debris is left behind.
+leftover=$(find "$SPOOL" -name '*.tmp' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$leftover" = "0" ]; then
+  ok "no partial .tmp file is left behind"
+else
+  bad "no partial .tmp file is left behind" "$leftover found"
+fi
+
+# A newer event replaces the record rather than appending: the spool is a
+# snapshot per agent, so it cannot grow without bound.
+spool_run '{"hook_event_name":"Stop","last_assistant_message":"all done"}' ZELLIJ_SESSION_NAME=mob
+rec2=$(cat "$SPOOL/mob.3" 2>/dev/null || true)
+assert_contains "a later event overwrites the record" "$rec2" "status=done"
+lines2=$(wc -l < "$SPOOL/mob.3" | tr -d ' ')
+if [ "$lines2" = "1" ]; then
+  ok "overwriting does not append"
+else
+  bad "overwriting does not append" "got $lines2 lines"
+fi
+
+# SessionEnd retires the agent, so the record must not outlive it and colour a
+# recycled pane id later.
+spool_run '{"hook_event_name":"SessionEnd","reason":"logout"}' ZELLIJ_SESSION_NAME=mob
+if [ -f "$SPOOL/mob.3" ]; then
+  bad "SessionEnd removes the record" "file still present"
+else
+  ok "SessionEnd removes the record"
+fi
+
+# Two sessions on the same pane number are different agents and need different
+# files, exactly like the verdict path.
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"UserPromptSubmit"}' ZELLIJ_SESSION_NAME=mob
+spool_run '{"hook_event_name":"UserPromptSubmit"}' ZELLIJ_SESSION_NAME=other
+if [ -f "$SPOOL/mob.3" ] && [ -f "$SPOOL/other.3" ]; then
+  ok "same pane in two sessions gets two records"
+else
+  bad "same pane in two sessions gets two records" "$(ls -A "$SPOOL" 2>/dev/null)"
+fi
+
+# A session name that could split the args or escape the directory is folded
+# before it reaches a path.
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"UserPromptSubmit"}' ZELLIJ_SESSION_NAME="../evil"
+if [ -f "$SPOOL/.._evil.3" ]; then
+  ok "a session name cannot escape the spool directory"
+else
+  bad "a session name cannot escape the spool directory" "$(find "$SPOOL" -type f 2>/dev/null)"
+fi
+
+# Opt-out must be complete: no directory, no file, no error.
+rm -rf "$SPOOL"
+out=$(run '{"hook_event_name":"UserPromptSubmit"}' ZJ_AGENT_SPOOL_DIR="$SPOOL" ZJ_AGENT_SPOOL=0 ZELLIJ_SESSION_NAME=mob)
+if [ -e "$SPOOL" ]; then
+  bad "ZJ_AGENT_SPOOL=0 writes nothing" "$(ls -A "$SPOOL")"
+else
+  ok "ZJ_AGENT_SPOOL=0 writes nothing"
+fi
+assert_contains "opting out still pipes to its own session" "$out" "status=working"
+
+# An unwritable spool must degrade to the pipe, never fail the turn: the hook's
+# contract is that the worst case is the normal experience.
+rm -rf "$SPOOL"
+mkdir -p "$SPOOL"
+chmod 500 "$SPOOL"
+out=$(run '{"hook_event_name":"UserPromptSubmit"}' ZJ_AGENT_SPOOL_DIR="$SPOOL/nested" ZELLIJ_SESSION_NAME=mob)
+assert_contains "an unwritable spool still pipes" "$out" "status=working"
+chmod 700 "$SPOOL"
+rm -rf "$SPOOL"
+
+# Every agent event writes, not just turn boundaries, or a panel elsewhere
+# would only ever see the start and end of a turn.
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"}}' \
+  ZELLIJ_SESSION_NAME=mob
+rec3=$(cat "$SPOOL/mob.3" 2>/dev/null || true)
+assert_contains "a tool event spools its detail" "$rec3" "detail=Bash cargo test"
+
+# The heartbeat opt-out must suppress the spool write too, or the escape hatch
+# only halves the work it promises to remove.
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"PreToolUse","tool_name":"Bash"}' ZJ_AGENT_HEARTBEAT=0 ZELLIJ_SESSION_NAME=mob
+if [ -e "$SPOOL/mob.3" ]; then
+  bad "ZJ_AGENT_HEARTBEAT=0 also skips the spool" "record written anyway"
+else
+  ok "ZJ_AGENT_HEARTBEAT=0 also skips the spool"
+fi
+
+# A record is a whole snapshot, so an event that carries no session_id must
+# inherit the last known one rather than blanking it. Without this a recycled
+# pane id could inherit a dead agent's status, which the plugin cannot detect.
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"UserPromptSubmit","session_id":"uuid-keep","cwd":"/Users/x/Projects/web"}' \
+  ZELLIJ_SESSION_NAME=mob
+spool_run '{"hook_event_name":"Notification","type":"permission_prompt","message":"needs permission"}' \
+  ZELLIJ_SESSION_NAME=mob
+rec4=$(cat "$SPOOL/mob.3" 2>/dev/null || true)
+assert_contains "an event without a session id inherits the last one" "$rec4" "session_id=uuid-keep"
+assert_contains "an event without a cwd inherits the last one" "$rec4" "cwd=/Users/x/Projects/web"
+assert_contains "the inheriting event still records its own status" "$rec4" "status=waiting"
+
+# Deltas describe one moment and are replayed on every poll, so a snapshot must
+# not carry them or the counts would inflate without bound.
+rm -rf "$SPOOL"
+spool_run '{"hook_event_name":"SubagentStart","agent_type":"Explore"}' ZELLIJ_SESSION_NAME=mob
+spool_run '{"hook_event_name":"UserPromptSubmit","session_id":"u"}' ZELLIJ_SESSION_NAME=mob
+rec5=$(cat "$SPOOL/mob.3" 2>/dev/null || true)
+case "$rec5" in
+  *subagent_delta*|*task_delta*|*task_done_delta*)
+    bad "a snapshot carries no deltas" "found a delta field: $rec5" ;;
+  *) ok "a snapshot carries no deltas" ;;
+esac
+
+# The pane id reaches a file path and the args string. Zellij only ever sets a
+# bare integer, so anything else is a broken or planted environment.
+rm -rf "$SPOOL"
+out=$(run '{"hook_event_name":"UserPromptSubmit"}' ZJ_AGENT_SPOOL_DIR="$SPOOL" ZELLIJ_PANE_ID='1;rm -rf /' ZELLIJ_SESSION_NAME=mob)
+assert_empty "a non-numeric pane id reports nothing" "$out"
+if [ -e "$SPOOL" ]; then
+  bad "a non-numeric pane id writes no record" "$(find "$SPOOL" -type f)"
+else
+  ok "a non-numeric pane id writes no record"
+fi
+out=$(run '{"hook_event_name":"UserPromptSubmit"}' ZJ_AGENT_SPOOL_DIR="$SPOOL" ZELLIJ_PANE_ID='../x' ZELLIJ_SESSION_NAME=mob)
+assert_empty "a pane id cannot traverse paths" "$out"
+
+# An agent outside zellij has no pane to attribute a record to.
+rm -rf "$SPOOL"
+run '{"hook_event_name":"UserPromptSubmit"}' ZJ_AGENT_SPOOL_DIR="$SPOOL" ZELLIJ_PANE_ID= >/dev/null
+if [ -e "$SPOOL" ]; then
+  bad "no pane id writes no record" "$(ls -A "$SPOOL")"
+else
+  ok "no pane id writes no record"
+fi
+
 echo
 echo "-------------------------------------------"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

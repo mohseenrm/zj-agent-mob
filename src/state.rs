@@ -44,6 +44,10 @@ pub struct State {
     /// on). A bool that defaults false is deliberate: `register_plugin!` builds
     /// the state with `Default`, and `load()` always runs before any event.
     pub(crate) discover: bool,
+    /// Newest spool timestamp seen, the reference point ages are measured from.
+    /// The plugin has no wall clock, so records are dated relative to each
+    /// other rather than to a host time it cannot read.
+    pub(crate) spool_epoch: f64,
 }
 
 impl State {
@@ -253,6 +257,7 @@ impl State {
                 turns: if status == Status::Working { 1 } else { 0 },
                 status_since: now,
                 last_report: now,
+                spool_ts: 0.0,
                 tab: None,
                 pane_title: String::new(),
                 alive: true,
@@ -373,7 +378,43 @@ impl State {
     /// so only scan-discovered ones are the scan's to remove. Foreign rows have
     /// no such owner - the scan is the only thing that ever sees them exit - so
     /// it culls them regardless of status.
+    #[cfg(test)]
     pub(crate) fn apply_scan(&mut self, found: Vec<crate::discover::Found>) -> bool {
+        self.apply_scan_result(crate::discover::Scan {
+            found,
+            spooled: Vec::new(),
+            complete: true,
+        })
+    }
+
+    /// Merges a scan plus the spool records that came back with it.
+    ///
+    /// Order matters: rows are reconciled against the process list first, then
+    /// the spool refines what survived. A spool record never creates a row -
+    /// only a live process justifies one - so a stale file cannot resurrect an
+    /// agent that exited.
+    pub(crate) fn apply_scan_result(&mut self, scan: crate::discover::Scan) -> bool {
+        if !scan.complete {
+            return false;
+        }
+        // Advance the reference point before ages are computed, so the newest
+        // record in this batch reads as current.
+        for rec in &scan.spooled {
+            if rec.ts > self.spool_epoch {
+                self.spool_epoch = rec.ts;
+            }
+        }
+        let mut changed = self.merge_found(scan.found);
+        changed |= self.apply_spool(scan.spooled);
+        if changed {
+            self.clamp_selection();
+            self.sort_agents();
+            self.arm_timer();
+        }
+        changed
+    }
+
+    fn merge_found(&mut self, found: Vec<crate::discover::Found>) -> bool {
         let before = self.agents.len();
         let home = self.session_name.clone();
         let cull_foreign = self.scan_completed;
@@ -410,6 +451,7 @@ impl State {
                 turns: 0,
                 status_since: self.now,
                 last_report: self.now,
+                spool_ts: 0.0,
                 tab: None,
                 pane_title: String::new(),
                 alive: true,
@@ -427,6 +469,99 @@ impl State {
             self.sort_agents();
         }
         changed
+    }
+
+    /// Applies spool records to rows the process scan already justified.
+    ///
+    /// Home rows are skipped entirely: the hook pipes straight into this
+    /// session, so the pipe is both fresher and authoritative, and letting a
+    /// spool read overwrite it would flap the row.
+    fn apply_spool(&mut self, spooled: Vec<crate::discover::Spooled>) -> bool {
+        let (home, now) = (self.session_name.clone(), self.now);
+        let mut changed = false;
+        for rec in spooled {
+            if rec.session == home {
+                continue;
+            }
+            let id = AgentId {
+                session: rec.session,
+                pane_id: rec.pane_id,
+            };
+            let Some(idx) = self.agents.iter().position(|a| a.id == id) else {
+                continue;
+            };
+            // Pane ids are recycled, so a record from a previous agent on this
+            // pane must not colour the current one.
+            let rec_sid = rec.args.get("session_id").map(String::as_str).unwrap_or("");
+            let row_sid = self.agents[idx].session_id.as_str();
+            if !rec_sid.is_empty() && !row_sid.is_empty() && rec_sid != row_sid {
+                continue;
+            }
+            let age = self.spool_age(rec.ts);
+            if age >= STALE_AFTER {
+                continue;
+            }
+            let Some(status) = rec.args.get("status").and_then(|s| Status::parse(s)) else {
+                continue;
+            };
+            let agent = &mut self.agents[idx];
+            // Records are compared in their own epoch units; `last_report` is on
+            // the panel's tick clock and the two are not comparable.
+            if rec.ts <= agent.spool_ts {
+                continue;
+            }
+            agent.spool_ts = rec.ts;
+            let seen_at = now - age;
+            if agent.status != status {
+                agent.status = status;
+                agent.status_since = seen_at;
+                changed = true;
+            }
+            if let Some(t) = rec.args.get("task").filter(|t| !t.is_empty()) {
+                if agent.task.as_deref() != Some(t.as_str()) {
+                    agent.task = Some(t.clone());
+                    changed = true;
+                }
+            }
+            if let Some(d) = rec.args.get("detail").filter(|d| !d.is_empty()) {
+                if agent.detail.as_deref() != Some(d.as_str()) {
+                    agent.detail = Some(d.clone());
+                    changed = true;
+                }
+            }
+            if let Some(c) = rec.args.get("cwd").filter(|c| !c.is_empty()) {
+                if agent.cwd != *c {
+                    agent.cwd = c.clone();
+                    changed = true;
+                }
+            }
+            if let Some(tool) = rec.args.get("tool").filter(|t| !t.is_empty()) {
+                if agent.tool != *tool {
+                    agent.tool = tool.clone();
+                    changed = true;
+                }
+            }
+            if let Some(m) = rec.args.get("perm_mode") {
+                if agent.perm_mode != *m {
+                    agent.perm_mode = m.clone();
+                    changed = true;
+                }
+            }
+            if !rec_sid.is_empty() && agent.session_id != rec_sid {
+                agent.session_id = rec_sid.to_string();
+            }
+            agent.last_report = seen_at;
+        }
+        changed
+    }
+
+    /// Wall-clock age of a spool record, in the panel's own tick units.
+    ///
+    /// The panel has no clock: `now` counts ticks since load. So the newest
+    /// record seen is treated as "now" and everything else measured back from
+    /// it, which needs no host time call and is immune to clock skew.
+    fn spool_age(&self, ts: f64) -> f64 {
+        (self.spool_epoch.max(ts) - ts).max(0.0)
     }
 
     pub(crate) fn handle_label(&mut self, args: &BTreeMap<String, String>) -> bool {
@@ -1599,6 +1734,437 @@ mod cross_session_tests {
         s.timer_running = false;
         s.arm_timer();
         assert!(!s.timer_running, "no permanent wakeup");
+    }
+
+    fn spool(pairs: &[(&str, &str)]) -> crate::discover::Spooled {
+        let args: BTreeMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        crate::discover::Spooled {
+            session: args.get("session").cloned().unwrap_or_default(),
+            pane_id: args.get("pane_id").and_then(|p| p.parse().ok()).unwrap_or(0),
+            ts: args.get("ts").and_then(|t| t.parse().ok()).unwrap_or(100.0),
+            args,
+        }
+    }
+
+    fn scan_with(found: Vec<crate::discover::Found>, spooled: Vec<crate::discover::Spooled>) -> crate::discover::Scan {
+        crate::discover::Scan {
+            found,
+            spooled,
+            complete: true,
+        }
+    }
+
+    /// The headline: a foreign agent's status arrives without a panel in its
+    /// session, which the pipe transport cannot do.
+    #[test]
+    fn a_spool_record_gives_a_foreign_row_live_status() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        assert_eq!(s.agents[0].status, Status::Discovered);
+
+        assert!(s.apply_scan_result(scan_with(
+            found(&[("other", 3)]),
+            vec![spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "waiting"),
+                ("task", "Fix the parser"),
+                ("detail", "needs approval: rm -rf"),
+                ("cwd", "/Users/x/Projects/web"),
+            ])],
+        )));
+        let a = &s.agents[0];
+        assert_eq!(a.status, Status::Waiting);
+        assert_eq!(a.task.as_deref(), Some("Fix the parser"));
+        assert_eq!(a.detail.as_deref(), Some("needs approval: rm -rf"));
+        assert_eq!(a.project(), "web");
+    }
+
+    /// The core safety rule: existence comes from the process scan, never from a
+    /// file. Otherwise a leftover record resurrects an agent that exited.
+    #[test]
+    fn a_spool_record_never_creates_a_row() {
+        let mut s = state();
+        assert!(!s.apply_scan_result(scan_with(
+            Vec::new(),
+            vec![spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "working"),
+            ])],
+        )));
+        assert!(s.agents.is_empty(), "no process, no row");
+    }
+
+    /// A killed agent leaves its file behind; the scan is what retires the row.
+    #[test]
+    fn a_stale_file_cannot_keep_a_dead_agent_alive() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let rec = spool(&[
+            ("ts", "100"),
+            ("pane_id", "3"),
+            ("session", "other"),
+            ("status", "working"),
+        ]);
+        s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec]));
+        assert_eq!(s.agents.len(), 1);
+
+        let rec = spool(&[
+            ("ts", "100"),
+            ("pane_id", "3"),
+            ("session", "other"),
+            ("status", "working"),
+        ]);
+        assert!(s.apply_scan_result(scan_with(Vec::new(), vec![rec])));
+        assert!(s.agents.is_empty(), "the process is gone, so the row goes");
+    }
+
+    /// The pipe reaches this session directly and is both fresher and
+    /// authoritative; a spool read must not fight it.
+    #[test]
+    fn the_spool_never_overwrites_a_home_row() {
+        let mut s = state();
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("session", "mob"),
+            ("status", "working"),
+            ("task", "from the pipe"),
+        ]));
+        s.apply_scan_result(scan_with(
+            found(&[("mob", 3)]),
+            vec![spool(&[
+                ("ts", "999"),
+                ("pane_id", "3"),
+                ("session", "mob"),
+                ("status", "failed"),
+                ("task", "from the spool"),
+            ])],
+        ));
+        assert_eq!(s.agents[0].status, Status::Working, "the pipe owns home rows");
+        assert_eq!(s.agents[0].task.as_deref(), Some("from the pipe"));
+    }
+
+    /// Pane ids are recycled. A record from last week's agent on this pane must
+    /// not colour today's - the subtlest failure here, because the data looks
+    /// plausible rather than corrupt.
+    #[test]
+    fn a_recycled_pane_id_does_not_inherit_the_old_agents_status() {
+        let mut s = state();
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("session", "other"),
+            ("status", "idle"),
+            ("session_id", "new-uuid"),
+        ]));
+        assert!(!s.apply_scan_result(scan_with(
+            found(&[("other", 3)]),
+            vec![spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("session_id", "old-uuid"),
+                ("status", "failed"),
+                ("task", "last week's work"),
+            ])],
+        )));
+        assert_eq!(s.agents[0].status, Status::Idle, "the old record is ignored");
+        assert!(s.agents[0].task.is_none());
+    }
+
+    /// A week-old file must never render, even if its row still exists.
+    #[test]
+    fn a_record_older_than_the_stale_threshold_is_ignored() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        s.apply_scan_result(scan_with(
+            found(&[("other", 3)]),
+            vec![
+                spool(&[
+                    ("ts", "100000"),
+                    ("pane_id", "4"),
+                    ("session", "other"),
+                    ("status", "working"),
+                ]),
+                spool(&[
+                    ("ts", "100"),
+                    ("pane_id", "3"),
+                    ("session", "other"),
+                    ("status", "failed"),
+                ]),
+            ],
+        ));
+        assert_eq!(
+            s.agents.iter().find(|a| a.pane_id() == 3).unwrap().status,
+            Status::Discovered,
+            "an ancient record must not be applied"
+        );
+    }
+
+    /// Records are dated against each other, so a host clock jump cannot pin a
+    /// row as permanently current.
+    #[test]
+    fn a_future_timestamp_does_not_make_a_row_immortal() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        s.apply_scan_result(scan_with(
+            found(&[("other", 3)]),
+            vec![spool(&[
+                ("ts", "99999999"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "working"),
+            ])],
+        ));
+        assert_eq!(s.agents[0].status, Status::Working);
+        s.apply_scan_result(scan_with(
+            found(&[("other", 3)]),
+            vec![spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "failed"),
+            ])],
+        ));
+        assert_eq!(
+            s.agents[0].status,
+            Status::Working,
+            "the far-older record is stale relative to the newest seen"
+        );
+    }
+
+    /// An empty or absent spool is the normal first-run state and must render
+    /// exactly as before the feature existed.
+    #[test]
+    fn an_empty_spool_leaves_scan_rows_untouched() {
+        let mut s = state();
+        assert!(s.apply_scan_result(scan_with(found(&[("other", 3)]), Vec::new())));
+        assert_eq!(s.agents[0].status, Status::Discovered);
+        assert!(!s.apply_scan_result(scan_with(found(&[("other", 3)]), Vec::new())));
+        assert_eq!(s.agents[0].status, Status::Discovered, "still just found");
+    }
+
+    /// A truncated read is indistinguishable from "nothing is running", so it
+    /// must change nothing at all.
+    #[test]
+    fn an_incomplete_scan_is_ignored_entirely() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_scan(found(&[("other", 3)]));
+
+        let incomplete = crate::discover::Scan {
+            found: Vec::new(),
+            spooled: Vec::new(),
+            complete: false,
+        };
+        assert!(!s.apply_scan_result(incomplete));
+        assert_eq!(s.agents.len(), 1, "a partial read must not cull");
+    }
+
+    /// Two panels with different histories must agree once both have seen the
+    /// same spool - the convergence contract from cross-session-consistency.md.
+    #[test]
+    fn two_panels_converge_on_spooled_status() {
+        let mut by_pipe = state();
+        by_pipe.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "idle")]));
+        let mut by_scan = state();
+
+        for s in [&mut by_pipe, &mut by_scan] {
+            s.apply_scan_result(scan_with(
+                found(&[("other", 3)]),
+                vec![spool(&[
+                    ("ts", "100"),
+                    ("pane_id", "3"),
+                    ("session", "other"),
+                    ("status", "waiting"),
+                    ("task", "same task"),
+                ])],
+            ));
+        }
+        let view = |s: &State| -> Vec<(Status, Option<String>)> {
+            s.agents.iter().map(|a| (a.status, a.task.clone())).collect()
+        };
+        assert_eq!(view(&by_pipe), view(&by_scan));
+        assert_eq!(by_pipe.agents[0].status, Status::Waiting);
+    }
+
+    /// A spool read refreshes `last_report`, so a heartbeating foreign agent
+    /// must not decay to `unknown` while it is demonstrably alive.
+    #[test]
+    fn spooled_rows_do_not_decay_while_being_refreshed() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        for i in 0..3 {
+            s.now += STALE_AFTER - TICK;
+            s.apply_scan_result(scan_with(
+                found(&[("other", 3)]),
+                vec![spool(&[
+                    ("ts", &(1000 + i * 1000).to_string()),
+                    ("pane_id", "3"),
+                    ("session", "other"),
+                    ("status", "working"),
+                ])],
+            ));
+            assert!(!s.age_foreign_rows(), "a fresh record resets the clock (round {})", i);
+        }
+        assert_eq!(s.agents[0].status, Status::Working);
+    }
+
+    /// Counter fields are deltas and meaningless when replayed from a snapshot;
+    /// applying them on every poll would inflate the count without bound.
+    #[test]
+    fn re_reading_the_same_record_does_not_accumulate() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let rec = || {
+            spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "working"),
+                ("subagent_delta", "1"),
+                ("task_delta", "1"),
+            ])
+        };
+        s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+        let first = (s.agents[0].subagents, s.agents[0].tasks_total);
+        for _ in 0..5 {
+            s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+        }
+        assert_eq!(
+            (s.agents[0].subagents, s.agents[0].tasks_total),
+            first,
+            "a re-read snapshot must be idempotent"
+        );
+    }
+
+    /// The whole loop, end to end: the real hook script writes a real spool,
+    /// the real scan script reads it, and the real parser and merge turn it
+    /// into a live foreign row. Every layer in between is exercised, which no
+    /// single-layer test does.
+    #[cfg(unix)]
+    #[test]
+    fn the_real_hook_and_scan_produce_a_live_foreign_row() {
+        use std::process::Command;
+
+        let root = env!("CARGO_MANIFEST_DIR");
+        let hook = format!("{}/scripts/zj-agent-mob-hook.sh", root);
+        if Command::new("jq").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("zj-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (bin, spool) = (dir.join("bin"), dir.join("spool"));
+        std::fs::create_dir_all(&bin).unwrap();
+        let zellij = bin.join("zellij");
+        std::fs::write(&zellij, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&zellij, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+        for ev in [
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"uuid-xyz","cwd":"/Users/x/Projects/web"}"#,
+            r#"{"hook_event_name":"Notification","type":"permission_prompt","message":"needs permission"}"#,
+        ] {
+            let out = Command::new("sh")
+                .arg(&hook)
+                .env("PATH", &path)
+                .env("ZELLIJ_PANE_ID", "7")
+                .env("ZELLIJ_SESSION_NAME", "other")
+                .env("ZJ_AGENT_SPOOL_DIR", &spool)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .and_then(|mut c| {
+                    use std::io::Write;
+                    c.stdin.take().unwrap().write_all(ev.as_bytes())?;
+                    c.wait()
+                });
+            assert!(out.is_ok_and(|s| s.success()), "the hook must always exit 0");
+        }
+
+        let script = crate::discover::scan_script(&["claude", "codex"]);
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("ZJ_AGENT_SPOOL_DIR", &spool)
+            .output()
+            .expect("scan runs");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let scan = crate::discover::parse(&stdout);
+        assert!(scan.complete, "sentinel missing: {:?}", stdout);
+        assert_eq!(scan.spooled.len(), 1, "one record: {:?}", stdout);
+
+        let mut s = state();
+        // The process scan is what justifies the row; the spool only refines it.
+        s.apply_scan(found(&[("other", 7)]));
+        assert_eq!(s.agents[0].status, Status::Discovered);
+
+        assert!(s.apply_scan_result(crate::discover::Scan {
+            found: found(&[("other", 7)]),
+            spooled: scan.spooled,
+            complete: true,
+        }));
+        let a = &s.agents[0];
+        assert_eq!(a.status, Status::Waiting, "live status without a panel in its session");
+        assert_eq!(a.detail.as_deref(), Some("needs permission"));
+        // Carried forward by the hook: Notification's payload has neither.
+        assert_eq!(a.session_id, "uuid-xyz");
+        assert_eq!(a.project(), "web");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real bytes captured from this machine: two agents, two live sessions.
+    #[test]
+    fn real_machine_capture_renders_live_cross_session_rows() {
+        use crate::agent::RowCtx;
+        use crate::util::testing::item_text;
+        let raw = "SCAN dotfiles-split 2 claude\nSCAN zj-agent-mob 17 claude\nSPOOL /var/folders/cl/kcw___6n0dz_bsmzz_hmxf3m0000gn/T//zj-live-verify/status/dotfiles-split.2:ts=1786299306,pane_id=2,session=dotfiles-split,tool=claude,status=waiting,session_id=,cwd=,task=,detail=needs approval: git push --force,perm_mode=,agent_type=\nSPOOL /var/folders/cl/kcw___6n0dz_bsmzz_hmxf3m0000gn/T//zj-live-verify/status/zj-agent-mob.17:ts=1786299296,pane_id=17,session=zj-agent-mob,tool=claude,status=working,session_id=live-uuid,cwd=/Users/momo/Projects/zj-agent-mob,task=,detail=,perm_mode=,agent_type=\nSCANEND\n";
+        let scan = crate::discover::parse(raw);
+        assert!(scan.complete);
+        assert_eq!(scan.found.len(), 2, "two real agents");
+        assert_eq!(scan.spooled.len(), 2, "two real records");
+
+        let mut s = State {
+            permissions_granted: true,
+            popup_on_waiting: false,
+            session_name: "zj-agent-mob".into(),
+            live_sessions: vec!["zj-agent-mob".into(), "dotfiles-split".into()],
+            discover: true,
+            ..Default::default()
+        };
+        s.apply_scan_result(scan);
+        let rows: Vec<String> = s
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let icon = s.icon_for(a);
+                item_text(&a.list_item(
+                    i,
+                    RowCtx {
+                        selected: false,
+                        icon,
+                        now: s.now,
+                        cols: 110,
+                        show_cwd: true,
+                        home: &s.session_name,
+                    },
+                ))
+            })
+            .collect();
+        let all = rows.join("\n");
+        assert!(all.contains("waiting"), "the foreign agent is blocked: {}", all);
+        // The session column is 10 wide, so a longer name is truncated.
+        assert!(all.contains("dotfiles-"), "foreign row names its session: {}", all);
+        let foreign = s.agents.iter().find(|a| a.session() == "dotfiles-split").unwrap();
+        assert_eq!(foreign.status, Status::Waiting);
+        assert_eq!(foreign.detail.as_deref(), Some("needs approval: git push --force"));
+        assert!(rows[0].contains("waiting"), "the blocked agent sorts first: {:?}", rows);
+        println!("{}", all);
     }
 
     #[test]

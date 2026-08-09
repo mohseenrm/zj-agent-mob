@@ -12,6 +12,8 @@
 #   ZJ_AGENT_DEBUG       1 logs to ~/.cache/zj-agent-mob/hook.log
 #   ZJ_AGENT_APPROVE     1 enables answering permission prompts from the panel
 #   ZJ_AGENT_APPROVE_TIMEOUT  seconds to wait for a verdict (default 30)
+#   ZJ_AGENT_SPOOL       0 disables the cross-session status spool
+#   ZJ_AGENT_SPOOL_DIR   override spool location
 
 # SC2154: event, session_id, cwd, transcript and tool_name are all assigned by
 # the `eval` of jq's @sh output below, which shellcheck cannot follow.
@@ -20,6 +22,13 @@
 # Only monitor agents running inside a zellij pane. This is what scopes the
 # plugin to the current session: no pane id means nothing to report.
 [ -n "$ZELLIJ_PANE_ID" ] || exit 0
+
+# Zellij only ever sets a bare integer here, so anything else is a broken
+# environment or a planted one. It reaches both a file path and the args
+# string, and the plugin discards a non-numeric pane anyway.
+case "$ZELLIJ_PANE_ID" in
+  *[!0-9]*) exit 0 ;;
+esac
 
 command -v jq >/dev/null 2>&1 || exit 0
 command -v zellij >/dev/null 2>&1 || exit 0
@@ -168,9 +177,57 @@ if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
     >> "$HOME/.cache/zj-agent-mob/hook.log"
 fi
 
-zellij pipe --name agent-status --plugin "$PLUGIN" \
-  --args "pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta" \
-  >/dev/null 2>&1 || true
+ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
+
+zellij pipe --name agent-status --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
+
+# Cross-session transport. The pipe above only reaches this session's plugin, so
+# a panel elsewhere gets status from this file instead. Deliberately not a
+# subprocess and never blocking: this runs on the critical path of every turn.
+spool_dir() {
+  if [ -n "${ZJ_AGENT_SPOOL_DIR:-}" ]; then
+    printf '%s' "$ZJ_AGENT_SPOOL_DIR"
+  else
+    printf '%s/zj-agent-mob-%s/status' "${TMPDIR:-/tmp}" "$(id -u 2>/dev/null || echo 0)"
+  fi
+}
+
+if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ended ]; then
+  sdir=$(spool_dir)
+  # Records hold task summaries, which are the user's own prompts, so on a
+  # shared /tmp the directory must not be world-readable. Only set at creation:
+  # re-chmodding every event costs a syscall on the hot path for nothing.
+  [ -d "$sdir" ] || { mkdir -p "$sdir" 2>/dev/null && chmod 700 "$sdir" 2>/dev/null; }
+  if [ -d "$sdir" ]; then
+    sfile="$sdir/$SESSION.$ZELLIJ_PANE_ID"
+    # A record is a whole snapshot, not a delta, so it cannot lean on the
+    # plugin's "empty means unchanged" rule the way the pipe does. Events that
+    # carry no session_id or cwd (Notification, the counter events) inherit the
+    # last known values instead of blanking them - session_id in particular is
+    # what stops a recycled pane id inheriting a dead agent's status.
+    if [ -z "$session_id" ] || [ -z "$cwd" ]; then
+      prev=$(head -n 1 "$sfile" 2>/dev/null || true)
+      if [ -n "$prev" ]; then
+        [ -n "$session_id" ] || session_id=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^session_id=//p' | head -1)
+        [ -n "$cwd" ] || cwd=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^cwd=//p' | head -1)
+      fi
+    fi
+    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type"
+    # Rename is atomic within a filesystem, so a reader sees the old record or
+    # the new one, never a half-written one. $$ keeps concurrent hooks apart.
+    if printf 'ts=%s,%s\n' "$(date +%s)" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then
+      mv -f "$sfile.$$.tmp" "$sfile" 2>/dev/null || rm -f "$sfile.$$.tmp" 2>/dev/null || true
+    else
+      rm -f "$sfile.$$.tmp" 2>/dev/null || true
+    fi
+  fi
+fi
+
+# SessionEnd retires the agent, so its record must not outlive it and colour a
+# recycled pane id later.
+if [ "$status" = ended ] && [ -n "$SESSION" ]; then
+  rm -f "$(spool_dir)/$SESSION.$ZELLIJ_PANE_ID" 2>/dev/null || true
+fi
 
 # Answering a permission prompt from the panel. Opt-in, because this is the one
 # path where the hook deliberately blocks the agent's turn.
