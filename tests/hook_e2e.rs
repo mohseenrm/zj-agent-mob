@@ -1098,19 +1098,48 @@ fn shell_fold(name: &str, ambient_locale: &str) -> String {
 /// the same name must fold identically no matter what the caller's locale is.
 #[test]
 fn the_hooks_fold_is_pinned_against_the_ambient_locale() {
+    // Falls back to C where no UTF-8 locale exists; the assertion still holds,
+    // it just compares C against C.
+    let utf8 = utf8_locale().unwrap_or_else(|| "C".to_string());
     for name in ["café", "naïve", "日本語", "mob", "my session"] {
         assert_eq!(
             shell_fold(name, "C"),
-            shell_fold(name, "en_US.UTF-8"),
-            "the ambient locale changed the hook's fold of {name:?}"
+            shell_fold(name, &utf8),
+            "the ambient locale ({utf8}) changed the hook's fold of {name:?}"
         );
     }
 }
 
+/// A UTF-8 locale the system actually has, if any. Minimal CI images often ship
+/// only C/POSIX, and asking for a missing locale silently falls back to C -
+/// which would make the guard below compare C against C and prove nothing.
+fn utf8_locale() -> Option<String> {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("locale -a 2>/dev/null")
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| {
+            let l = l.to_ascii_lowercase();
+            l.ends_with("utf-8") || l.ends_with("utf8")
+        })
+        .map(str::to_string)
+}
+
 /// The bug this replaced: without the pin, the fold moves with the locale.
 /// Kept as a guard so the pin cannot be quietly dropped as redundant.
+///
+/// Skipped where no UTF-8 locale exists - there the ambient locale cannot vary,
+/// so there is nothing to prove and a failure would say nothing about our code.
 #[test]
 fn an_unpinned_fold_would_be_locale_dependent() {
+    let Some(utf8) = utf8_locale() else {
+        eprintln!("no UTF-8 locale available; skipping");
+        return;
+    };
     let unpinned = |locale: &str| -> String {
         let out = Command::new("sh")
             .arg("-c")
@@ -1126,8 +1155,8 @@ fn an_unpinned_fold_would_be_locale_dependent() {
     // LC_ALL=C pin is no longer load-bearing - but until then it is.
     assert_ne!(
         unpinned("C"),
-        unpinned("en_US.UTF-8"),
-        "tr no longer varies by locale; the LC_ALL=C pin may be revisited"
+        unpinned(&utf8),
+        "tr no longer varies by locale ({utf8}); the LC_ALL=C pin may be revisited"
     );
 }
 
@@ -1164,7 +1193,8 @@ fn the_rust_and_shell_folds_agree() {
 /// record the plugin can find, under whatever locale the user happens to have.
 #[test]
 fn a_non_ascii_session_name_lands_where_the_plugin_looks() {
-    for locale in ["C", "en_US.UTF-8"] {
+    let utf8 = utf8_locale().unwrap_or_else(|| "C".to_string());
+    for locale in ["C", utf8.as_str()] {
         let h = Hook::new();
         h.env("ZELLIJ_SESSION_NAME", "café")
             .env("LC_ALL", locale)
