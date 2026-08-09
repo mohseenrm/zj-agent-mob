@@ -36,7 +36,9 @@ command -v zellij >/dev/null 2>&1 || exit 0
 PLUGIN="${ZJ_AGENT_PLUGIN:-file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm}"
 TOOL="${ZJ_AGENT_TOOL:-claude}"
 # Pane ids are only unique within a session, so identity is (session, pane).
-SESSION=$(printf '%s' "${ZELLIJ_SESSION_NAME:-}" | tr -c '[:alnum:]._-' '_')
+# LC_ALL=C and the explicit class keep this byte-wise and locale-independent;
+# src/agent.rs::sanitize_session must fold identically.
+SESSION=$(printf '%s' "${ZELLIJ_SESSION_NAME:-}" | LC_ALL=C tr -c 'a-zA-Z0-9._-' '_')
 
 json=$(cat)
 [ -n "$json" ] || exit 0

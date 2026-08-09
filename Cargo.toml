@@ -21,6 +21,11 @@ path = "src/lib.rs"
 [dependencies]
 zellij-tile = "0.44.3"
 
+# Test-only: builds the JSON payloads fed to the hook. Never reaches the wasm
+# binary, since tests/ only builds for the host target.
+[dev-dependencies]
+serde_json = "1"
+
 [profile.release]
 opt-level = "z"
 lto = true

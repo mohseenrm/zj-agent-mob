@@ -14,17 +14,18 @@ pub(crate) struct AgentId {
     pub(crate) pane_id: u32,
 }
 
-/// Mirrors the hook's `tr -c '[:alnum:]._-' '_'`. The hook sanitizes because the
-/// name reaches a file path and a comma-separated arg string; Zellij hands the
-/// plugin the raw name, so both sides must fold it the same way or a session
-/// with a space in its name never matches its own agents.
+/// Mirrors the hook's `LC_ALL=C tr -c 'a-zA-Z0-9._-' '_'`. Folds bytes, not
+/// chars, because `tr` does: "café" -> "caf__", and a char-wise fold would look
+/// for a spool file the hook never wrote.
 pub(crate) fn sanitize_session(name: &str) -> String {
-    name.chars()
-        .map(|c| match c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            true => c,
-            false => '_',
+    let bytes: Vec<u8> = name
+        .bytes()
+        .map(|b| match b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') {
+            true => b,
+            false => b'_',
         })
-        .collect()
+        .collect();
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 /// Everything a row needs that is not the agent itself. `home` is the panel's

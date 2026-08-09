@@ -19,7 +19,7 @@ A blocked agent is invisible until you happen to cycle past its pane. Rows sort 
 - **Answer permission prompts in place** with <kbd>a</kbd> / <kbd>r</kbd>, without leaving the panel (opt-in).
 - **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident.
 - **No daemon and no socket.** Agent hooks pipe straight to the plugin, and drop a
-  disposable status file in `$TMPDIR` so other sessions can read it.
+  disposable status file so other sessions can read it.
 
 > Inspired by [herdr](https://herdr.dev), without adopting an entire new multiplexer.
 
