@@ -32,6 +32,11 @@ jobs:
 
       - run: cargo clippy --all-targets -- -D warnings
 
+      # tests/hook_e2e.rs drives the real hook script, which shells out to jq.
+      # Without it the hook exits 0 silently and every case fails as "no pipe".
+      - name: Install jq (the hook depends on it)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       # Tests run natively: host calls are stubbed off-wasm precisely so this works.
       - run: cargo test --all-targets
 
@@ -60,15 +65,10 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh \
-            tests/e2e-hook.sh tests/e2e-install.sh
+            tests/e2e-install.sh
 
-      # The hook is the seam between a real agent and the plugin, and the Rust
-      # suite starts downstream of it (from an already-parsed pipe message).
-      # These drive the script end to end with a stubbed zellij.
-      - name: Hook end-to-end tests
-        run: |
-          sudo apt-get install -y jq
-          ./tests/e2e-hook.sh
+      # The hook end-to-end tests live in tests/hook_e2e.rs and run under
+      # `cargo test` in the rust job above.
 
       # The installer is the only supported path to a working install, and what
       # it writes is read by Claude Code and Codex themselves: a wrong event
