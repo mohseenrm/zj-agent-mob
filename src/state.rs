@@ -1397,12 +1397,20 @@ mod cross_session_tests {
 
     /// The hook folds unusual characters before sending; the plugin gets the raw
     /// name from Zellij and must fold identically or the two never match.
+    ///
+    /// `tests/hook_e2e.rs` checks this against the hook's own `tr` for real;
+    /// these cases pin the shape so a change here fails fast without spawning a
+    /// shell.
     #[test]
     fn session_sanitizing_matches_the_hook() {
         assert_eq!(sanitize_session("my session"), "my_session");
         assert_eq!(sanitize_session("a,b=c"), "a_b_c");
         assert_eq!(sanitize_session("../evil"), ".._evil");
         assert_eq!(sanitize_session("mob-2.1_x"), "mob-2.1_x");
+        // One underscore per *byte*, matching `tr`: "é" is two bytes, so a
+        // char-wise fold would give "caf_" and miss the hook's "caf__".
+        assert_eq!(sanitize_session("café"), "caf__");
+        assert_eq!(sanitize_session("日本語"), "_________");
     }
 
     #[test]
