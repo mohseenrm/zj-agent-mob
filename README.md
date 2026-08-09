@@ -18,7 +18,8 @@ A blocked agent is invisible until you happen to cycle past its pane. Rows sort 
 - **Get pulled in when needed**: the panel can pop itself open the moment an agent blocks.
 - **Answer permission prompts in place** with <kbd>a</kbd> / <kbd>r</kbd>, without leaving the panel (opt-in).
 - **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident.
-- **No daemon, socket, or state file.** Agent hooks pipe straight to the plugin.
+- **No daemon and no socket.** Agent hooks pipe straight to the plugin, and drop a
+  disposable status file in `$TMPDIR` so other sessions can read it.
 
 > Inspired by [herdr](https://herdr.dev), without adopting an entire new multiplexer.
 
@@ -199,7 +200,7 @@ so a mis-keyed dismiss can never answer a prompt.
 ## Known limitations
 
 - Agents started before `init.sh` ran aren't tracked (no hooks installed yet). Restart them.
-- Agents in other Zellij sessions are found by the process scan and can be jumped to, but they only report live status while a panel is open in their own session. <kbd>x</kbd> is refused for them: Zellij's kill and interrupt calls act on the current session only, so jump first.
+- Agents in other Zellij sessions report live status through a status file in `$TMPDIR`, picked up on the panel's next scan rather than instantly. <kbd>x</kbd> is still refused for them: Zellij's kill and interrupt calls act on the current session only, so jump first.
 - Claude has no "permission granted" event, so `waiting` to `working` relies on the next tool-event heartbeat. With `ZJ_AGENT_HEARTBEAT=0`, `waiting` persists until the turn ends.
 
 Hitting something not listed here? See [docs/troubleshooting.md](docs/troubleshooting.md).

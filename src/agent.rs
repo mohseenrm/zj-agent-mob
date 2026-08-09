@@ -43,7 +43,8 @@ pub(crate) struct RowCtx<'a> {
 pub(crate) struct Agent {
     pub(crate) id: AgentId,
     pub(crate) tool: String,
-    #[allow(dead_code)]
+    /// The agent's own id. Distinguishes a recycled pane from the agent that
+    /// used to occupy it, which pane ids alone cannot.
     pub(crate) session_id: String,
     pub(crate) status: Status,
     pub(crate) cwd: String,
@@ -53,6 +54,9 @@ pub(crate) struct Agent {
     pub(crate) status_since: f64,
     /// When a pipe last said anything about this row, change or not.
     pub(crate) last_report: f64,
+    /// Timestamp of the newest spool record applied, in the spool's own epoch.
+    /// Not comparable with `last_report`, which is on the panel's tick clock.
+    pub(crate) spool_ts: f64,
     pub(crate) tab: Option<usize>,
     pub(crate) pane_title: String,
     pub(crate) alive: bool,
@@ -236,6 +240,7 @@ mod render_tests {
             turns: 4,
             status_since: 0.0,
             last_report: 0.0,
+            spool_ts: 0.0,
             tab: Some(1),
             pane_title: "claude".into(),
             alive: true,

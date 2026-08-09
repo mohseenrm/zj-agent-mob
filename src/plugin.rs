@@ -94,7 +94,7 @@ impl ZellijPlugin for State {
                     self.scan_pending = false;
                     // A failed scan leaves the list exactly as it was: discovery
                     // is an enhancement, and hook-reported rows are the truth.
-                    return exit_code.unwrap_or(0) == 0 && self.apply_scan(crate::discover::parse(&out));
+                    return exit_code.unwrap_or(0) == 0 && self.apply_scan_result(crate::discover::parse(&out));
                 }
                 self.install.on_command_result(exit_code, &out, &err, &context)
             }

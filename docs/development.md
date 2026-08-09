@@ -116,21 +116,23 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 |---|---|---|---|
 | `main.rs` | 6 | | `register_plugin!` + WASI entry point |
 | `lib.rs` | 38 | | Module wiring and shared constants |
-| `plugin.rs` | 381 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box |
-| `state.rs` | 497 | 72 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan merge, cross-session identity and row ownership |
+| `plugin.rs` | 383 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box |
+| `state.rs` | 638 | 86 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership |
 | `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
 | `keys.rs` | 219 | 12 | Keyboard: selection, jump-to-pane (and cross-session switch), two-step kill, approve/reject |
-| `agent.rs` | 218 | 23 | One agent, its `(session, pane)` identity, and how its row is built |
+| `agent.rs` | 222 | 23 | One agent, its `(session, pane)` identity, and how its row is built |
 | `status.rs` | 97 | | The agent states and their presentation |
 | `ribbon.rs` | 77 | 7 | Ribbon line serialization |
-| `discover.rs` | 78 | 10 | Process-environment scan for agents that have not reported, across every session |
+| `discover.rs` | 168 | 22 | Process-environment scan across every session, plus reading the cross-session status spool |
 | `host.rs` | 48 | | Host-call shim |
 | `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
 | `style.rs` | 23 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover, 148 in total, none needing a running Zellij, plus 183 end-to-end cases across `tests/e2e-hook.sh` (85) and `tests/e2e-install.sh` (98).
+Line counts exclude tests. Tests live beside the code they cover, 174 in total, none needing a running Zellij, plus 208 end-to-end cases across `tests/e2e-hook.sh` (110) and `tests/e2e-install.sh` (98).
 
-Six of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps`, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
+Ten of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps` and a real staged spool directory, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
+
+Two tests run the whole loop rather than one layer: `the_real_hook_and_scan_produce_a_live_foreign_row` drives the real hook script, the real scan script, and the real merge in sequence, and `real_machine_capture_renders_live_cross_session_rows` replays bytes captured from two live Zellij sessions. Between them they cover the seams each single-layer test assumes.
 
 Zellij host calls (`focus_terminal_pane`, `hide_self`, `run_command`, ...) are WASM imports with no native symbol, so they're behind the `host` shim that no-ops off-wasm. That keeps the whole state machine and all layout code unit-testable with a plain `cargo test`.
 
