@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "zj-agent-mob"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "zellij-tile",
 ]
