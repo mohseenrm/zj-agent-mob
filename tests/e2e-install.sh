@@ -54,7 +54,10 @@ fresh() {
   ZJ_AGENT_PLUGIN_DIR="$SANDBOX/config/zellij/plugins"
   CLAUDE_CONFIG_DIR="$SANDBOX/claude"
   CODEX_HOME="$SANDBOX/codex"
-  export ZJ_AGENT_HOOK_DIR ZJ_AGENT_PLUGIN_DIR CLAUDE_CONFIG_DIR CODEX_HOME
+  # The loop-closed check below runs the installed hook for real, which writes a
+  # status record. Without this it lands in the user's own spool.
+  ZJ_AGENT_SPOOL_DIR="$SANDBOX/spool"
+  export ZJ_AGENT_HOOK_DIR ZJ_AGENT_PLUGIN_DIR CLAUDE_CONFIG_DIR CODEX_HOME ZJ_AGENT_SPOOL_DIR
   CLAUDE_JSON="$CLAUDE_CONFIG_DIR/settings.json"
   CODEX_JSON="$CODEX_HOME/hooks.json"
   HOOK_CMD="$ZJ_AGENT_HOOK_DIR/hook.sh"
