@@ -552,7 +552,14 @@ else
 fi
 
 # On a shared /tmp another user must not be able to read prompt text.
-mode=$(stat -f '%Lp' "$SPOOL" 2>/dev/null || stat -c '%a' "$SPOOL" 2>/dev/null || echo "?")
+# GNU `stat -f` means "filesystem info" and exits 0 printing a block dump, so a
+# `-f || -c` fallback silently takes the wrong branch on Linux. Pick by probing
+# for GNU first instead of relying on a failure that never comes.
+if stat -c '%a' . >/dev/null 2>&1; then
+  mode=$(stat -c '%a' "$SPOOL" 2>/dev/null || echo "?")
+else
+  mode=$(stat -f '%Lp' "$SPOOL" 2>/dev/null || echo "?")
+fi
 if [ "$mode" = "700" ]; then
   ok "the spool directory is private (0700)"
 else
