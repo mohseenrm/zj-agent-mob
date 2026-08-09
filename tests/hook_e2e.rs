@@ -1055,6 +1055,133 @@ fn a_status_event_writes_a_spool_record() {
     assert_eq!(body.lines().count(), 1, "record is not exactly one line: {body:?}");
 }
 
+// ---------------------------------------------------------------------------
+// The session-name fold, on both sides of the language boundary.
+//
+// The hook writes `<session>.<pane>` and the plugin looks for that filename
+// after folding the raw name Zellij gave it. The two folds are separate
+// implementations in different languages, so nothing but a test stops them
+// drifting - and when they drift the symptom is silent: the agent simply never
+// appears in another session's panel.
+// ---------------------------------------------------------------------------
+
+/// Lifts the `SESSION=` fold out of the hook script and runs it on `name`.
+///
+/// Deliberately extracted from the shipping script rather than restated here:
+/// a copy would keep passing after someone edited the hook, which is precisely
+/// the drift these tests exist to catch.
+fn shell_fold(name: &str, ambient_locale: &str) -> String {
+    let script = fs::read_to_string(hook_path()).expect("read hook");
+    let line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with("SESSION="))
+        .expect("the hook still has a SESSION= line");
+    // Reproduce it with ZELLIJ_SESSION_NAME bound to the input, then echo the
+    // result. The ambient locale is set around it to prove the pin holds.
+    let prog =
+        format!("export LC_ALL=\"$2\" LANG=\"$2\"; ZELLIJ_SESSION_NAME=\"$1\"; {line}; printf '%s' \"$SESSION\"");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&prog)
+        .arg("sh")
+        .arg(name)
+        .arg(ambient_locale)
+        .output()
+        .expect("run the hook's fold");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `tr` is locale-sensitive whatever the class is spelled as: under a UTF-8
+/// locale it works on characters, under C on bytes, so "café" folds to "caf_"
+/// or "caf__" depending on the user's environment. Pinning `LC_ALL=C` in the
+/// hook is what makes the spool filename stable, so assert on the pinned form:
+/// the same name must fold identically no matter what the caller's locale is.
+#[test]
+fn the_hooks_fold_is_pinned_against_the_ambient_locale() {
+    for name in ["café", "naïve", "日本語", "mob", "my session"] {
+        assert_eq!(
+            shell_fold(name, "C"),
+            shell_fold(name, "en_US.UTF-8"),
+            "the ambient locale changed the hook's fold of {name:?}"
+        );
+    }
+}
+
+/// The bug this replaced: without the pin, the fold moves with the locale.
+/// Kept as a guard so the pin cannot be quietly dropped as redundant.
+#[test]
+fn an_unpinned_fold_would_be_locale_dependent() {
+    let unpinned = |locale: &str| -> String {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(r#"export LC_ALL="$2" LANG="$2"; printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_'"#)
+            .arg("sh")
+            .arg("café")
+            .arg(locale)
+            .output()
+            .expect("run tr");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // If this ever stops differing, `tr` gained locale-independence and the
+    // LC_ALL=C pin is no longer load-bearing - but until then it is.
+    assert_ne!(
+        unpinned("C"),
+        unpinned("en_US.UTF-8"),
+        "tr no longer varies by locale; the LC_ALL=C pin may be revisited"
+    );
+}
+
+/// The plugin's fold must agree with the hook's byte for byte, or it looks for
+/// a spool file the hook never wrote.
+#[test]
+fn the_rust_and_shell_folds_agree() {
+    let names = [
+        "mob",
+        "my session",
+        "a,b=c",
+        "../evil",
+        "ok.name-1_2",
+        "UPPER123",
+        "tab\tsep",
+        // Non-ASCII is the case that was actually broken: tr folds each byte,
+        // so a 2-byte char becomes two underscores.
+        "café",
+        "naïve",
+        "日本語",
+        "emoji-🎉",
+        "",
+    ];
+    for name in names {
+        assert_eq!(
+            zj_agent_mob::sanitize_session_for_test(name),
+            shell_fold(name, "C"),
+            "the folds disagree for {name:?}"
+        );
+    }
+}
+
+/// The end-to-end consequence: a non-ASCII session name must still produce a
+/// record the plugin can find, under whatever locale the user happens to have.
+#[test]
+fn a_non_ascii_session_name_lands_where_the_plugin_looks() {
+    for locale in ["C", "en_US.UTF-8"] {
+        let h = Hook::new();
+        h.env("ZELLIJ_SESSION_NAME", "café")
+            .env("LC_ALL", locale)
+            .run(&ev("UserPromptSubmit"));
+
+        let want = h.path(&format!("spool/{}.3", zj_agent_mob::sanitize_session_for_test("café")));
+        assert!(
+            want.exists(),
+            "under LC_ALL={locale} the plugin would look for {} but the spool holds {:?}",
+            want.display(),
+            fs::read_dir(h.path("spool"))
+                .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+    }
+}
+
 /// On a shared /tmp another user must not be able to read prompt text.
 ///
 /// The shell version had to probe GNU vs BSD `stat` here, because GNU `stat -f`

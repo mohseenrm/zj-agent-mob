@@ -36,7 +36,15 @@ command -v zellij >/dev/null 2>&1 || exit 0
 PLUGIN="${ZJ_AGENT_PLUGIN:-file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm}"
 TOOL="${ZJ_AGENT_TOOL:-claude}"
 # Pane ids are only unique within a session, so identity is (session, pane).
-SESSION=$(printf '%s' "${ZELLIJ_SESSION_NAME:-}" | tr -c '[:alnum:]._-' '_')
+#
+# The class is spelled out rather than using `[:alnum:]`, which is
+# locale-dependent: under a UTF-8 locale `tr` passes non-ASCII letters through
+# ("café" stays "café") while under C it replaces each *byte* ("caf__"). The
+# plugin folds with `is_ascii_alphanumeric` (src/agent.rs::sanitize_session), so
+# either shell result disagrees with it and a session whose name is not pure
+# ASCII never matches its own spool records. LC_ALL=C makes the byte-wise pass
+# deterministic; a-zA-Z0-9 makes it agree with Rust.
+SESSION=$(printf '%s' "${ZELLIJ_SESSION_NAME:-}" | LC_ALL=C tr -c 'a-zA-Z0-9._-' '_')
 
 json=$(cat)
 [ -n "$json" ] || exit 0
