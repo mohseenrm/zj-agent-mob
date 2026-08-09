@@ -33,7 +33,6 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
       # tests/hook_e2e.rs drives the real hook script, which shells out to jq.
-      # Without it the hook exits 0 silently and every case fails as "no pipe".
       - name: Install jq (the hook depends on it)
         run: sudo apt-get update && sudo apt-get install -y jq
 

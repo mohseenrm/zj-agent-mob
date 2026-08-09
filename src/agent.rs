@@ -14,15 +14,9 @@ pub(crate) struct AgentId {
     pub(crate) pane_id: u32,
 }
 
-/// Mirrors the hook's `LC_ALL=C tr -c 'a-zA-Z0-9._-' '_'`. The hook sanitizes
-/// because the name reaches a file path and a comma-separated arg string;
-/// Zellij hands the plugin the raw name, so both sides must fold it the same
-/// way or a session never matches its own agents.
-///
-/// Folds *bytes*, not chars, because `tr` does: a non-ASCII character is
-/// several bytes and each one becomes its own `_` ("café" -> "caf__"). Folding
-/// chars here would yield "caf_" and miss the record the hook actually wrote.
-/// The result is ASCII by construction, so the from_utf8 cannot fail.
+/// Mirrors the hook's `LC_ALL=C tr -c 'a-zA-Z0-9._-' '_'`. Folds bytes, not
+/// chars, because `tr` does: "café" -> "caf__", and a char-wise fold would look
+/// for a spool file the hook never wrote.
 pub(crate) fn sanitize_session(name: &str) -> String {
     let bytes: Vec<u8> = name
         .bytes()

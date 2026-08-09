@@ -1,12 +1,9 @@
 // Must be a bin, not a cdylib: Zellij's loader needs the WASI `_start` export,
 // and `register_plugin!` generates its own `fn main()`.
 //
-// The plugin body only links against the wasm host: `register_plugin!` pulls in
-// `host_run_plugin_command`, which is a Zellij-provided wasm import with no
-// native definition. Off-wasm this target is an empty `main` so that building
-// anything that forces the bin to link natively - notably any integration test
-// under tests/, which makes Cargo build every bin target - still succeeds.
-// The real build (`--target wasm32-wasip1`) is unaffected.
+// `register_plugin!` pulls in `host_run_plugin_command`, a wasm import with no
+// native definition, so off-wasm this is an empty main - otherwise anything
+// that links the bin natively (any test under tests/) fails to build.
 #[cfg(target_arch = "wasm32")]
 use zellij_tile::prelude::*;
 #[cfg(target_arch = "wasm32")]

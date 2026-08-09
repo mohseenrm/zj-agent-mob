@@ -1,17 +1,10 @@
-//! End-to-end tests for `scripts/zj-agent-mob-hook.sh`.
-//!
-//! The hook is the seam between a real agent and the plugin: hook-event JSON
-//! arrives on stdin, a `zellij pipe --args ...` call comes out. Everything in
-//! between (event mapping, transcript reading, sanitizing, the status spool) is
-//! untested by the unit suite, which starts from an already-parsed pipe message.
+//! End-to-end tests for `scripts/zj-agent-mob-hook.sh`, the seam between a real
+//! agent and the plugin: hook-event JSON in, a `zellij pipe --args` call out.
+//! The unit suite starts downstream of it, from an already-parsed pipe message.
 //!
 //! `zellij` is stubbed with a script that records its argv, so these run
-//! anywhere: no zellij, no agent, no pane. Each case feeds real-shaped JSON and
-//! asserts on the emitted args.
-//!
-//! Args are parsed into a map rather than substring-matched. `--args` is
-//! comma-separated `key=value`, so a substring check for `task=first line`
-//! also passes when the value is `first lines`; a map comparison cannot.
+//! anywhere. Args are parsed into a map rather than substring-matched: a
+//! substring check for `task=first line` also passes on `first lines`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,8 +42,7 @@ impl Run {
         self.pipes.iter().find(|p| p.name == "agent-ask")
     }
 
-    /// Field of the `agent-status` pipe. Panics if the hook stayed silent, so a
-    /// test that expects a report fails loudly rather than comparing None.
+    /// Field of the `agent-status` pipe; panics if the hook stayed silent.
     fn field(&self, key: &str) -> &str {
         let pipe = self
             .status_pipe()
@@ -66,9 +58,8 @@ impl Run {
     }
 }
 
-/// Splits a `--args` string into pairs. Every segment must contain `=`: a comma
-/// surviving inside a value leaves a fragment with no key, which the plugin
-/// would read as a new field. Returned as an Err so tests can assert on it.
+/// Splits `--args` into pairs. Errs on a segment with no `=`, which is what a
+/// comma surviving inside a value would produce.
 fn parse_args(raw: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for seg in raw.split(',') {
@@ -91,9 +82,8 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        // Tests run in parallel and several derive a path from TMPDIR (the
-        // verdict file in particular), so the per-process counter is what keeps
-        // two concurrent cases off the same file.
+        // Several cases derive a path from TMPDIR, so the counter is what keeps
+        // parallel tests off the same file.
         let n = CASE.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!("zj-hook-e2e-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&root);
@@ -108,8 +98,8 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        // Some cases chmod a directory read-only to test degradation; restore
-        // it so the cleanup can recurse.
+        // A case chmods this read-only to test degradation; restore it so the
+        // cleanup can recurse.
         let spool = self.root.join("spool");
         if spool.is_dir() {
             let _ = fs::set_permissions(&spool, fs::Permissions::from_mode(0o700));
@@ -136,14 +126,13 @@ fn write_stub(bin: &Path) {
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod stub");
 }
 
-/// One sandboxed hook installation. A single `Hook` can be run many times, so a
-/// test can assert on how one event's spool record affects the next.
+/// A sandboxed hook install. Runnable many times, so a test can assert on how
+/// one event's spool record affects the next.
 struct Hook {
     sandbox: Sandbox,
 }
 
-/// One invocation, with env overrides layered on the Hook's defaults. Borrows
-/// the Hook so the sandbox outlives the run and its files stay inspectable.
+/// One invocation, with env overrides layered on the Hook's defaults.
 struct Invocation<'a> {
     hook: &'a Hook,
     env: Vec<(String, String)>,
@@ -218,12 +207,15 @@ impl Hook {
         }
 
         let mut child = cmd.spawn().expect("spawn hook");
-        child
-            .stdin
-            .as_mut()
-            .expect("stdin")
-            .write_all(json.as_bytes())
-            .expect("write stdin");
+        // The hook's early-exit guards return before reading stdin, so a
+        // BrokenPipe here is expected, not a failure.
+        if let Some(mut stdin) = child.stdin.take() {
+            match stdin.write_all(json.as_bytes()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("write stdin: {e}"),
+            }
+        }
         let out = child.wait_with_output().expect("wait hook");
 
         let raw = fs::read_to_string(&capture).unwrap_or_default();
@@ -526,10 +518,8 @@ fn codex_without_a_rollout_still_reports() {
 // sanitizing (--args is comma-separated, so commas and newlines break it)
 // ---------------------------------------------------------------------------
 
-/// Every comma in `--args` must separate two key=value pairs. A comma surviving
-/// inside a value leaves a fragment with no `=`, which the plugin reads as a new
-/// key. Asserting the invariant rather than a pair count keeps this honest as
-/// fields are added.
+/// A comma surviving inside a value leaves a fragment with no `=`, which the
+/// plugin would read as a new key.
 #[test]
 fn commas_in_the_task_are_stripped() {
     let h = Hook::new();
@@ -566,8 +556,7 @@ fn long_tasks_are_capped_at_60_chars() {
     assert!(r.field("task").len() <= 60, "got {} chars", r.field("task").len());
 }
 
-/// A quote or `$(...)` in a title must not escape into the shell: the hook evals
-/// jq's @sh output, so this is the injection path that matters.
+/// The hook evals jq's @sh output, so this is the injection path that matters.
 #[test]
 fn shell_metacharacters_in_a_task_are_not_executed() {
     let h = Hook::new();
@@ -645,12 +634,13 @@ fn the_hook_exits_zero_when_zellij_is_absent() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = cmd.spawn().expect("spawn");
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(ev("Stop").as_bytes())
-        .expect("write");
+    if let Some(mut stdin) = child.stdin.take() {
+        match stdin.write_all(ev("Stop").as_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(e) => panic!("write stdin: {e}"),
+        }
+    }
     assert_eq!(child.wait().expect("wait").code(), Some(0));
 }
 
@@ -1056,28 +1046,19 @@ fn a_status_event_writes_a_spool_record() {
 }
 
 // ---------------------------------------------------------------------------
-// The session-name fold, on both sides of the language boundary.
-//
-// The hook writes `<session>.<pane>` and the plugin looks for that filename
-// after folding the raw name Zellij gave it. The two folds are separate
-// implementations in different languages, so nothing but a test stops them
-// drifting - and when they drift the symptom is silent: the agent simply never
-// appears in another session's panel.
+// The session-name fold, on both sides of the language boundary. The hook
+// writes `<session>.<pane>` and the plugin looks for that filename; when the
+// two folds drift the agent silently stops appearing in other sessions.
 // ---------------------------------------------------------------------------
 
-/// Lifts the `SESSION=` fold out of the hook script and runs it on `name`.
-///
-/// Deliberately extracted from the shipping script rather than restated here:
-/// a copy would keep passing after someone edited the hook, which is precisely
-/// the drift these tests exist to catch.
+/// Runs the hook's own `SESSION=` line on `name`. Extracted from the script
+/// rather than restated, so a copy cannot keep passing after the hook changes.
 fn shell_fold(name: &str, ambient_locale: &str) -> String {
     let script = fs::read_to_string(hook_path()).expect("read hook");
     let line = script
         .lines()
         .find(|l| l.trim_start().starts_with("SESSION="))
         .expect("the hook still has a SESSION= line");
-    // Reproduce it with ZELLIJ_SESSION_NAME bound to the input, then echo the
-    // result. The ambient locale is set around it to prove the pin holds.
     let prog =
         format!("export LC_ALL=\"$2\" LANG=\"$2\"; ZELLIJ_SESSION_NAME=\"$1\"; {line}; printf '%s' \"$SESSION\"");
     let out = Command::new("sh")
@@ -1091,16 +1072,10 @@ fn shell_fold(name: &str, ambient_locale: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// `tr` is locale-sensitive whatever the class is spelled as: under a UTF-8
-/// locale it works on characters, under C on bytes, so "café" folds to "caf_"
-/// or "caf__" depending on the user's environment. Pinning `LC_ALL=C` in the
-/// hook is what makes the spool filename stable, so assert on the pinned form:
-/// the same name must fold identically no matter what the caller's locale is.
+/// `tr` works on characters under a UTF-8 locale and on bytes under C, so the
+/// hook's `LC_ALL=C` pin is what keeps the spool filename stable.
 #[test]
 fn the_hooks_fold_is_pinned_against_the_ambient_locale() {
-    // The locale that would actually move an unpinned fold, so this exercises
-    // the pin rather than comparing C against another byte-oriented locale.
-    // Falls back to C where there is none; the assertion still holds.
     let ambient = char_oriented_locale().unwrap_or_else(|| "C".to_string());
     for name in ["café", "naïve", "日本語", "mob", "my session"] {
         assert_eq!(
@@ -1124,14 +1099,8 @@ fn unpinned_fold(locale: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// A locale under which `tr` actually works on *characters* rather than bytes.
-///
-/// Deliberately probed by behaviour, not by name. Two earlier attempts guessed
-/// from the name and were both wrong: hardcoding `en_US.UTF-8` fails on images
-/// that lack it (the request silently falls back to C), and picking any locale
-/// whose name ends in "utf8" picks up `C.utf8` on ubuntu-latest - which is
-/// UTF-8 but still byte-oriented, so `tr` folds "café" to "caf__" exactly like
-/// C. The only reliable test is to run the fold and look at the answer.
+/// A locale under which `tr` works on characters rather than bytes. Probed by
+/// behaviour: `C.utf8` on ubuntu-latest is UTF-8 by name but byte-oriented.
 fn char_oriented_locale() -> Option<String> {
     let out = Command::new("sh")
         .arg("-c")
@@ -1151,14 +1120,8 @@ fn char_oriented_locale() -> Option<String> {
         .map(str::to_string)
 }
 
-/// The bug this replaced: without the pin, the fold moves with the locale.
-/// Kept as a guard so the pin cannot be quietly dropped as redundant.
-///
-/// Skipped where every available locale is byte-oriented (ubuntu-latest ships
-/// only C, POSIX and C.utf8). There the ambient locale cannot change the
-/// answer, so there is nothing to prove and a failure would say nothing about
-/// our code - but the pin still matters for the developer machines that do have
-/// a character-oriented locale, which is where the bug was found.
+/// Guards the pin against being dropped as redundant. Skipped where every
+/// available locale is byte-oriented, since there it would prove nothing.
 #[test]
 fn an_unpinned_fold_would_be_locale_dependent() {
     let Some(locale) = char_oriented_locale() else {
@@ -1226,11 +1189,8 @@ fn a_non_ascii_session_name_lands_where_the_plugin_looks() {
     }
 }
 
-/// On a shared /tmp another user must not be able to read prompt text.
-///
-/// The shell version had to probe GNU vs BSD `stat` here, because GNU `stat -f`
-/// means "filesystem info" and exits 0, so a `-c || -f` fallback silently takes
-/// the wrong branch. The mode is just a number through std.
+/// On a shared /tmp another user must not be able to read prompt text. The
+/// shell version had to probe GNU vs BSD `stat`; the mode is just a number here.
 #[test]
 fn the_spool_directory_is_private() {
     let h = Hook::new();
@@ -1364,9 +1324,8 @@ fn heartbeat_off_also_skips_the_spool() {
     assert!(!h.path("spool/mob.3").exists(), "record written anyway");
 }
 
-/// A record is a whole snapshot, so an event that carries no session_id must
-/// inherit the last known one rather than blanking it. Without this a recycled
-/// pane id could inherit a dead agent's status, which the plugin cannot detect.
+/// A record is a whole snapshot, so an event carrying no session_id must
+/// inherit the last known one rather than blanking it.
 #[test]
 fn an_event_without_identity_inherits_the_last_known() {
     let h = Hook::new();
@@ -1392,8 +1351,8 @@ fn an_event_without_identity_inherits_the_last_known() {
     assert_eq!(rec["status"], "waiting", "the inheriting event keeps its own status");
 }
 
-/// Deltas describe one moment and are replayed on every poll, so a snapshot must
-/// not carry them or the counts would inflate without bound.
+/// Deltas are replayed on every poll, so a snapshot carrying them would inflate
+/// the counts without bound.
 #[test]
 fn a_snapshot_carries_no_deltas() {
     let h = Hook::new();
@@ -1408,8 +1367,8 @@ fn a_snapshot_carries_no_deltas() {
     }
 }
 
-/// The pane id reaches a file path and the args string. Zellij only ever sets a
-/// bare integer, so anything else is a broken or planted environment.
+/// The pane id reaches a file path and the args string; Zellij only ever sets a
+/// bare integer.
 #[test]
 fn a_hostile_pane_id_reports_nothing() {
     for pane in ["1;rm -rf /", "../x"] {

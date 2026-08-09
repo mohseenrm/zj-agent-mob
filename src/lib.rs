@@ -14,10 +14,7 @@ mod util;
 
 pub use state::State;
 
-/// The session-name fold, exposed so `tests/hook_e2e.rs` can run it against the
-/// hook's own `tr` and fail if the two ever disagree. The two implementations
-/// cannot be collapsed into one - the hook is a shell script the agent invokes
-/// directly - so a differential test is what keeps them honest.
+/// Exposed so `tests/hook_e2e.rs` can diff it against the hook's own `tr`.
 #[doc(hidden)]
 pub fn sanitize_session_for_test(name: &str) -> String {
     agent::sanitize_session(name)
