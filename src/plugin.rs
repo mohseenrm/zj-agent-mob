@@ -468,3 +468,36 @@ impl State {
         print!("{}", serialize_ribbon_line_with_coordinates(&texts, 0, y, None, None));
     }
 }
+
+#[cfg(test)]
+mod reply_row_tests {
+    use crate::util::testing::item_text;
+
+    /// A line that overflows the pane wraps and eats the row below it, which
+    /// desyncs every coordinate after it.
+    #[test]
+    fn the_reply_row_never_exceeds_the_pane_width() {
+        let long = "y".repeat(crate::MAX_REPLY_CHARS);
+        for cols in [30usize, 40, 60, 80, 110] {
+            for text in ["", "yes", long.as_str()] {
+                let row = item_text(&super::reply_row(text, cols));
+                assert!(
+                    row.chars().count() <= cols,
+                    "cols={} text_len={} produced {:?}",
+                    cols,
+                    text.len(),
+                    row
+                );
+            }
+        }
+    }
+
+    /// The cursor block is what shows where typing lands.
+    #[test]
+    fn the_reply_row_shows_a_prompt_and_cursor() {
+        let row = item_text(&super::reply_row("yes", 60));
+        assert!(row.contains("reply:"), "{:?}", row);
+        assert!(row.contains("yes"), "{:?}", row);
+        assert!(row.ends_with('\u{2588}'), "{:?}", row);
+    }
+}
