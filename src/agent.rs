@@ -81,6 +81,13 @@ impl Agent {
         &self.id.session
     }
 
+    /// An agent that has been blocked on you for a long time. The sort already
+    /// puts it on top; this says it has stopped being a state and become a fire.
+    pub(crate) fn escalated(&self, now: f64) -> bool {
+        matches!(self.status, Status::Waiting | Status::IdleWait)
+            && now - self.status_since >= crate::WAITING_ESCALATE_AFTER
+    }
+
     /// Falls back to the pane title when there is no transcript summary.
     pub(crate) fn display_task(&self) -> &str {
         match self.task.as_deref() {
@@ -156,7 +163,7 @@ impl Agent {
 
         let level = self.status.color_level();
         let mut text = Text::new(text);
-        if self.status.is_error() {
+        if self.status.is_error() || self.escalated(now) {
             text = text.error_color_range(icon_range).error_color_range(label_range);
         } else {
             text = text.color_range(level, icon_range).color_range(level, label_range);
@@ -537,6 +544,34 @@ mod render_tests {
         let d = item_text(&a.detail_item(false, 110));
         assert!(d.contains("(session exited)"), "{:?}", d);
         assert!(!d.contains("(pane gone)"), "the session is the bigger fact: {:?}", d);
+    }
+
+    /// The sort already puts a blocked agent on top; past a threshold the colour
+    /// says it has stopped being a state and become a fire.
+    #[test]
+    fn a_long_wait_escalates_to_the_error_colour() {
+        let mut a = agent();
+        a.status = Status::Waiting;
+        a.status_since = 0.0;
+        assert!(!a.escalated(5.0), "a prompt you are answering must not escalate");
+        assert!(!a.escalated(crate::WAITING_ESCALATE_AFTER - 1.0));
+        assert!(a.escalated(crate::WAITING_ESCALATE_AFTER));
+    }
+
+    /// Only a blocked agent can escalate: a long-running turn is working as
+    /// intended, and painting it as an error would cry wolf.
+    #[test]
+    fn only_blocked_statuses_escalate() {
+        let mut a = agent();
+        a.status_since = 0.0;
+        for status in [Status::Working, Status::Done, Status::Idle, Status::Discovered] {
+            a.status = status;
+            assert!(!a.escalated(10_000.0), "{:?} must not escalate", status);
+        }
+        for status in [Status::Waiting, Status::IdleWait] {
+            a.status = status;
+            assert!(a.escalated(10_000.0), "{:?} should escalate", status);
+        }
     }
 
     /// An embedded newline would desync every coordinate below the row.

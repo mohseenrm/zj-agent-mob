@@ -15,9 +15,10 @@ A blocked agent is invisible until you happen to cycle past its pane. Rows sort 
 
 - **See every agent at once**, across sessions, with live status and the task each one is on.
 - **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
-- **Get pulled in when needed**: the panel can pop itself open the moment an agent blocks.
+- **Get told when you are away**: a desktop notification the moment an agent blocks or fails, wherever your attention is.
 - **Answer permission prompts in place** with <kbd>a</kbd> / <kbd>r</kbd>, without leaving the panel (opt-in).
-- **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident.
+- **Reply without leaving the panel**: <kbd>y</kbd> to continue, <kbd>m</kbd> to type an answer.
+- **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident, in any session.
 - **No daemon and no socket.** Agent hooks pipe straight to the plugin, and drop a
   disposable status file so other sessions can read it.
 
@@ -145,9 +146,13 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | Move selection |
 | <kbd>Enter</kbd> | Jump to that agent's pane (across tabs *and* sessions) and hide the panel |
 | <kbd>1</kbd>–<kbd>9</kbd> | Jump straight to agent N |
-| <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (own session only) |
+| <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
+| <kbd>y</kbd> | Answer a blocked agent with `y` (only shown while it is waiting) |
+| <kbd>m</kbd> | Type a one-line reply to a blocked agent; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> cancels |
 | <kbd>d</kbd> | Dismiss a `done` badge |
+| <kbd>D</kbd> | Dismiss every `done` badge at once |
+| <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory |
 | <kbd>i</kbd> | Open the install screen |
 | <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel |
 
@@ -197,11 +202,41 @@ This is the one hook that blocks the agent's turn, which is why it is opt-in. It
 so the worst case is the normal interactive experience. Reject is <kbd>r</kbd>, not <kbd>d</kbd>,
 so a mis-keyed dismiss can never answer a prompt.
 
+### Desktop notifications
+
+On by default. When an agent starts `waiting` or `failed`, you get a system notification even
+when Zellij is not the focused window - which is exactly when a blocked agent is invisible.
+
+A burst becomes one banner rather than five, each agent is rate-limited to one notification a
+minute, and nothing fires while the panel is already on screen. To change what it notifies about:
+
+```kdl
+LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
+    floating true
+    notify "waiting,failed,done"   // add done; "" turns notifications off
+    notify_sound "true"
+}
+```
+
+### Fleet status in your status bar
+
+The panel can publish a one-line summary (`2 waiting · 3 working`) for a status bar to render,
+so you know whether anyone needs you without opening anything:
+
+```kdl
+    summary_file "/tmp/zj-agent-mob-summary"
+```
+
+It is written on every change and also piped as `zj-agent-mob-summary`, so
+[zjstatus](https://github.com/dj95/zjstatus) can pick it up with its `pipe` widget, and anything
+else (a starship prompt, a shell script) can read the file.
+
 ## Known limitations
 
 - Agents started before `init.sh` ran aren't tracked (no hooks installed yet). Restart them.
-- Agents in other Zellij sessions report live status through a status file in `$TMPDIR`, picked up on the panel's next scan rather than instantly. <kbd>x</kbd> is still refused for them: Zellij's kill and interrupt calls act on the current session only, so jump first.
+- Agents in other Zellij sessions report live status through a status file in `$TMPDIR`. The states that need you (`waiting`, `failed`, `done`) are piped across immediately; the quieter ones are picked up on the panel's next scan.
 - Claude has no "permission granted" event, so `waiting` to `working` relies on the next tool-event heartbeat. With `ZJ_AGENT_HEARTBEAT=0`, `waiting` persists until the turn ends.
+- Notifications need a notifier on `PATH` (`terminal-notifier` or `osascript` on macOS, `notify-send` on Linux). With none, the panel behaves exactly as before.
 
 Hitting something not listed here? See [docs/troubleshooting.md](docs/troubleshooting.md).
 

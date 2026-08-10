@@ -23,6 +23,9 @@ struct Pipe {
     name: String,
     args: BTreeMap<String, String>,
     plugin: String,
+    /// Set only on a fan-out call: `zellij --session <name> pipe ...`, which is
+    /// how an urgent transition reaches a panel in another session.
+    session: String,
 }
 
 #[derive(Debug)]
@@ -249,6 +252,7 @@ fn parse_pipe(line: &str) -> Pipe {
         name: after("--name"),
         plugin: after("--plugin"),
         args: parse_args(&args_raw).unwrap_or_default(),
+        session: after("--session"),
     }
 }
 
@@ -1390,4 +1394,110 @@ fn no_pane_id_writes_no_record() {
         .env("ZELLIJ_SESSION_NAME", "mob")
         .run(&ev("UserPromptSubmit"));
     assert!(!h.path("spool").exists(), "a record was written without a pane id");
+}
+
+// ---------------------------------------------------------------------------
+// fan-out: urgent transitions reach panels in other sessions immediately
+// ---------------------------------------------------------------------------
+
+/// Stages panel beacons, as a panel open in each of those sessions would.
+fn with_panels(h: &Hook, sessions: &[&str]) {
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("spool dir");
+    for s in sessions {
+        fs::write(spool.join(format!("panel.{s}")), "").expect("beacon");
+    }
+}
+
+/// The fan-out calls, i.e. every pipe that named a session other than its own.
+fn fanout_targets(r: &Run) -> Vec<String> {
+    let mut t: Vec<String> = r
+        .pipes
+        .iter()
+        .filter(|p| !p.session.is_empty())
+        .map(|p| p.session.clone())
+        .collect();
+    t.sort();
+    t
+}
+
+/// The states that actually need you must not wait for a foreign panel's next
+/// poll, which is the whole latency gap this closes.
+#[test]
+fn urgent_transitions_fan_out_to_every_open_panel() {
+    for event in ["Notification", "StopFailure", "Stop"] {
+        let h = Hook::new();
+        with_panels(&h, &["other", "third"]);
+        let r = h.env("ZELLIJ_SESSION_NAME", "mob").run(&ev(event));
+        assert_eq!(
+            fanout_targets(&r),
+            vec!["other", "third"],
+            "{event} must reach both panels"
+        );
+    }
+}
+
+/// Its own session already got the direct pipe; a second copy would be a
+/// duplicate report of the same event.
+#[test]
+fn fanout_skips_the_agents_own_session() {
+    let h = Hook::new();
+    with_panels(&h, &["mob", "other"]);
+    let r = h.env("ZELLIJ_SESSION_NAME", "mob").run(&ev("Notification"));
+    assert_eq!(fanout_targets(&r), vec!["other"], "own session must be skipped");
+}
+
+/// The cost guarantee: tool events fire constantly, so they must never pay for
+/// a subprocess per open panel.
+#[test]
+fn heartbeats_never_fan_out() {
+    for event in ["PreToolUse", "PostToolUse", "UserPromptSubmit", "SessionStart"] {
+        let h = Hook::new();
+        with_panels(&h, &["other", "third"]);
+        let r = h.env("ZELLIJ_SESSION_NAME", "mob").run(&ev(event));
+        assert!(fanout_targets(&r).is_empty(), "{event} fanned out: {:?}", r.pipes);
+    }
+}
+
+#[test]
+fn fanout_can_be_switched_off() {
+    let h = Hook::new();
+    with_panels(&h, &["other"]);
+    let r = h
+        .env("ZELLIJ_SESSION_NAME", "mob")
+        .env("ZJ_AGENT_FANOUT", "0")
+        .run(&ev("Notification"));
+    assert!(fanout_targets(&r).is_empty());
+    assert!(r.status_pipe().is_some(), "the direct pipe still fires");
+}
+
+/// With nobody listening the loop must not fire a pipe at the literal glob.
+#[test]
+fn no_panels_means_no_fanout() {
+    let h = Hook::new();
+    let r = h.env("ZELLIJ_SESSION_NAME", "mob").run(&ev("Notification"));
+    assert!(fanout_targets(&r).is_empty(), "{:?}", r.pipes);
+    assert!(r.status_pipe().is_some(), "the direct pipe is unaffected");
+}
+
+/// A fan-out pipe must carry the same payload as the direct one, or the foreign
+/// panel would render a different row than the agent's own.
+#[test]
+fn a_fanned_out_pipe_carries_the_full_payload() {
+    let h = Hook::new();
+    with_panels(&h, &["other"]);
+    let json = serde_json::json!({
+        "hook_event_name": "Notification",
+        "session_id": "sess-1",
+        "cwd": "/work/api",
+        "message": "needs approval",
+    })
+    .to_string();
+    let r = h.env("ZELLIJ_SESSION_NAME", "mob").run(&json);
+    let fanned = r.pipes.iter().find(|p| p.session == "other").expect("a fan-out pipe");
+    assert_eq!(fanned.name, "agent-status");
+    assert_eq!(fanned.args.get("session").map(String::as_str), Some("mob"));
+    assert_eq!(fanned.args.get("pane_id").map(String::as_str), Some("3"));
+    assert_eq!(fanned.args.get("status").map(String::as_str), Some("waiting"));
+    assert_eq!(fanned.args.get("session_id").map(String::as_str), Some("sess-1"));
 }

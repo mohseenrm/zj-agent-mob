@@ -37,6 +37,34 @@ matters because this runs on the critical path of every tool call.
 The panel reads the directory on the same `run_command` that already runs the process scan, so
 polling costs one command rather than two.
 
+### Urgent transitions skip the poll
+
+A poll cycle is too slow for the states that actually need you, so those are also pushed. Each
+open panel touches a beacon file, `panel.<session>`, next to the status records; the hook reads
+that directory and, on `waiting` / `failed` / `done` only, additionally runs
+`zellij --session <name> pipe` for each panel that is not its own.
+
+The restriction to those four statuses is the cost control: tool events fire constantly, and
+they must never pay for a subprocess per open panel. Heartbeats take the spool path alone. A
+beacon older than five minutes is swept, so a closed panel stops attracting pipes. Set
+`ZJ_AGENT_FANOUT=0` to opt out; everything falls back to the poll.
+
+## Notifications
+
+The plugin, not the hook, decides when to notify: it holds every agent's state, so it can
+debounce across the fleet where a per-agent hook could not. A transition into a notifying status
+is queued rather than sent, and the queue is flushed after a short window, which turns a fan-out
+of five blocked agents into one banner instead of five stacked ones.
+
+Three rules keep it from becoming noise: one notification per agent per `notify_cooldown`,
+nothing at all while the panel is already on screen, and only the newest state per agent inside a
+window. The notifier binary is probed once via `run_command` (`terminal-notifier`, then
+`osascript`, then `notify-send`) and cached; finding none disables the feature silently.
+
+Task summaries and tool arguments come from arbitrary repo content, so every one is passed as its
+own argv element. `osascript` has no argv form for `display notification`, so the text is bound
+through `on run argv` rather than spliced into the script.
+
 ### Who owns which row
 
 Three sources can say something about an agent, and they are deliberately not equal:

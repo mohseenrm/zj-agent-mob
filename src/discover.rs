@@ -46,6 +46,10 @@ pub(crate) fn scan_script(tools: &[&str]) -> String {
 SPOOL_DIR="${{ZJ_AGENT_SPOOL_DIR:-${{TMPDIR:-/tmp}}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}}"
 grep -s -H '' "$SPOOL_DIR"/* 2>/dev/null | sed 's/^/SPOOL /'
 find "$SPOOL_DIR" -type f -mtime +1 -delete 2>/dev/null
+# A panel beacon is refreshed on every scan, so one untouched for minutes
+# belongs to a panel that is gone. Left longer it would keep attracting
+# fan-out pipes to a session with nothing listening.
+find "$SPOOL_DIR" -name 'panel.*' -type f -mmin +5 -delete 2>/dev/null
 printf 'SCANEND\n'"#
     )
 }
@@ -54,6 +58,27 @@ pub(crate) fn dispatch() {
     let mut ctx = BTreeMap::new();
     ctx.insert(crate::install::CTX_KEY.to_string(), CTX_SCAN.to_string());
     host::run_command(&["sh", "-c", &scan_script(&TOOLS)], ctx);
+}
+
+/// Announces that a panel is open in this session, so hooks elsewhere know to
+/// fan their urgent transitions out to it. Refreshed on every scan: a stale
+/// beacon costs one wasted `zellij pipe`, and the sweep clears it eventually.
+///
+/// The session name is passed as a positional rather than spliced into the
+/// command, since it comes from the Zellij session list.
+pub(crate) fn beacon_script() -> &'static str {
+    "d=\"${ZJ_AGENT_SPOOL_DIR:-${TMPDIR:-/tmp}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}\"; \
+     [ -d \"$d\" ] || { mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; }; \
+     [ -n \"$1\" ] && : > \"$d/panel.$1\" 2>/dev/null || true"
+}
+
+pub(crate) fn announce_panel(session: &str) {
+    if session.is_empty() {
+        return;
+    }
+    let mut ctx = BTreeMap::new();
+    ctx.insert(crate::install::CTX_KEY.to_string(), "panel-beacon".to_string());
+    host::run_command(&["sh", "-c", beacon_script(), "sh", session], ctx);
 }
 
 /// A `session pane_id tool` triple from the scan.
@@ -130,6 +155,10 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 // A half-written record is still named `.tmp`; the rename into
                 // place is what publishes it.
                 if name.ends_with(".tmp") {
+                    continue;
+                }
+                // Panel beacons share the directory but are not agent records.
+                if name.starts_with("panel.") {
                     continue;
                 }
                 // First line wins: a file with more is malformed, and later

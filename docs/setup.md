@@ -161,6 +161,10 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 |---|---|---|
 | `popup_on_waiting` | `true` | Auto-show the panel when an agent needs input. Set `false` to only ever open it yourself |
 | `discover` | `true` | Scan process environments for agents that have not fired a hook yet, including ones in other sessions. Set `false` to show only agents that have reported |
+| `notify` | `waiting,failed` | Which transitions raise a desktop notification. Any of `waiting`, `idlewait`, `failed`, `done`, comma-separated. `""` disables them |
+| `notify_cooldown` | `60` | Seconds before the same agent may notify again, so a flapping row cannot spam you |
+| `notify_sound` | `false` | Play a sound with the notification |
+| `summary_file` | unset | Write the one-line fleet summary here on every change, for a status bar to render. Unset means nothing is published |
 
 ### Hook script environment
 
@@ -174,6 +178,7 @@ Set these in the environment the *agent* runs in, not the panel's.
 | `ZJ_AGENT_APPROVE_TIMEOUT` | `30` | Seconds a parked prompt waits before falling through to the agent's own prompt |
 | `ZJ_AGENT_SPOOL` | `1` | Set `0` to stop writing the cross-session status file. Agents in other sessions then show `found` instead of live status |
 | `ZJ_AGENT_SPOOL_DIR` | `$TMPDIR/zj-agent-mob-<uid>/status` | Where status files are written. Created `0700`, since records contain task summaries |
+| `ZJ_AGENT_FANOUT` | `1` | Set `0` to stop piping `waiting` / `failed` / `done` straight to panels in other sessions. They then wait for the next poll instead |
 | `ZJ_AGENT_PLUGIN` | `file:~/.config/zellij/plugins/zj-agent-mob.wasm` | Plugin path |
 | `ZJ_AGENT_DEBUG` | `0` | Set `1` to log events to `~/.cache/zj-agent-mob/hook.log` |
 
