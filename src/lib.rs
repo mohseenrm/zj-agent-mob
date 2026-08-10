@@ -35,6 +35,11 @@ pub(crate) const STALE_AFTER: f64 = 60.0;
 /// Shown in the pane frame instead of the full wasm path.
 pub(crate) const PANE_TITLE: &str = "Agent Mob";
 
+/// Longest reply the panel will compose. A one-line answer to a prompt, not a
+/// prose channel: the panel truncates for display, so an uncapped buffer would
+/// send far more than the line ever showed.
+pub(crate) const MAX_REPLY_CHARS: usize = 200;
+
 /// Ctrl-C. Interrupting a foreign pane goes through `zellij action write`,
 /// which takes bytes rather than a signal: there is no cross-session form of
 /// the plugin's own `send_sigint_to_pane_id`.

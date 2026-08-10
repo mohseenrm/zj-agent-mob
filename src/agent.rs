@@ -84,8 +84,18 @@ impl Agent {
     /// An agent that has been blocked on you for a long time. The sort already
     /// puts it on top; this says it has stopped being a state and become a fire.
     pub(crate) fn escalated(&self, now: f64) -> bool {
+        self.is_blocked() && now - self.status_since >= crate::WAITING_ESCALATE_AFTER
+    }
+
+    /// Blocked, but not yet long enough to escalate. The clock has to keep
+    /// running for these: a blocked row animates nothing, so nothing else would
+    /// advance `now` and the threshold would never be crossed.
+    pub(crate) fn escalation_pending(&self, now: f64) -> bool {
+        self.is_blocked() && !self.escalated(now)
+    }
+
+    fn is_blocked(&self) -> bool {
         matches!(self.status, Status::Waiting | Status::IdleWait)
-            && now - self.status_since >= crate::WAITING_ESCALATE_AFTER
     }
 
     /// Falls back to the pane title when there is no transcript summary.

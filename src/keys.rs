@@ -133,7 +133,9 @@ impl State {
         if foreign {
             // A dead session has no pane to land on; attaching resurrects it.
             let target = if session_alive { Some((id.pane_id, false)) } else { None };
-            host::switch_session_with_focus(&id.session, tab.filter(|_| session_alive), target);
+            // The name Zellij knows it by, not the sanitized filename key.
+            let session = self.real_session(&id.session);
+            host::switch_session_with_focus(&session, tab.filter(|_| session_alive), target);
         } else {
             host::focus_terminal_pane(id.pane_id, true, false);
         }
@@ -166,7 +168,12 @@ impl State {
             }
             BareKey::Char(c) => {
                 if let Some(r) = &mut self.reply {
-                    r.text.push(c);
+                    // The panel truncates for display, so without a cap the
+                    // payload could grow far past what the line shows and be
+                    // typed into the agent in full.
+                    if r.text.chars().count() < crate::MAX_REPLY_CHARS {
+                        r.text.push(c);
+                    }
                 }
                 true
             }
@@ -184,6 +191,8 @@ impl State {
         if self.reply.is_some() {
             return self.handle_reply_key(key);
         }
+        // Any deliberate keypress means the last failure has been seen.
+        self.action_error = None;
         match key.bare_key {
             // Opening refreshes: the state may have changed outside the panel.
             BareKey::Char('i') => {
@@ -212,25 +221,31 @@ impl State {
                 }
                 true
             }
-            // First x interrupts, second closes the pane.
+            // First x interrupts, second closes the pane. The second press acts
+            // on the ARMED agent, never on the selection: a pipe arriving
+            // between the two re-sorts the list under the cursor, and closing
+            // whatever landed there would kill an agent nobody confirmed.
             BareKey::Char('x') => {
-                if let Some(agent) = self.agents.get(self.selected) {
-                    // A dead session has no pane left to signal.
-                    if !self.can_kill_selected() {
-                        return false;
-                    }
-                    let id = agent.id.clone();
-                    let foreign = self.selected_is_foreign();
-                    if self.kill_armed.as_ref() == Some(&id) {
-                        self.close_pane(&id, foreign);
-                        self.agents.retain(|a| a.id != id);
+                if let Some(armed) = self.kill_armed.clone() {
+                    if self.agents.iter().any(|a| a.id == armed && a.session_alive) {
+                        let foreign = !self.session_name.is_empty() && armed.session != self.session_name;
+                        self.close_pane(&armed, foreign);
+                        self.agents.retain(|a| a.id != armed);
                         self.kill_armed = None;
                         self.clamp_selection();
                         self.publish_summary();
-                    } else {
-                        self.interrupt_pane(&id, foreign);
-                        self.kill_armed = Some(id);
+                        return true;
                     }
+                    // The armed agent is gone, so the confirmation is moot.
+                    self.kill_armed = None;
+                }
+                if !self.can_kill_selected() {
+                    return false;
+                }
+                if let Some(id) = self.agents.get(self.selected).map(|a| a.id.clone()) {
+                    let foreign = self.selected_is_foreign();
+                    self.interrupt_pane(&id, foreign);
+                    self.kill_armed = Some(id);
                 }
                 true
             }
@@ -543,6 +558,22 @@ mod tests {
         assert_eq!(s.agents.len(), 1);
     }
 
+    /// The panel truncates the reply for display, so an uncapped buffer would
+    /// send far more than the line ever showed.
+    #[test]
+    fn a_reply_is_capped_in_length() {
+        let mut s = state_with(&[(1, "mob", "waiting")]);
+        s.selected = 0;
+        s.handle_key(key('m'));
+        for _ in 0..(crate::MAX_REPLY_CHARS + 50) {
+            s.handle_key(key('x'));
+        }
+        assert_eq!(
+            s.reply.as_ref().map(|r| r.text.chars().count()),
+            Some(crate::MAX_REPLY_CHARS)
+        );
+    }
+
     #[test]
     fn escape_abandons_a_reply_without_sending() {
         let mut s = state_with(&[(1, "mob", "waiting")]);
@@ -609,6 +640,35 @@ mod tests {
         assert!(
             s.agents.iter().any(|a| a.id == cursor),
             "the innocent agent must survive the second x"
+        );
+        assert_eq!(
+            s.kill_armed, None,
+            "the confirmation was spent on the armed agent, not re-armed on the cursor"
+        );
+    }
+
+    /// The second press must close the ARMED pane, not whatever the cursor
+    /// happens to hold. A re-sort between the presses is routine: any incoming
+    /// `failed` outranks `working` and takes index 0.
+    #[test]
+    fn the_second_x_closes_the_armed_pane_after_a_resort() {
+        let mut s = state_with(&[(5, "mob", "working")]);
+        s.selected = 0;
+        let armed = s.agents[0].id.clone();
+        s.handle_key(key('x'));
+
+        s.handle_status(&args_map(&[("pane_id", "9"), ("status", "failed")]));
+        let cursor = s.agents[s.selected].id.clone();
+        assert_ne!(cursor, armed, "precondition: a failed row took the cursor");
+
+        s.handle_key(key('x'));
+        assert!(
+            !s.agents.iter().any(|a| a.id == armed),
+            "the armed agent is the one that must be closed"
+        );
+        assert!(
+            s.agents.iter().any(|a| a.id == cursor),
+            "the agent under the cursor must be untouched"
         );
     }
 

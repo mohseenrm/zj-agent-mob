@@ -44,6 +44,13 @@ open panel touches a beacon file, `panel.<session>`, next to the status records;
 that directory and, on `waiting` / `failed` / `done` only, additionally runs
 `zellij --session <name> pipe` for each panel that is not its own.
 
+The beacon's **filename** is the sanitized session name, which is what compares against the
+hook's own `$SESSION`. Its **contents** are the name Zellij actually knows the session by, because
+sanitizing is lossy: a session called `my session` is keyed `my_session`, and
+`zellij --session my_session` addresses nothing. The same split applies inside the plugin, where
+`AgentId.session` is the sanitized key and `real_session()` resolves it back for anything that
+takes a `--session` argument.
+
 The restriction to those four statuses is the cost control: tool events fire constantly, and
 they must never pay for a subprocess per open panel. Heartbeats take the spool path alone. A
 beacon older than five minutes is swept, so a closed panel stops attracting pipes. Set

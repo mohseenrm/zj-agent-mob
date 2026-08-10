@@ -161,7 +161,9 @@ on the current session only. So this means one of:
 2. **`zellij` is not on the panel's `PATH`.** The plugin shells out to it for foreign rows. It is
    the same binary the hook needs, so this usually shows up as nothing reporting at all.
 
-Jumping there with <kbd>Enter</kbd> first and pressing <kbd>x</kbd> locally always works.
+A cross-session action that fails prints the reason under the list (`kill failed: ...`) rather
+than silently removing the row, so check there first. Jumping with <kbd>Enter</kbd> and pressing
+<kbd>x</kbd> locally always works.
 
 ## <kbd>y</kbd> / <kbd>m</kbd> do nothing
 

@@ -96,6 +96,12 @@ impl ZellijPlugin for State {
                     .iter()
                     .map(|s| crate::agent::sanitize_session(&s.name))
                     .collect();
+                // The only place both spellings of a session name are known, so
+                // the only place the addressing map can be built.
+                self.session_names = sessions
+                    .iter()
+                    .map(|s| (crate::agent::sanitize_session(&s.name), s.name.clone()))
+                    .collect();
                 let changed = self.apply_sessions(live);
                 let Some(name) = sessions
                     .iter()
@@ -129,6 +135,29 @@ impl ZellijPlugin for State {
                     // A failed scan leaves the list exactly as it was: discovery
                     // is an enhancement, and hook-reported rows are the truth.
                     return exit_code.unwrap_or(0) == 0 && self.apply_scan_result(crate::discover::parse(&out));
+                }
+                // A cross-session action goes through the `zellij` binary, so
+                // its failure is the plugin's only evidence that a kill or a
+                // reply did not land. Saying nothing would leave the panel
+                // claiming success while the agent keeps running.
+                if let Some(kind) = context.get("kind").filter(|k| *k == "kill" || *k == "reply") {
+                    // `zellij` exits 0 even when the session does not exist and
+                    // reports it on stderr, so the exit code alone would miss
+                    // precisely the failure this exists to catch.
+                    let detail = err.lines().next().unwrap_or("").trim();
+                    let failed = exit_code.unwrap_or(0) != 0 || !detail.is_empty();
+                    if failed {
+                        let what = match kind.as_str() {
+                            "kill" => "kill",
+                            _ => "reply",
+                        };
+                        self.action_error = Some(match detail.is_empty() {
+                            true => format!("{} failed in the other session", what),
+                            false => format!("{} failed: {}", what, crate::util::truncate(detail, 70)),
+                        });
+                        return true;
+                    }
+                    return false;
                 }
                 self.install.on_command_result(exit_code, &out, &err, &context)
             }
@@ -348,6 +377,11 @@ impl State {
         }
         y = self.render_rows(items, y);
         y = self.render_rule(y, width);
+        // A cross-session action that failed is the one thing here the panel
+        // cannot show any other way: the row is already gone.
+        if let Some(msg) = self.action_error.as_deref() {
+            y = self.render_notes(Some((msg.to_string(), true)), y, width);
+        }
         let selected_has_ask = self
             .agents
             .get(self.selected)

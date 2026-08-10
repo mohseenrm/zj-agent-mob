@@ -201,9 +201,15 @@ case "$status" in
     if [ "${ZJ_AGENT_FANOUT:-1}" != "0" ] && [ -n "$SESSION" ]; then
       for beacon in "$(spool_dir)"/panel.*; do
         [ -f "$beacon" ] || continue
-        target=${beacon##*/panel.}
-        [ -n "$target" ] || continue
-        [ "$target" = "$SESSION" ] && continue
+        # The filename is the sanitized name, which is what compares against
+        # our own $SESSION. The contents are the name zellij knows it by:
+        # sanitizing is lossy, so "my session" is keyed my_session and only the
+        # stored spelling can actually be addressed.
+        key=${beacon##*/panel.}
+        [ -n "$key" ] || continue
+        [ "$key" = "$SESSION" ] && continue
+        target=$(head -n 1 "$beacon" 2>/dev/null)
+        [ -n "$target" ] || target=$key
         zellij --session "$target" pipe --name agent-status \
           --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
       done

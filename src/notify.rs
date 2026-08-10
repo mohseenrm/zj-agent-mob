@@ -37,18 +37,29 @@ impl Triggers {
     /// An explicit empty string disables notifications; an unset key keeps the
     /// default. Unknown names are ignored rather than failing the whole config:
     /// a typo should cost one trigger, not every notification.
+    ///
+    /// A spec that is entirely unrecognised falls back to the default instead of
+    /// disabling: `notify "waitng"` is a misspelling, and silently turning every
+    /// notification off would be indistinguishable from the documented way to
+    /// switch them off deliberately.
     pub(crate) fn parse(spec: &str) -> Self {
-        Triggers(
-            spec.split(',')
-                .filter_map(|s| match s.trim() {
-                    "waiting" => Some(Status::Waiting),
-                    "idlewait" | "idle-wait" => Some(Status::IdleWait),
-                    "failed" => Some(Status::Failed),
-                    "done" => Some(Status::Done),
-                    _ => None,
-                })
-                .collect(),
-        )
+        if spec.trim().is_empty() {
+            return Triggers(Vec::new());
+        }
+        let parsed: Vec<Status> = spec
+            .split(',')
+            .filter_map(|s| match s.trim() {
+                "waiting" => Some(Status::Waiting),
+                "idlewait" | "idle-wait" => Some(Status::IdleWait),
+                "failed" => Some(Status::Failed),
+                "done" => Some(Status::Done),
+                _ => None,
+            })
+            .collect();
+        match parsed.is_empty() {
+            true => Triggers::default(),
+            false => Triggers(parsed),
+        }
     }
 
     pub(crate) fn wants(&self, status: Status) -> bool {
@@ -146,9 +157,13 @@ impl Notifier {
 
     /// Drops cooldown entries for agents that no longer exist, so the list
     /// cannot grow without bound across a long-lived panel.
-    pub(crate) fn retain_known(&mut self, known: &[AgentId]) {
-        self.sent.retain(|(a, _)| known.contains(a));
-        self.pending.retain(|p| known.contains(&p.id));
+    ///
+    /// Takes a predicate rather than a list: this runs on every status message,
+    /// and building a `Vec<AgentId>` there would clone every id and its session
+    /// string for nothing.
+    pub(crate) fn retain_known(&mut self, known: impl Fn(&AgentId) -> bool) {
+        self.sent.retain(|(a, _)| known(a));
+        self.pending.retain(|p| known(&p.id));
     }
 }
 
@@ -221,6 +236,22 @@ mod tests {
         let mut n = notifier();
         n.triggers = Triggers::parse("");
         assert!(!n.enabled());
+    }
+
+    /// A misspelling must not silently switch every notification off: that is
+    /// indistinguishable from the documented way to disable them on purpose.
+    #[test]
+    fn an_entirely_unrecognised_spec_falls_back_to_the_default() {
+        let t = Triggers::parse("waitng");
+        assert!(t.wants(Status::Waiting) && t.wants(Status::Failed));
+        assert!(!t.is_empty(), "a typo must not disable notifications");
+    }
+
+    /// The documented way to switch them off must still work.
+    #[test]
+    fn an_explicitly_empty_spec_still_disables() {
+        assert!(Triggers::parse("").is_empty());
+        assert!(Triggers::parse("  ").is_empty());
     }
 
     #[test]
@@ -388,7 +419,7 @@ mod tests {
         let mut n = notifier();
         n.queue(&id("mob", 3), Status::Waiting, "t", 0.0);
         n.flush(COALESCE);
-        n.retain_known(&[]);
+        n.retain_known(|_| false);
         assert!(
             n.queue(&id("mob", 3), Status::Waiting, "t", 1.0),
             "a forgotten agent starts fresh"
@@ -407,7 +438,7 @@ mod tests {
             n.flush(pane as f64 * 100.0 + COALESCE);
             // Only the newest few agents are still running.
             live = vec![id("mob", pane)];
-            n.retain_known(&live);
+            n.retain_known(|id| live.contains(id));
         }
         assert!(
             n.sent_len() <= live.len(),
