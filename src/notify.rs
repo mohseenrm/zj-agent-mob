@@ -139,6 +139,11 @@ impl Notifier {
         host::notify(&self.binary, &title, &body, self.sound);
     }
 
+    #[cfg(test)]
+    fn sent_len(&self) -> usize {
+        self.sent.len()
+    }
+
     /// Drops cooldown entries for agents that no longer exist, so the list
     /// cannot grow without bound across a long-lived panel.
     pub(crate) fn retain_known(&mut self, known: &[AgentId]) {
@@ -387,6 +392,27 @@ mod tests {
         assert!(
             n.queue(&id("mob", 3), Status::Waiting, "t", 1.0),
             "a forgotten agent starts fresh"
+        );
+    }
+
+    /// A long-lived panel sees many agents come and go. Without pruning, the
+    /// cooldown list would grow for the life of the session.
+    #[test]
+    fn the_cooldown_list_does_not_grow_without_bound() {
+        let mut n = notifier();
+        let mut live = Vec::new();
+        for pane in 0..500u32 {
+            let a = id("mob", pane);
+            n.queue(&a, Status::Waiting, "t", pane as f64 * 100.0);
+            n.flush(pane as f64 * 100.0 + COALESCE);
+            // Only the newest few agents are still running.
+            live = vec![id("mob", pane)];
+            n.retain_known(&live);
+        }
+        assert!(
+            n.sent_len() <= live.len(),
+            "cooldown entries outlived their agents: {} tracked",
+            n.sent_len()
         );
     }
 
