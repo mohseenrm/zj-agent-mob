@@ -23,9 +23,7 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release --target wasm32-wasip1
-shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh \
-  tests/e2e-hook.sh tests/e2e-install.sh
-./tests/e2e-hook.sh
+shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh tests/e2e-install.sh
 ./tests/e2e-install.sh
 ```
 
@@ -34,12 +32,12 @@ shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh \
 | Layer | Where | Covers |
 |---|---|---|
 | Unit | `src/*.rs`, beside the code | The state machine and layout, starting from an already-parsed pipe message |
-| End-to-end (hook) | [`tests/e2e-hook.sh`](../tests/e2e-hook.sh) | The hook script: hook-event JSON in, `zellij pipe --args` out |
+| End-to-end (hook) | [`tests/hook_e2e.rs`](../tests/hook_e2e.rs) | The hook script: hook-event JSON in, `zellij pipe --args` out |
 | End-to-end (installer) | [`tests/e2e-install.sh`](../tests/e2e-install.sh) | `init.sh`: the hook config written for Claude Code and Codex, and the round trip back out |
 
 Between them these cover the two seams the Rust suite cannot reach, and neither needs a running Zellij, a real agent, or a pane. Both run in about a second.
 
-`tests/e2e-hook.sh` stubs `zellij` with a script that records its argv, then feeds the hook real-shaped event JSON: event-to-status mapping, the cases that must stay silent (no `$ZELLIJ_PANE_ID`, `ZJ_AGENT_HEARTBEAT=0`, unknown or malformed events), Claude `ai-title` and Codex rollout summaries, sanitizing, shell-injection through the task and `cwd`, and the always-exit-0 contract.
+`tests/hook_e2e.rs` stubs `zellij` with a script that records its argv, then feeds the hook real-shaped event JSON: event-to-status mapping, the cases that must stay silent (no `$ZELLIJ_PANE_ID`, `ZJ_AGENT_HEARTBEAT=0`, unknown or malformed events), Claude `ai-title` and Codex rollout summaries, sanitizing, shell-injection through the task and `cwd`, and the always-exit-0 contract, plus the fan-out of urgent transitions to panels in other sessions.
 
 `tests/e2e-install.sh` runs the real `init.sh` against a throwaway set of paths (`ZJ_AGENT_HOOK_DIR`, `ZJ_AGENT_PLUGIN_DIR`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so it never touches your own `~/.claude` or `~/.codex`. It asserts the release-critical part: the hook config the agents themselves read.
 
@@ -49,7 +47,7 @@ Between them these cover the two seams the Rust suite cannot reach, and neither 
 - **The loop closed.** After a real install it runs the installed `hook.sh` through the exact command string recorded in each agent's config and asserts the resulting pipe args report `tool=claude` / `tool=codex`.
 
 ```sh
-./tests/e2e-hook.sh
+cargo test --test hook_e2e
 ./tests/e2e-install.sh
 ```
 
@@ -114,21 +112,22 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 
 | File | Lines | Tests | Role |
 |---|---|---|---|
-| `main.rs` | 6 | | `register_plugin!` + WASI entry point |
-| `lib.rs` | 38 | | Module wiring and shared constants |
-| `plugin.rs` | 383 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box |
-| `state.rs` | 638 | 86 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership |
-| `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 219 | 12 | Keyboard: selection, jump-to-pane (and cross-session switch), two-step kill, approve/reject |
-| `agent.rs` | 222 | 23 | One agent, its `(session, pane)` identity, and how its row is built |
-| `status.rs` | 97 | | The agent states and their presentation |
-| `ribbon.rs` | 77 | 7 | Ribbon line serialization |
-| `discover.rs` | 168 | 22 | Process-environment scan across every session, plus reading the cross-session status spool |
-| `host.rs` | 48 | | Host-call shim |
+| `main.rs` | 16 | | `register_plugin!` + WASI entry point |
+| `lib.rs` | 55 | | Module wiring and shared constants |
+| `plugin.rs` | 436 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box, the reply editor |
+| `state.rs` | 614 | 98 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership, the fleet summary |
+| `install.rs` | 377 | 22 | Install screen: state, toggles, installer output parsing |
+| `keys.rs` | 270 | 21 | Keyboard: selection, jump-to-pane (and cross-session switch), two-step kill, approve/reject, quick reply |
+| `agent.rs` | 229 | 25 | One agent, its `(session, pane)` identity, and how its row is built |
+| `notify.rs` | 185 | 18 | Desktop notifications: triggers, per-agent cooldown, burst coalescing, message text |
+| `status.rs` | 98 | | The agent states and their presentation |
+| `ribbon.rs` | 89 | 7 | Ribbon line serialization |
+| `discover.rs` | 196 | 22 | Process-environment scan across every session, reading the cross-session status spool, and the panel beacon |
+| `host.rs` | 134 | | Host-call shim |
 | `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
 | `style.rs` | 23 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover, 174 in total, none needing a running Zellij, plus 208 end-to-end cases across `tests/e2e-hook.sh` (110) and `tests/e2e-install.sh` (98).
+Line counts exclude tests. Tests live beside the code they cover, 215 in total, none needing a running Zellij, plus 173 end-to-end cases across `tests/hook_e2e.rs` (75) and `tests/e2e-install.sh` (98).
 
 Ten of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps` and a real staged spool directory, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
 

@@ -14,6 +14,7 @@
 #   ZJ_AGENT_APPROVE_TIMEOUT  seconds to wait for a verdict (default 30)
 #   ZJ_AGENT_SPOOL       0 disables the cross-session status spool
 #   ZJ_AGENT_SPOOL_DIR   override spool location
+#   ZJ_AGENT_FANOUT      0 disables piping urgent transitions to other sessions
 
 # SC2154: event, session_id, cwd, transcript and tool_name are all assigned by
 # the `eval` of jq's @sh output below, which shellcheck cannot follow.
@@ -181,11 +182,6 @@ fi
 
 ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
 
-zellij pipe --name agent-status --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
-
-# Cross-session transport. The pipe above only reaches this session's plugin, so
-# a panel elsewhere gets status from this file instead. Deliberately not a
-# subprocess and never blocking: this runs on the critical path of every turn.
 spool_dir() {
   if [ -n "${ZJ_AGENT_SPOOL_DIR:-}" ]; then
     printf '%s' "$ZJ_AGENT_SPOOL_DIR"
@@ -194,6 +190,35 @@ spool_dir() {
   fi
 }
 
+zellij pipe --name agent-status --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
+
+# The pipe above reaches only this session's plugin. A panel in another session
+# otherwise waits for its next poll to notice, which is too slow for the states
+# that actually need you. Fan those out directly, and only those: this costs one
+# subprocess per target, so the high-frequency heartbeats never take this path.
+case "$status" in
+  waiting|idlewait|failed|done)
+    if [ "${ZJ_AGENT_FANOUT:-1}" != "0" ] && [ -n "$SESSION" ]; then
+      for beacon in "$(spool_dir)"/panel.*; do
+        [ -f "$beacon" ] || continue
+        # The filename is the sanitized name, which is what compares against
+        # our own $SESSION. The contents are the name zellij knows it by:
+        # sanitizing is lossy, so "my session" is keyed my_session and only the
+        # stored spelling can actually be addressed.
+        key=${beacon##*/panel.}
+        [ -n "$key" ] || continue
+        [ "$key" = "$SESSION" ] && continue
+        target=$(head -n 1 "$beacon" 2>/dev/null)
+        [ -n "$target" ] || target=$key
+        zellij --session "$target" pipe --name agent-status \
+          --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
+      done
+    fi ;;
+esac
+
+# Cross-session transport. The pipe above only reaches this session's plugin, so
+# a panel elsewhere gets status from this file instead. Deliberately not a
+# subprocess and never blocking: this runs on the critical path of every turn.
 if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ended ]; then
   sdir=$(spool_dir)
   # Records hold task summaries, which are the user's own prompts, so on a

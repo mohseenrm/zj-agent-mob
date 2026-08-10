@@ -5,6 +5,7 @@ mod discover;
 mod host;
 mod install;
 mod keys;
+mod notify;
 mod plugin;
 mod ribbon;
 mod state;
@@ -33,6 +34,21 @@ pub(crate) const STALE_AFTER: f64 = 60.0;
 
 /// Shown in the pane frame instead of the full wasm path.
 pub(crate) const PANE_TITLE: &str = "Agent Mob";
+
+/// Longest reply the panel will compose. A one-line answer to a prompt, not a
+/// prose channel: the panel truncates for display, so an uncapped buffer would
+/// send far more than the line ever showed.
+pub(crate) const MAX_REPLY_CHARS: usize = 200;
+
+/// Ctrl-C. Interrupting a foreign pane goes through `zellij action write`,
+/// which takes bytes rather than a signal: there is no cross-session form of
+/// the plugin's own `send_sigint_to_pane_id`.
+pub(crate) const SIGINT_BYTE: u8 = 3;
+
+/// How long an agent may sit `waiting` before its row is painted as a fire
+/// rather than a state. Long enough that a prompt you are actively answering
+/// never escalates.
+pub(crate) const WAITING_ESCALATE_AFTER: f64 = 120.0;
 
 /// Stops a very wide pane from stretching a task summary across the screen.
 pub(crate) const MAX_WIDTH: usize = 120;

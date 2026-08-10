@@ -35,6 +35,19 @@ pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("q", "hide"),
 ];
 
+/// Shown while the selected agent is blocked on you, so the keys that type into
+/// its pane appear only when there is a prompt there to answer.
+pub(crate) const REPLY_HINTS: &[Hint] = &[
+    Hint::new("y", "yes"),
+    Hint::new("m", "message"),
+    Hint::new("\u{21b5}", "jump"),
+    Hint::new("x", "kill"),
+    Hint::new("q", "hide"),
+];
+
+/// The one-line editor owns the keyboard while it is up.
+pub(crate) const REPLY_EDIT_HINTS: &[Hint] = &[Hint::new("\u{21b5}", "send"), Hint::new("esc", "cancel")];
+
 /// Shown only while the selected agent has a permission prompt parked. Keeping
 /// approve and reject out of the default footer means they cannot be pressed
 /// by muscle memory when no prompt is waiting.
@@ -93,7 +106,14 @@ mod tests {
     /// into the action word for the multi-byte enter glyph.
     #[test]
     fn key_range_covers_the_key_only() {
-        for h in LIST_HINTS.iter().chain(INSTALL_HINTS).chain(SETUP_HINTS) {
+        for h in LIST_HINTS
+            .iter()
+            .chain(INSTALL_HINTS)
+            .chain(SETUP_HINTS)
+            .chain(ASK_HINTS)
+            .chain(REPLY_HINTS)
+            .chain(REPLY_EDIT_HINTS)
+        {
             let text = h.text();
             let r = h.key_range();
             let covered: String = text.chars().skip(r.start).take(r.end - r.start).collect();
@@ -109,7 +129,7 @@ mod tests {
 
     #[test]
     fn every_hint_has_a_distinct_key() {
-        for set in [LIST_HINTS, INSTALL_HINTS] {
+        for set in [LIST_HINTS, INSTALL_HINTS, ASK_HINTS, REPLY_HINTS, REPLY_EDIT_HINTS] {
             let mut keys: Vec<&str> = set.iter().map(|h| h.key).collect();
             keys.sort_unstable();
             let before = keys.len();
@@ -151,7 +171,14 @@ mod tests {
     /// pane instead of falling back to plain text.
     #[test]
     fn every_hint_row_fits_a_typical_pane_as_ribbons() {
-        for (name, set) in [("list", LIST_HINTS), ("setup", SETUP_HINTS), ("install", INSTALL_HINTS)] {
+        for (name, set) in [
+            ("list", LIST_HINTS),
+            ("setup", SETUP_HINTS),
+            ("install", INSTALL_HINTS),
+            ("ask", ASK_HINTS),
+            ("reply", REPLY_HINTS),
+            ("reply-edit", REPLY_EDIT_HINTS),
+        ] {
             assert!(
                 ribbon_width(set) <= 72,
                 "{} hints need {} columns; Zellij would silently drop one",

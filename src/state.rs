@@ -7,7 +7,7 @@ use crate::agent::{Agent, AgentId};
 use crate::host;
 use crate::install::Install;
 use crate::status::Status;
-use crate::{SPINNER, STALE_AFTER, TICK};
+use crate::{SIGINT_BYTE, SPINNER, STALE_AFTER, TICK};
 
 /// A permission prompt parked by a blocked hook, waiting on a verdict.
 pub(crate) struct Ask {
@@ -35,6 +35,13 @@ pub struct State {
     pub(crate) session_name: String,
     /// Every session Zellij currently lists, used to spot dead ones.
     pub(crate) live_sessions: Vec<String>,
+    /// Sanitized name -> the real one Zellij knows it by.
+    ///
+    /// Identity is sanitized so it can key a spool filename, but `zellij
+    /// --session` needs the name the user actually gave. A session called
+    /// "my session" is stored as `my_session` and addressing that fails, so the
+    /// two uses must not share a string.
+    pub(crate) session_names: BTreeMap<String, String>,
     /// A scan is in flight, so a second one would be wasted work.
     pub(crate) scan_pending: bool,
     /// Set by the first successful scan. Until then the panel has piped rows and
@@ -48,6 +55,25 @@ pub struct State {
     /// The plugin has no wall clock, so records are dated relative to each
     /// other rather than to a host time it cannot read.
     pub(crate) spool_epoch: f64,
+    pub(crate) notifier: crate::notify::Notifier,
+    /// The last summary published, so an unchanged fleet is not republished on
+    /// every tick.
+    pub(crate) last_summary: String,
+    pub(crate) summary_path: String,
+    /// A free-text reply being typed for the selected agent.
+    pub(crate) reply: Option<Reply>,
+    /// The last cross-session action that failed. Those run through the `zellij`
+    /// binary, so a failure is otherwise invisible: the row would vanish while
+    /// the agent kept running.
+    pub(crate) action_error: Option<String>,
+}
+
+/// A reply being composed in the panel, bound to the agent it will be sent to.
+/// Holding the id rather than an index means a re-sort mid-typing cannot
+/// redirect the text at another agent.
+pub(crate) struct Reply {
+    pub(crate) id: AgentId,
+    pub(crate) text: String,
 }
 
 impl State {
@@ -101,16 +127,72 @@ impl State {
             return;
         }
         // Foreign rows also need ticks, or one left mid-decay never reaches
-        // `unknown` because nothing else advances `now`.
-        let home = &self.session_name;
-        let needed = self
-            .agents
-            .iter()
-            .any(|a| a.status.is_active() || (a.id.session != *home && a.status.is_reported()));
+        // `unknown` because nothing else advances `now`. A blocked row needs
+        // them too: it animates nothing, so without this the clock stops and it
+        // can never reach the escalation threshold.
+        let (home, now) = (&self.session_name, self.now);
+        let needed = self.agents.iter().any(|a| {
+            a.status.is_active() || (a.id.session != *home && a.status.is_reported()) || a.escalation_pending(now)
+        });
         if needed {
             self.timer_running = true;
             host::set_timeout(TICK);
         }
+    }
+
+    /// Probes for a notifier binary once, after permissions land. Detection is
+    /// cached rather than repeated per notification.
+    pub(crate) fn detect_notifier(&mut self) {
+        if !self.permissions_granted || self.notifier.triggers.is_empty() || !self.notifier.binary.is_empty() {
+            return;
+        }
+        let mut ctx = BTreeMap::new();
+        ctx.insert(
+            crate::install::CTX_KEY.to_string(),
+            crate::notify::CTX_DETECT.to_string(),
+        );
+        host::run_command(&["sh", "-c", crate::notify::detect_script()], ctx);
+    }
+
+    /// Ticks regardless of whether any row is animating. A pending notification
+    /// or an escalating `waiting` row needs the clock to advance even when
+    /// every agent is sitting still.
+    pub(crate) fn force_timer(&mut self) {
+        if !self.timer_running {
+            self.timer_running = true;
+            host::set_timeout(TICK);
+        }
+    }
+
+    /// The one-line fleet summary status bars render. Published only when it
+    /// changes, so an idle fleet costs nothing.
+    pub(crate) fn summary_line(&self) -> String {
+        let (failed, waiting, working, done) = self.counts();
+        let mut parts = Vec::new();
+        for (n, label) in [
+            (failed, "failed"),
+            (waiting, "waiting"),
+            (working, "working"),
+            (done, "done"),
+        ] {
+            if n > 0 {
+                parts.push(format!("{} {}", n, label));
+            }
+        }
+        parts.join(" \u{b7} ")
+    }
+
+    /// Pushes the summary out to any status bar listening, when it has moved.
+    pub(crate) fn publish_summary(&mut self) {
+        if self.summary_path.is_empty() {
+            return;
+        }
+        let line = self.summary_line();
+        if line == self.last_summary {
+            return;
+        }
+        self.last_summary = line.clone();
+        host::publish_summary(&line, &self.summary_path);
     }
 
     /// Messages from before the hook carried `session=` fall back to the
@@ -123,6 +205,17 @@ impl State {
             .cloned()
             .unwrap_or_else(|| self.session_name.clone());
         Some(AgentId { session, pane_id })
+    }
+
+    /// The name Zellij knows a session by, which is what `--session` needs.
+    /// Falls back to the sanitized form when the session is not listed: it is
+    /// the best guess available, and is correct for every name that survives
+    /// sanitizing unchanged.
+    pub(crate) fn real_session(&self, sanitized: &str) -> String {
+        self.session_names
+            .get(sanitized)
+            .cloned()
+            .unwrap_or_else(|| sanitized.to_string())
     }
 
     /// Rows whose session is gone go `unknown` rather than disappearing.
@@ -179,8 +272,17 @@ impl State {
             let before = self.agents.len();
             self.agents.retain(|a| a.id != id);
             self.asks.retain(|k| k.id != id);
+            // Text aimed at an agent that just exited must not survive to be
+            // sent to whichever row inherits the selection.
+            if self.reply.as_ref().is_some_and(|r| r.id == id) {
+                self.reply = None;
+            }
             self.clamp_selection();
-            return self.agents.len() != before;
+            let removed = self.agents.len() != before;
+            if removed {
+                self.publish_summary();
+            }
+            return removed;
         }
 
         // Subagent and task events carry no status: they adjust counters on a row
@@ -200,9 +302,11 @@ impl State {
         let now = self.now;
 
         let newly_waiting;
+        let transitioned;
         if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
             let changed = agent.status != status;
             newly_waiting = changed && status == Status::Waiting;
+            transitioned = changed;
             if changed {
                 agent.status_since = now;
                 if status == Status::Working {
@@ -246,6 +350,7 @@ impl State {
             agent.last_report = now;
         } else {
             newly_waiting = status == Status::Waiting;
+            transitioned = true;
             self.agents.push(Agent {
                 id: id.clone(),
                 tool: args.get("tool").cloned().unwrap_or_else(|| "agent".into()),
@@ -270,7 +375,11 @@ impl State {
             });
         }
 
+        if transitioned {
+            self.queue_notification(&id, status);
+        }
         self.sort_agents();
+        self.publish_summary();
         self.arm_timer();
 
         if newly_waiting && self.popup_on_waiting && self.hidden {
@@ -281,6 +390,20 @@ impl State {
             host::show_self(true);
         }
         true
+    }
+
+    /// Queues a desktop notification for a transition, and arms the tick so the
+    /// coalescing window can close even when nothing else is animating.
+    fn queue_notification(&mut self, id: &AgentId, status: Status) {
+        let task = self
+            .agents
+            .iter()
+            .find(|a| &a.id == id)
+            .map(|a| a.display_task().to_string())
+            .unwrap_or_default();
+        if self.notifier.queue(id, status, &task, self.now) {
+            self.force_timer();
+        }
     }
 
     /// Applies a subagent / task-progress delta to an existing row. Counters are
@@ -359,6 +482,157 @@ impl State {
         true
     }
 
+    /// Interrupts an agent, in this session or another. The plugin's own shim
+    /// is session-local, so a foreign pane is reached through the `zellij`
+    /// binary, which does take a session.
+    pub(crate) fn interrupt_pane(&self, id: &AgentId, foreign: bool) {
+        match foreign {
+            true => host::session_action(
+                &self.real_session(&id.session),
+                &["write", &SIGINT_BYTE.to_string(), "--pane-id", &id.pane_id.to_string()],
+                "kill",
+            ),
+            false => host::send_sigint_to_pane_id(PaneId::Terminal(id.pane_id)),
+        }
+    }
+
+    pub(crate) fn close_pane(&self, id: &AgentId, foreign: bool) {
+        match foreign {
+            true => host::session_action(
+                &self.real_session(&id.session),
+                &["close-pane", "--pane-id", &id.pane_id.to_string()],
+                "kill",
+            ),
+            false => host::close_terminal_pane(id.pane_id),
+        }
+    }
+
+    /// Clears every `done` badge at once. With a fleet running, acknowledging
+    /// six finished agents one keypress at a time is its own chore.
+    pub(crate) fn dismiss_all_done(&mut self) -> bool {
+        let now = self.now;
+        let mut changed = false;
+        for agent in self.agents.iter_mut() {
+            if agent.status == Status::Done {
+                agent.status = Status::Idle;
+                agent.status_since = now;
+                changed = true;
+            }
+        }
+        if changed {
+            self.sort_agents();
+            self.publish_summary();
+        }
+        changed
+    }
+
+    /// Whether the selected agent can be typed into. Only a blocked agent: any
+    /// other state has no prompt waiting, so the keystrokes would land mid-turn
+    /// as stray input. A foreign row is reachable through the CLI.
+    pub(crate) fn can_reply_selected(&self) -> bool {
+        self.agents
+            .get(self.selected)
+            .map(|a| matches!(a.status, Status::Waiting | Status::IdleWait) && a.session_alive)
+            .unwrap_or(false)
+    }
+
+    /// Opens the one-line editor for a free-text reply.
+    pub(crate) fn begin_reply(&mut self) -> bool {
+        if !self.can_reply_selected() {
+            return false;
+        }
+        let Some(id) = self.agents.get(self.selected).map(|a| a.id.clone()) else {
+            return false;
+        };
+        self.reply = Some(Reply {
+            id,
+            text: String::new(),
+        });
+        true
+    }
+
+    /// Types into an agent's pane. The agent is left `working`: it has been
+    /// answered, and waiting for the next heartbeat to say so would leave a
+    /// stale `waiting` on screen.
+    ///
+    /// A composed reply is sent to the agent it was written for, not to whatever
+    /// the cursor holds now: another agent blocking mid-typing re-sorts the list
+    /// under the selection, and that must not redirect the text.
+    pub(crate) fn send_reply(&mut self, text: &str) -> bool {
+        let id = match self.reply.as_ref().map(|r| r.id.clone()) {
+            Some(id) => id,
+            None => match self.can_reply_selected() {
+                true => match self.agents.get(self.selected).map(|a| a.id.clone()) {
+                    Some(id) => id,
+                    None => return false,
+                },
+                false => return false,
+            },
+        };
+        // The bound agent must still be answerable; it may have moved on or
+        // exited while the reply was being typed.
+        let sendable = self
+            .agents
+            .iter()
+            .any(|a| a.id == id && matches!(a.status, Status::Waiting | Status::IdleWait) && a.session_alive);
+        if !sendable {
+            self.reply = None;
+            return false;
+        }
+        let foreign = !self.session_name.is_empty() && id.session != self.session_name;
+        match foreign {
+            true => host::session_action(
+                &self.real_session(&id.session),
+                &["write-chars", "--pane-id", &id.pane_id.to_string(), text],
+                "reply",
+            ),
+            false => host::write_chars_to_pane_id(text, PaneId::Terminal(id.pane_id)),
+        }
+        self.reply = None;
+        self.asks.retain(|a| a.id != id);
+        let now = self.now;
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+            agent.status = Status::Working;
+            agent.status_since = now;
+            agent.detail = Some("replied from panel".to_string());
+        }
+        self.sort_agents();
+        self.publish_summary();
+        self.arm_timer();
+        true
+    }
+
+    /// Opens a floating pane running an agent in the selected row's directory,
+    /// or the panel's own if there is no row to borrow one from.
+    pub(crate) fn spawn_agent(&mut self) -> bool {
+        let cwd = self
+            .agents
+            .get(self.selected)
+            .map(|a| a.cwd.clone())
+            .filter(|c| !c.is_empty());
+        let tool = self
+            .agents
+            .get(self.selected)
+            .map(|a| a.tool.clone())
+            .filter(|t| t == "claude" || t == "codex")
+            .unwrap_or_else(|| "claude".to_string());
+        host::open_command_pane_floating(
+            CommandToRun {
+                path: tool.into(),
+                args: Vec::new(),
+                cwd: cwd.map(Into::into),
+            },
+            None,
+            BTreeMap::new(),
+        );
+        // The pane opens as a command pane, so a missing binary surfaces in that
+        // pane with its own exit status rather than vanishing. Hiding the panel
+        // is what makes it visible.
+        self.hidden = true;
+        host::hide_self();
+        true
+    }
+
     /// Runs a scan unless one is already in flight, or discovery is switched off.
     pub(crate) fn request_scan(&mut self) {
         if self.scan_pending || !self.permissions_granted || !self.discover {
@@ -366,6 +640,10 @@ impl State {
         }
         self.scan_pending = true;
         crate::discover::dispatch();
+        // Refreshed alongside the scan so hooks elsewhere keep fanning urgent
+        // transitions to this panel while it is open.
+        let real = self.real_session(&self.session_name);
+        crate::discover::announce_panel(&self.session_name, &real);
     }
 
     /// Merges a process scan into the agent list.
@@ -409,6 +687,7 @@ impl State {
         if changed {
             self.clamp_selection();
             self.sort_agents();
+            self.publish_summary();
             self.arm_timer();
         }
         changed
@@ -479,6 +758,7 @@ impl State {
     fn apply_spool(&mut self, spooled: Vec<crate::discover::Spooled>) -> bool {
         let (home, now) = (self.session_name.clone(), self.now);
         let mut changed = false;
+        let mut transitions: Vec<(AgentId, Status, String)> = Vec::new();
         for rec in spooled {
             if rec.session == home {
                 continue;
@@ -512,10 +792,12 @@ impl State {
             }
             agent.spool_ts = rec.ts;
             let seen_at = now - age;
+            let mut transitioned = false;
             if agent.status != status {
                 agent.status = status;
                 agent.status_since = seen_at;
                 changed = true;
+                transitioned = true;
             }
             if let Some(t) = rec.args.get("task").filter(|t| !t.is_empty()) {
                 if agent.task.as_deref() != Some(t.as_str()) {
@@ -551,6 +833,17 @@ impl State {
                 agent.session_id = rec_sid.to_string();
             }
             agent.last_report = seen_at;
+            if transitioned {
+                let task = agent.display_task().to_string();
+                transitions.push((id, status, task));
+            }
+        }
+        // Queued after the loop: `agent` borrows `self.agents` mutably, and the
+        // notifier lives on `self`.
+        for (id, status, task) in transitions {
+            if self.notifier.queue(&id, status, &task, now) {
+                self.force_timer();
+            }
         }
         changed
     }
@@ -619,6 +912,15 @@ impl State {
         self.agents
             .sort_by(|a, b| a.status.rank().cmp(&b.status.rank()).then(a.id.cmp(&b.id)));
         self.clamp_selection();
+        let agents = &self.agents;
+        self.notifier.retain_known(|id| agents.iter().any(|a| &a.id == id));
+        // A reply loses its target when that agent's row goes away.
+        if let Some(r) = &self.reply {
+            let id = r.id.clone();
+            if !self.agents.iter().any(|a| a.id == id) {
+                self.reply = None;
+            }
+        }
     }
 
     pub(crate) fn clamp_selection(&mut self) {
@@ -1160,6 +1462,257 @@ mod tests {
         s.handle_status(&args(&[("pane_id", "5"), ("status", "idle")]));
         assert_eq!(s.counts(), (0, 1, 2, 1));
     }
+    fn notifying_state() -> State {
+        let mut s = state();
+        s.notifier.binary = "osascript".into();
+        s.notifier.cooldown = 60.0;
+        s
+    }
+
+    #[test]
+    fn a_transition_into_waiting_queues_a_notification() {
+        let mut s = notifying_state();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "working")]));
+        assert!(s.notifier.pending.is_empty(), "working is not notify-worthy");
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        assert_eq!(s.notifier.pending.len(), 1);
+    }
+
+    /// Heartbeats repeat the same status constantly; only the edge matters.
+    #[test]
+    fn a_repeated_status_does_not_requeue() {
+        let mut s = notifying_state();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        s.notifier.pending.clear();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        assert!(s.notifier.pending.is_empty(), "no transition, no notification");
+    }
+
+    /// The banner should name the work, which is what tells you whether to go.
+    #[test]
+    fn the_queued_notification_carries_the_task() {
+        let mut s = notifying_state();
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("status", "waiting"),
+            ("task", "Fix flaky checkout test"),
+        ]));
+        assert_eq!(s.notifier.pending[0].task, "Fix flaky checkout test");
+    }
+
+    /// A foreign agent blocking is exactly the case the panel cannot show you,
+    /// so it must notify like any other.
+    #[test]
+    fn a_foreign_agent_notifies_too() {
+        let mut s = notifying_state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
+        assert_eq!(s.notifier.pending.len(), 1);
+        assert_eq!(s.notifier.pending[0].id.session, "other");
+    }
+
+    /// With no notifier detected the whole path must stay inert rather than
+    /// queueing work that can never be sent.
+    #[test]
+    fn no_detected_notifier_queues_nothing() {
+        let mut s = state();
+        s.notifier.binary = "none".into();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        assert!(s.notifier.pending.is_empty());
+    }
+
+    /// A queued notification must keep the clock running on its own: nothing
+    /// else advances `now` when every agent is sitting still at `waiting`.
+    #[test]
+    fn queueing_arms_the_timer_with_no_active_agents() {
+        let mut s = notifying_state();
+        s.timer_running = false;
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        assert!(s.timer_running, "the flush window needs ticks to close");
+    }
+
+    /// An agent blocking in another session is precisely the case the panel
+    /// cannot show you, so the spool path must notify like the pipe does.
+    #[test]
+    fn a_foreign_agent_blocking_via_the_spool_notifies() {
+        let mut s = notifying_state();
+        s.apply_scan_result(crate::discover::Scan {
+            found: vec![crate::discover::Found {
+                session: "other".into(),
+                pane_id: 3,
+                tool: "claude".into(),
+            }],
+            spooled: vec![crate::discover::Spooled {
+                session: "other".into(),
+                pane_id: 3,
+                ts: 100.0,
+                args: [("status", "waiting"), ("task", "Fix it"), ("session", "other")]
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            }],
+            complete: true,
+        });
+        assert_eq!(s.notifier.pending.len(), 1, "a foreign block must reach you");
+        assert_eq!(s.notifier.pending[0].id.session, "other");
+        assert_eq!(s.notifier.pending[0].task, "Fix it");
+    }
+
+    /// Identity is sanitized so it can key a spool filename, but `zellij
+    /// --session` needs the name the user actually gave. Addressing the
+    /// sanitized form fails: the row vanishes from the panel while the agent
+    /// keeps running.
+    /// A cross-session kill runs through the `zellij` binary and the row is
+    /// removed optimistically, so a failure has to be said out loud: otherwise
+    /// the panel claims success while the agent keeps running.
+    #[test]
+    fn a_failed_cross_session_action_is_surfaced() {
+        use zellij_tile::prelude::ZellijPlugin;
+        let mut s = state();
+        let ctx: BTreeMap<String, String> = [("kind", "kill")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let rendered = s.update(zellij_tile::prelude::Event::RunCommandResult(
+            Some(1),
+            Vec::new(),
+            b"no session found".to_vec(),
+            ctx,
+        ));
+        assert!(rendered, "a failure must trigger a re-render");
+        let msg = s.action_error.as_deref().unwrap_or("");
+        assert!(msg.contains("kill failed"), "{:?}", msg);
+        assert!(
+            msg.contains("no session found"),
+            "the reason is the useful part: {:?}",
+            msg
+        );
+    }
+
+    /// Measured against zellij 0.44.3: addressing a session that does not exist
+    /// prints to stderr and still exits 0. Trusting the exit code alone would
+    /// miss exactly the failure this reporting exists for.
+    #[test]
+    fn a_zero_exit_with_stderr_still_counts_as_a_failure() {
+        use zellij_tile::prelude::ZellijPlugin;
+        let mut s = state();
+        let ctx: BTreeMap<String, String> = [("kind", "kill")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.update(zellij_tile::prelude::Event::RunCommandResult(
+            Some(0),
+            b"other-session [Created 1s ago]".to_vec(),
+            b"Session 'my_session' not found. The following sessions are active:".to_vec(),
+            ctx,
+        ));
+        let msg = s.action_error.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("kill failed"),
+            "exit 0 with stderr is a failure: {:?}",
+            msg
+        );
+    }
+
+    /// A successful action says nothing: the row disappearing is the feedback.
+    #[test]
+    fn a_successful_cross_session_action_is_silent() {
+        use zellij_tile::prelude::ZellijPlugin;
+        let mut s = state();
+        let ctx: BTreeMap<String, String> = [("kind", "reply")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.update(zellij_tile::prelude::Event::RunCommandResult(
+            Some(0),
+            Vec::new(),
+            Vec::new(),
+            ctx,
+        ));
+        assert!(s.action_error.is_none());
+    }
+
+    #[test]
+    fn addressing_uses_the_real_session_name_not_the_sanitized_key() {
+        let mut s = state();
+        s.session_names = [("my_session".to_string(), "my session".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(s.real_session("my_session"), "my session");
+    }
+
+    /// A name that survives sanitizing unchanged is its own real name, and an
+    /// unlisted session has nothing better to offer than the key itself.
+    #[test]
+    fn an_unmapped_session_falls_back_to_the_key() {
+        let s = state();
+        assert_eq!(s.real_session("plain-name"), "plain-name");
+    }
+
+    /// A local agent sitting at `waiting` animates nothing, so without an
+    /// explicit reason to tick, the clock freezes and the row can never reach
+    /// the escalation threshold. The escalation would be inert in the single-
+    /// session case, which is the common one.
+    #[test]
+    fn a_waiting_local_row_keeps_the_clock_running() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(
+            s.timer_running,
+            "a blocked row must keep ticking or it can never escalate"
+        );
+    }
+
+    /// Once escalated there is nothing further to count towards, so the clock
+    /// may stop again.
+    #[test]
+    fn an_already_escalated_row_does_not_hold_the_clock_open() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
+        s.now = crate::WAITING_ESCALATE_AFTER + 10.0;
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(!s.timer_running, "nothing left to wait for");
+    }
+
+    #[test]
+    fn the_summary_line_lists_only_non_zero_buckets() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        s.handle_status(&args(&[("pane_id", "2"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "working")]));
+        assert_eq!(s.summary_line(), "1 waiting \u{b7} 2 working");
+    }
+
+    #[test]
+    fn an_empty_fleet_summarises_to_nothing() {
+        assert_eq!(state().summary_line(), "");
+    }
+
+    /// Republishing an unchanged summary would spawn a subprocess every tick.
+    #[test]
+    fn the_summary_is_published_only_when_it_changes() {
+        let mut s = state();
+        s.summary_path = "/tmp/summary".into();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        s.publish_summary();
+        assert_eq!(s.last_summary, "1 waiting");
+        s.last_summary = "sentinel".into();
+        s.publish_summary();
+        assert_eq!(s.last_summary, "1 waiting", "a changed summary republishes");
+        s.publish_summary();
+        assert_eq!(s.last_summary, "1 waiting");
+    }
+
+    /// Unconfigured, the publish path must not run at all.
+    #[test]
+    fn no_summary_path_publishes_nothing() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        s.publish_summary();
+        assert!(s.last_summary.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -1459,16 +2012,31 @@ mod cross_session_tests {
         assert_eq!(s.agents[0].session(), "mob");
     }
 
+    /// A foreign row is killable, but only through the CLI: the plugin's own
+    /// shims act on the current session, so routing one at a foreign pane id
+    /// would signal an unrelated pane with the same number.
     #[test]
-    fn kill_is_refused_for_a_foreign_row() {
+    fn a_foreign_row_is_killable_through_the_cli_route() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
         s.selected = 0;
-        assert!(!s.can_kill_selected(), "x must not signal another session's pane");
+        assert!(s.can_kill_selected(), "a live foreign session can be reached");
+        assert!(s.selected_is_foreign(), "and must not use the session-local shims");
 
         s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
         s.selected = s.agents.iter().position(|a| a.session() == "mob").unwrap();
         assert!(s.can_kill_selected());
+        assert!(!s.selected_is_foreign(), "a home row uses the direct shim");
+    }
+
+    /// Nothing is left to signal once the session is gone, in either direction.
+    #[test]
+    fn kill_is_refused_once_the_session_is_dead() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.selected = 0;
+        s.apply_sessions(vec!["mob".into()]);
+        assert!(!s.can_kill_selected(), "a dead session has no pane to close");
     }
 
     /// Renders the real row-building path with a mixed list, which is what the
@@ -1720,11 +2288,19 @@ mod cross_session_tests {
         s.arm_timer();
         assert!(s.timer_running, "a foreign row must keep the clock running");
 
+        // A home `waiting` row also needs ticks now, but for its own reason:
+        // it must be able to reach the escalation threshold. Once past it there
+        // is nothing left to count towards and the clock may stop.
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "waiting")]));
         s.timer_running = false;
         s.arm_timer();
-        assert!(!s.timer_running, "a home row needs no clock: its hook refreshes it");
+        assert!(s.timer_running, "a blocked home row ticks until it escalates");
+
+        s.now = crate::WAITING_ESCALATE_AFTER + 1.0;
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(!s.timer_running, "already escalated: nothing left to wait for");
     }
 
     /// The widened `arm_timer` must not leave a panel ticking forever: once a

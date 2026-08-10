@@ -16,6 +16,16 @@ impl ZellijPlugin for State {
             .map(|v| v != "false")
             .unwrap_or(true);
         self.discover = configuration.get("discover").map(|v| v != "false").unwrap_or(true);
+        self.notifier.triggers = match configuration.get("notify") {
+            Some(spec) => crate::notify::Triggers::parse(spec),
+            None => crate::notify::Triggers::default(),
+        };
+        self.notifier.cooldown = configuration
+            .get("notify_cooldown")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(60.0);
+        self.notifier.sound = configuration.get("notify_sound").map(|v| v == "true").unwrap_or(false);
+        self.summary_path = configuration.get("summary_file").cloned().unwrap_or_default();
 
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -32,6 +42,8 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             // Carries the session name, which scopes the discovery scan.
             EventType::SessionUpdate,
+            // A notification is redundant while the panel is already on screen.
+            EventType::Visible,
         ]);
         set_selectable(true);
 
@@ -48,15 +60,28 @@ impl ZellijPlugin for State {
                 // fired from `load` is silently dropped.
                 self.install.refresh();
                 self.request_scan();
+                self.detect_notifier();
                 self.rename_pane();
                 true
+            }
+            Event::Visible(visible) => {
+                self.notifier.focused = visible;
+                false
             }
             Event::Timer(_) => {
                 self.timer_running = false;
                 self.frame = self.frame.wrapping_add(1);
                 self.now += TICK;
                 let aged = self.age_foreign_rows();
-                self.arm_timer();
+                self.notifier.flush(self.now);
+                self.publish_summary();
+                // A pending flush keeps the clock running on its own: the window
+                // must close even when no row is animating.
+                if self.notifier.flush_at.is_some() {
+                    self.force_timer();
+                } else {
+                    self.arm_timer();
+                }
                 aged || self.agents.iter().any(|a| a.status.is_active())
             }
             Event::PaneUpdate(manifest) => {
@@ -70,6 +95,12 @@ impl ZellijPlugin for State {
                 let live: Vec<String> = sessions
                     .iter()
                     .map(|s| crate::agent::sanitize_session(&s.name))
+                    .collect();
+                // The only place both spellings of a session name are known, so
+                // the only place the addressing map can be built.
+                self.session_names = sessions
+                    .iter()
+                    .map(|s| (crate::agent::sanitize_session(&s.name), s.name.clone()))
                     .collect();
                 let changed = self.apply_sessions(live);
                 let Some(name) = sessions
@@ -90,11 +121,43 @@ impl ZellijPlugin for State {
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 let out = String::from_utf8_lossy(&stdout);
                 let err = String::from_utf8_lossy(&stderr);
+                if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::notify::CTX_DETECT) {
+                    // A failed probe is recorded as `none` rather than left
+                    // empty, so it is not retried on every permission event.
+                    self.notifier.binary = match exit_code.unwrap_or(0) == 0 && !out.trim().is_empty() {
+                        true => out.trim().to_string(),
+                        false => "none".to_string(),
+                    };
+                    return false;
+                }
                 if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::discover::CTX_SCAN) {
                     self.scan_pending = false;
                     // A failed scan leaves the list exactly as it was: discovery
                     // is an enhancement, and hook-reported rows are the truth.
                     return exit_code.unwrap_or(0) == 0 && self.apply_scan_result(crate::discover::parse(&out));
+                }
+                // A cross-session action goes through the `zellij` binary, so
+                // its failure is the plugin's only evidence that a kill or a
+                // reply did not land. Saying nothing would leave the panel
+                // claiming success while the agent keeps running.
+                if let Some(kind) = context.get("kind").filter(|k| *k == "kill" || *k == "reply") {
+                    // `zellij` exits 0 even when the session does not exist and
+                    // reports it on stderr, so the exit code alone would miss
+                    // precisely the failure this exists to catch.
+                    let detail = err.lines().next().unwrap_or("").trim();
+                    let failed = exit_code.unwrap_or(0) != 0 || !detail.is_empty();
+                    if failed {
+                        let what = match kind.as_str() {
+                            "kill" => "kill",
+                            _ => "reply",
+                        };
+                        self.action_error = Some(match detail.is_empty() {
+                            true => format!("{} failed in the other session", what),
+                            false => format!("{} failed: {}", what, crate::util::truncate(detail, 70)),
+                        });
+                        return true;
+                    }
+                    return false;
                 }
                 self.install.on_command_result(exit_code, &out, &err, &context)
             }
@@ -175,6 +238,18 @@ pub(crate) fn ask_rows(ask: &crate::state::Ask, cols: usize) -> Vec<Text> {
     );
     rows.push(Text::new(format!("{}\u{2514}{}\u{2518}", INDENT, bar)).color_range(DIM_LEVEL, ..));
     rows
+}
+
+/// The one-line reply editor, indented under the agent it will be sent to. A
+/// block cursor marks where typing lands, since Zellij owns the real one.
+pub(crate) fn reply_row(text: &str, cols: usize) -> Text {
+    const INDENT: &str = "      ";
+    const PROMPT: &str = "\u{2514} reply: ";
+    let room = cols.saturating_sub(INDENT.len() + chars(PROMPT) + 1);
+    let shown = truncate(text, room);
+    let line = format!("{}{}{}\u{2588}", INDENT, PROMPT, shown);
+    let at = chars(INDENT)..chars(INDENT) + chars(PROMPT);
+    Text::new(line).color_range(2, at)
 }
 
 impl State {
@@ -295,16 +370,28 @@ impl State {
                 if let Some(ask) = self.ask_for(&agent.id) {
                     items.extend(ask_rows(ask, width));
                 }
+                if let Some(reply) = self.reply.as_ref().filter(|r| r.id == agent.id) {
+                    items.push(reply_row(&reply.text, width));
+                }
             }
         }
         y = self.render_rows(items, y);
         y = self.render_rule(y, width);
+        // A cross-session action that failed is the one thing here the panel
+        // cannot show any other way: the row is already gone.
+        if let Some(msg) = self.action_error.as_deref() {
+            y = self.render_notes(Some((msg.to_string(), true)), y, width);
+        }
         let selected_has_ask = self
             .agents
             .get(self.selected)
             .is_some_and(|a| self.ask_for(&a.id).is_some());
-        let hints = if selected_has_ask {
+        let hints = if self.reply.is_some() {
+            ribbon::REPLY_EDIT_HINTS
+        } else if selected_has_ask {
             ribbon::ASK_HINTS
+        } else if self.can_reply_selected() {
+            ribbon::REPLY_HINTS
         } else {
             ribbon::LIST_HINTS
         };
@@ -379,5 +466,38 @@ impl State {
         // Width `None`: the sized variant stretches the FIRST ribbon to fill it
         // and shoves the rest to the far edge.
         print!("{}", serialize_ribbon_line_with_coordinates(&texts, 0, y, None, None));
+    }
+}
+
+#[cfg(test)]
+mod reply_row_tests {
+    use crate::util::testing::item_text;
+
+    /// A line that overflows the pane wraps and eats the row below it, which
+    /// desyncs every coordinate after it.
+    #[test]
+    fn the_reply_row_never_exceeds_the_pane_width() {
+        let long = "y".repeat(crate::MAX_REPLY_CHARS);
+        for cols in [30usize, 40, 60, 80, 110] {
+            for text in ["", "yes", long.as_str()] {
+                let row = item_text(&super::reply_row(text, cols));
+                assert!(
+                    row.chars().count() <= cols,
+                    "cols={} text_len={} produced {:?}",
+                    cols,
+                    text.len(),
+                    row
+                );
+            }
+        }
+    }
+
+    /// The cursor block is what shows where typing lands.
+    #[test]
+    fn the_reply_row_shows_a_prompt_and_cursor() {
+        let row = item_text(&super::reply_row("yes", 60));
+        assert!(row.contains("reply:"), "{:?}", row);
+        assert!(row.contains("yes"), "{:?}", row);
+        assert!(row.ends_with('\u{2588}'), "{:?}", row);
     }
 }

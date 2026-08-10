@@ -3,8 +3,8 @@
 
 #[cfg(target_family = "wasm")]
 pub(crate) use zellij_tile::shim::{
-    close_terminal_pane, focus_terminal_pane, hide_self, run_command, send_sigint_to_pane_id, set_timeout, show_self,
-    switch_session_with_focus,
+    close_terminal_pane, focus_terminal_pane, hide_self, open_command_pane_floating, run_command,
+    send_sigint_to_pane_id, set_timeout, show_self, switch_session_with_focus, write_chars_to_pane_id,
 };
 
 /// Renames the pane this plugin is running in. Needs our own plugin id, which
@@ -29,10 +29,85 @@ pub(crate) fn write_verdict(path: &str, verdict: &str) {
     run_command(&["sh", "-c", "printf '%s' \"$1\" > \"$2\"", "sh", verdict, path], ctx);
 }
 
+/// Fires a desktop notification through whichever notifier was detected.
+///
+/// The message carries task summaries and tool arguments, both of which come
+/// from arbitrary repo content, so every one is its own argv element and none
+/// is ever interpolated into a string a shell parses. `osascript` has no argv
+/// form for `display notification`, so its text is bound to a variable via
+/// `on run argv` instead of being spliced into the script.
+#[cfg(target_family = "wasm")]
+pub(crate) fn notify(notifier: &str, title: &str, body: &str, sound: bool) {
+    let mut ctx = std::collections::BTreeMap::new();
+    ctx.insert("kind".to_string(), "notify".to_string());
+    match notifier {
+        "osascript" => {
+            let script = match sound {
+                true => "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv) sound name \"Ping\"\nend run",
+                false => "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run",
+            };
+            run_command(&["osascript", "-e", script, title, body], ctx);
+        }
+        "terminal-notifier" => {
+            run_command(
+                &[
+                    "terminal-notifier",
+                    "-title",
+                    title,
+                    "-message",
+                    body,
+                    "-group",
+                    "zj-agent-mob",
+                ],
+                ctx,
+            );
+        }
+        "notify-send" => {
+            run_command(&["notify-send", "-a", "zj-agent-mob", title, body], ctx);
+        }
+        _ => {}
+    }
+}
+
+/// Acts on a pane in another Zellij session by shelling out to the `zellij`
+/// binary, which takes a session argument where the plugin shims cannot.
+/// Every value is its own argv element.
+#[cfg(target_family = "wasm")]
+pub(crate) fn session_action(session: &str, args: &[&str], kind: &str) {
+    let mut ctx = std::collections::BTreeMap::new();
+    ctx.insert("kind".to_string(), kind.to_string());
+    let mut argv = vec!["zellij", "--session", session, "action"];
+    argv.extend_from_slice(args);
+    run_command(&argv, ctx);
+}
+
+/// Publishes the one-line fleet summary for status bars to render. `zellij pipe`
+/// with no `--plugin` reaches every listening plugin, and the spool file serves
+/// consumers that are not plugins at all.
+#[cfg(target_family = "wasm")]
+pub(crate) fn publish_summary(summary: &str, path: &str) {
+    let mut ctx = std::collections::BTreeMap::new();
+    ctx.insert("kind".to_string(), "summary".to_string());
+    run_command(
+        &[
+            "sh",
+            "-c",
+            // The summary reaches a file and a pipe, so it is bound as a
+            // positional rather than spliced into the command string.
+            "printf '%s' \"$1\" > \"$2.tmp\" 2>/dev/null && mv -f \"$2.tmp\" \"$2\" 2>/dev/null; \
+             command -v zellij >/dev/null 2>&1 && zellij pipe --name zj-agent-mob-summary -- \"$1\" >/dev/null 2>&1 || true",
+            "sh",
+            summary,
+            path,
+        ],
+        ctx,
+    );
+}
+
 #[cfg(not(target_family = "wasm"))]
 mod stub {
     use std::collections::BTreeMap;
-    use zellij_tile::prelude::PaneId;
+    use zellij_tile::prelude::{CommandToRun, FloatingPaneCoordinates, PaneId};
     pub(crate) fn set_timeout(_secs: f64) {}
     pub(crate) fn show_self(_float: bool) {}
     pub(crate) fn hide_self() {}
@@ -43,6 +118,17 @@ mod stub {
     pub(crate) fn switch_session_with_focus(_name: &str, _tab: Option<usize>, _pane: Option<(u32, bool)>) {}
     pub(crate) fn rename_own_pane(_title: &str) {}
     pub(crate) fn write_verdict(_path: &str, _verdict: &str) {}
+    pub(crate) fn notify(_notifier: &str, _title: &str, _body: &str, _sound: bool) {}
+    pub(crate) fn session_action(_session: &str, _args: &[&str], _kind: &str) {}
+    pub(crate) fn publish_summary(_summary: &str, _path: &str) {}
+    pub(crate) fn write_chars_to_pane_id(_chars: &str, _id: PaneId) {}
+    pub(crate) fn open_command_pane_floating(
+        _cmd: CommandToRun,
+        _coords: Option<FloatingPaneCoordinates>,
+        _ctx: BTreeMap<String, String>,
+    ) -> Option<PaneId> {
+        None
+    }
 }
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use stub::*;

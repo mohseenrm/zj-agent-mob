@@ -46,6 +46,13 @@ pub(crate) fn scan_script(tools: &[&str]) -> String {
 SPOOL_DIR="${{ZJ_AGENT_SPOOL_DIR:-${{TMPDIR:-/tmp}}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}}"
 grep -s -H '' "$SPOOL_DIR"/* 2>/dev/null | sed 's/^/SPOOL /'
 find "$SPOOL_DIR" -type f -mtime +1 -delete 2>/dev/null
+# Beacons for panels that are gone, so fan-out stops chasing a session with
+# nothing listening. The window is generous on purpose: a beacon is refreshed
+# only when a scan runs, and a scan runs on pane and session events rather than
+# on a schedule, so a quiet panel can legitimately go a long time without one.
+# Sweeping too eagerly would silently switch fan-out off for an idle panel,
+# which is the case it exists for. A stale beacon costs one wasted pipe.
+find "$SPOOL_DIR" -name 'panel.*' -type f -mmin +720 -delete 2>/dev/null
 printf 'SCANEND\n'"#
     )
 }
@@ -54,6 +61,31 @@ pub(crate) fn dispatch() {
     let mut ctx = BTreeMap::new();
     ctx.insert(crate::install::CTX_KEY.to_string(), CTX_SCAN.to_string());
     host::run_command(&["sh", "-c", &scan_script(&TOOLS)], ctx);
+}
+
+/// Announces that a panel is open in this session, so hooks elsewhere know to
+/// fan their urgent transitions out to it. Refreshed on every scan: a stale
+/// beacon costs one wasted `zellij pipe`, and the sweep clears it eventually.
+///
+/// The filename is the sanitized name, so it is safe on any filesystem and can
+/// be compared against the hook's own `$SESSION`. The *contents* are the real
+/// name, because that is what `zellij --session` needs and sanitizing is lossy:
+/// a session called "my session" is keyed `my_session`, which addresses nothing.
+///
+/// Both are passed as positionals rather than spliced into the command.
+pub(crate) fn beacon_script() -> &'static str {
+    "d=\"${ZJ_AGENT_SPOOL_DIR:-${TMPDIR:-/tmp}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}\"; \
+     [ -d \"$d\" ] || { mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; }; \
+     [ -n \"$1\" ] && printf '%s' \"$2\" > \"$d/panel.$1\" 2>/dev/null || true"
+}
+
+pub(crate) fn announce_panel(sanitized: &str, real: &str) {
+    if sanitized.is_empty() {
+        return;
+    }
+    let mut ctx = BTreeMap::new();
+    ctx.insert(crate::install::CTX_KEY.to_string(), "panel-beacon".to_string());
+    host::run_command(&["sh", "-c", beacon_script(), "sh", sanitized, real], ctx);
 }
 
 /// A `session pane_id tool` triple from the scan.
@@ -130,6 +162,10 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 // A half-written record is still named `.tmp`; the rename into
                 // place is what publishes it.
                 if name.ends_with(".tmp") {
+                    continue;
+                }
+                // Panel beacons share the directory but are not agent records.
+                if name.starts_with("panel.") {
                     continue;
                 }
                 // First line wins: a file with more is malformed, and later

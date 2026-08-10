@@ -8,6 +8,8 @@
 - [An agent in another Zellij session shows `found` but never live status](#an-agent-in-another-zellij-session-shows-found-but-never-live-status)
 - [Task text from other sessions is visible to other users](#task-text-from-other-sessions-is-visible-to-other-users)
 - [<kbd>x</kbd> does nothing on an agent from another session](#x-does-nothing-on-an-agent-from-another-session)
+- [<kbd>y</kbd> / <kbd>m</kbd> do nothing](#y--m-do-nothing)
+- [No desktop notifications](#no-desktop-notifications)
 - [A row says `unknown` / `(session exited)`](#a-row-says-unknown--session-exited)
 - [The install screen says "Installer not found"](#the-install-screen-says-installer-not-found)
 - [The install screen shows `?` / "unknown" for everything](#the-install-screen-shows---unknown-for-everything)
@@ -112,9 +114,9 @@ firing. Work through these in order:
 
 ## An agent in another Zellij session shows `found` but never live status
 
-Agents in other sessions report status through a file in `$TMPDIR` rather than the pipe, which
-reaches only their own session. A row stuck on `found` means that file is missing or not being
-read. In order:
+Agents in other sessions report status through a file in `$TMPDIR`, plus a direct pipe for the
+states that need you. A row stuck on `found` means that file is missing or not being read. In
+order:
 
 1. **Was the agent restarted since the spool shipped?** The hook is read at session start, so an
    agent started with an older hook writes nothing. This is the usual cause.
@@ -151,9 +153,45 @@ that agent's own session keeps working through the pipe.
 
 ## <kbd>x</kbd> does nothing on an agent from another session
 
-Deliberate. Zellij's interrupt and close-pane calls act on the *current* session only, and pane ids
-repeat across sessions - so signalling pane 3 from here would hit this session's pane 3, not the
-one on the row. Press <kbd>Enter</kbd> to jump there first, then <kbd>x</kbd>.
+Foreign rows are killed through the `zellij` binary rather than the plugin's own calls, which act
+on the current session only. So this means one of:
+
+1. **The row's session has exited.** <kbd>x</kbd> is refused when there is no process left to
+   signal; the row reads `unknown` / `(session exited)`.
+2. **`zellij` is not on the panel's `PATH`.** The plugin shells out to it for foreign rows. It is
+   the same binary the hook needs, so this usually shows up as nothing reporting at all.
+
+A cross-session action that fails prints the reason under the list (`kill failed: ...`) rather
+than silently removing the row, so check there first. Jumping with <kbd>Enter</kbd> and pressing
+<kbd>x</kbd> locally always works.
+
+## <kbd>y</kbd> / <kbd>m</kbd> do nothing
+
+They only act while the selected agent is actually blocked (`waiting` or `idle-wait`), and the
+footer shows `y yes  m message` only then. Typing into an agent mid-turn would land as stray input
+in its prompt, so the keys are inert for every other status.
+
+## No desktop notifications
+
+In order:
+
+1. **Is a notifier installed?** The plugin probes for `terminal-notifier`, then `osascript`, then
+   `notify-send`. On macOS `osascript` is always present; on Linux install `notify-send`
+   (`libnotify-bin`). With none of them, notifications are silently disabled.
+2. **Is the panel already on screen?** Notifications are suppressed while it is visible, since it
+   is already telling you.
+3. **Did the same agent just notify?** Each agent is limited to one notification per
+   `notify_cooldown` seconds (default 60), so a flapping row cannot spam you.
+4. **Is the status one you asked about?** The default is `waiting,failed`. `done` is opt-in via
+   `notify "waiting,failed,done"`.
+5. **Are notifications allowed at the OS level?** On macOS, check System Settings > Notifications
+   for your terminal. Verify the exact call the plugin makes:
+
+   ```sh
+   osascript -e 'on run argv
+   display notification (item 2 of argv) with title (item 1 of argv)
+   end run' 'zj-agent-mob' 'test'
+   ```
 
 ## A row says `unknown` / `(session exited)`
 
