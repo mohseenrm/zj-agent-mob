@@ -44,6 +44,10 @@ pub struct State {
     pub(crate) session_names: BTreeMap<String, String>,
     /// A scan is in flight, so a second one would be wasted work.
     pub(crate) scan_pending: bool,
+    /// `now` at the last scan dispatch, which paces the spool poll. Stamped on
+    /// dispatch rather than on the result, so a scan that never returns cannot
+    /// wedge the poll; `scan_pending` is what prevents overlap.
+    pub(crate) last_scan_at: f64,
     /// Set by the first successful scan. Until then the panel has piped rows and
     /// no cross-session evidence at all, so culling would wipe them.
     pub(crate) scan_completed: bool,
@@ -55,6 +59,8 @@ pub struct State {
     /// The plugin has no wall clock, so records are dated relative to each
     /// other rather than to a host time it cannot read.
     pub(crate) spool_epoch: f64,
+    /// `now` when `spool_epoch` last advanced, so a frozen epoch still ages.
+    pub(crate) spool_epoch_at: f64,
     pub(crate) notifier: crate::notify::Notifier,
     /// The last summary published, so an unchanged fleet is not republished on
     /// every tick.
@@ -126,14 +132,17 @@ impl State {
         if self.timer_running {
             return;
         }
-        // Foreign rows also need ticks, or one left mid-decay never reaches
-        // `unknown` because nothing else advances `now`. A blocked row needs
-        // them too: it animates nothing, so without this the clock stops and it
-        // can never reach the escalation threshold.
+        // Foreign rows need ticks whatever their status: the clock is what
+        // paces the spool poll, and an `unknown` row is precisely the one the
+        // poll exists to recover. A row whose session is gone is excluded -
+        // nothing can refresh it, so it would hold the clock open forever.
+        // A blocked row needs ticks too: it animates nothing, so without this
+        // the clock stops and it can never reach the escalation threshold.
         let (home, now) = (&self.session_name, self.now);
-        let needed = self.agents.iter().any(|a| {
-            a.status.is_active() || (a.id.session != *home && a.status.is_reported()) || a.escalation_pending(now)
-        });
+        let needed = self
+            .agents
+            .iter()
+            .any(|a| a.status.is_active() || (a.id.session != *home && a.session_alive) || a.escalation_pending(now));
         if needed {
             self.timer_running = true;
             host::set_timeout(TICK);
@@ -242,9 +251,32 @@ impl State {
         changed
     }
 
-    /// A foreign row's status is a snapshot: the hook only pipes into its own
-    /// session, so nothing refreshes it. Past `STALE_AFTER` the panel says
-    /// `unknown` rather than keeping a `working` it can no longer vouch for.
+    /// One clock tick. Lives here rather than in the `Timer` arm so the poll it
+    /// drives is testable: `host` calls no-op off-wasm, so a dispatch is only
+    /// observable through `scan_pending` / `last_scan_at`.
+    pub(crate) fn on_tick(&mut self) -> bool {
+        self.timer_running = false;
+        self.frame = self.frame.wrapping_add(1);
+        self.now += TICK;
+        if self.spool_poll_due() {
+            self.request_scan();
+        }
+        let aged = self.age_foreign_rows();
+        self.notifier.flush(self.now);
+        self.publish_summary();
+        // A pending flush keeps the clock running on its own: the window must
+        // close even when no row is animating.
+        if self.notifier.flush_at.is_some() {
+            self.force_timer();
+        } else {
+            self.arm_timer();
+        }
+        aged || self.agents.iter().any(|a| a.status.is_active())
+    }
+
+    /// A foreign row's status is a snapshot. Past `STALE_AFTER` with nothing
+    /// refreshing it, the panel says `unknown` rather than keeping a `working`
+    /// it can no longer vouch for. The spool poll is what refreshes it.
     pub(crate) fn age_foreign_rows(&mut self) -> bool {
         let (now, home) = (self.now, self.session_name.clone());
         let mut changed = false;
@@ -633,12 +665,29 @@ impl State {
         true
     }
 
+    /// Whether the spool is due a re-read.
+    ///
+    /// The spool is the only thing that refreshes a foreign row's status, and
+    /// nothing else polls it: `request_scan` is otherwise driven by pane and
+    /// session events, which do not fire while an agent is merely working. So
+    /// without this a foreign row decays to `unknown` and never recovers.
+    ///
+    /// Gated on a foreign row existing, so a single-session panel pays nothing.
+    pub(crate) fn spool_poll_due(&self) -> bool {
+        if self.scan_pending || self.now - self.last_scan_at < crate::SPOOL_POLL_INTERVAL {
+            return false;
+        }
+        let home = &self.session_name;
+        self.agents.iter().any(|a| a.id.session != *home && a.session_alive)
+    }
+
     /// Runs a scan unless one is already in flight, or discovery is switched off.
     pub(crate) fn request_scan(&mut self) {
         if self.scan_pending || !self.permissions_granted || !self.discover {
             return;
         }
         self.scan_pending = true;
+        self.last_scan_at = self.now;
         crate::discover::dispatch();
         // Refreshed alongside the scan so hooks elsewhere keep fanning urgent
         // transitions to this panel while it is open.
@@ -680,6 +729,7 @@ impl State {
         for rec in &scan.spooled {
             if rec.ts > self.spool_epoch {
                 self.spool_epoch = rec.ts;
+                self.spool_epoch_at = self.now;
             }
         }
         let mut changed = self.merge_found(scan.found);
@@ -777,21 +827,37 @@ impl State {
             if !rec_sid.is_empty() && !row_sid.is_empty() && rec_sid != row_sid {
                 continue;
             }
-            let age = self.spool_age(rec.ts);
-            if age >= STALE_AFTER {
-                continue;
-            }
             let Some(status) = rec.args.get("status").and_then(|s| Status::parse(s)) else {
                 continue;
             };
+            let age = self.spool_age(rec.ts);
             let agent = &mut self.agents[idx];
+
+            // A blocked or idle agent writes nothing while it sits there, so
+            // its record stops advancing and eventually ages past STALE_AFTER.
+            // Re-reading it is still evidence: the process scan says the agent
+            // is alive, and silence is exactly what these states predict. So a
+            // re-read re-confirms a status the row already holds - it can never
+            // change one. Without this a foreign `waiting` row decays to
+            // `unknown` while the agent is blocked on you, which is the one row
+            // the panel exists to show.
+            let reconfirms = agent.status == status && status.persists_while_quiet();
+            if age >= STALE_AFTER && !reconfirms {
+                continue;
+            }
+            let seen_at = match reconfirms {
+                true => now,
+                false => now - age,
+            };
             // Records are compared in their own epoch units; `last_report` is on
             // the panel's tick clock and the two are not comparable.
             if rec.ts <= agent.spool_ts {
+                if reconfirms {
+                    agent.last_report = seen_at;
+                }
                 continue;
             }
             agent.spool_ts = rec.ts;
-            let seen_at = now - age;
             let mut transitioned = false;
             if agent.status != status {
                 agent.status = status;
@@ -848,13 +914,17 @@ impl State {
         changed
     }
 
-    /// Wall-clock age of a spool record, in the panel's own tick units.
+    /// Age of a spool record, in the panel's own tick units.
     ///
-    /// The panel has no clock: `now` counts ticks since load. So the newest
-    /// record seen is treated as "now" and everything else measured back from
-    /// it, which needs no host time call and is immune to clock skew.
+    /// The panel has no clock: `now` counts ticks since load. So a record is
+    /// dated as how far it sat behind the newest record in its batch, plus how
+    /// long ago that batch arrived. Anchoring to `now` is what makes a fleet
+    /// that has gone entirely quiet age out: without it `spool_epoch` freezes
+    /// and the last record read as current forever, fighting the tick-clock
+    /// decay in `age_foreign_rows`.
     fn spool_age(&self, ts: f64) -> f64 {
-        (self.spool_epoch.max(ts) - ts).max(0.0)
+        let behind = (self.spool_epoch.max(ts) - ts).max(0.0);
+        behind + (self.now - self.spool_epoch_at).max(0.0)
     }
 
     pub(crate) fn handle_label(&mut self, args: &BTreeMap<String, String>) -> bool {
@@ -2303,10 +2373,11 @@ mod cross_session_tests {
         assert!(!s.timer_running, "already escalated: nothing left to wait for");
     }
 
-    /// The widened `arm_timer` must not leave a panel ticking forever: once a
-    /// foreign row has decayed there is nothing left for the clock to do.
+    /// A decayed foreign row must keep ticking: the clock is what paces the
+    /// spool poll, and that poll is the only thing that can bring the row back.
+    /// Stopping here is what stranded foreign rows on `unknown`.
     #[test]
-    fn the_clock_stops_once_foreign_rows_have_decayed() {
+    fn a_decayed_foreign_row_keeps_the_clock_running() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
         s.timer_running = false;
@@ -2315,6 +2386,23 @@ mod cross_session_tests {
 
         s.now = STALE_AFTER;
         assert!(s.age_foreign_rows());
+        assert_eq!(s.agents[0].status, Status::Unknown);
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(s.timer_running, "the poll still needs ticks to recover it");
+    }
+
+    /// The permanent-wakeup guard, rehomed onto the condition that actually
+    /// means "nothing can refresh this": the session is gone, so no spool
+    /// record will ever arrive and there is nothing left for the clock to do.
+    #[test]
+    fn a_dead_sessions_row_does_not_hold_the_clock_open() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
+        s.apply_sessions(vec!["mob".to_string()]);
+        assert!(!s.agents[0].session_alive);
+
+        s.now = STALE_AFTER;
         s.timer_running = false;
         s.arm_timer();
         assert!(!s.timer_running, "no permanent wakeup");
@@ -2698,6 +2786,39 @@ mod cross_session_tests {
         assert_eq!(a.session_id, "uuid-xyz");
         assert_eq!(a.project(), "web");
 
+        // The blocked agent now writes nothing, exactly as a real one waiting on
+        // a prompt does. Re-scanning the unchanged file must keep the row
+        // `waiting` well past STALE_AFTER: before the poll and the re-confirm
+        // rule this decayed to `unknown` while the agent sat there blocked.
+        let rescan = || {
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env("ZJ_AGENT_SPOOL_DIR", &spool)
+                .output()
+                .expect("scan runs");
+            crate::discover::parse(&String::from_utf8_lossy(&out.stdout))
+        };
+        for _ in 0..20 {
+            s.now += crate::SPOOL_POLL_INTERVAL;
+            assert!(s.spool_poll_due() || s.scan_pending, "the poll stays due");
+            s.last_scan_at = s.now;
+            let again = rescan();
+            assert_eq!(again.spooled.len(), 1, "the record is still on disk");
+            s.apply_scan_result(crate::discover::Scan {
+                found: found(&[("other", 7)]),
+                spooled: again.spooled,
+                complete: true,
+            });
+            s.age_foreign_rows();
+        }
+        assert!(s.now > STALE_AFTER, "past the decay threshold");
+        assert_eq!(
+            s.agents[0].status,
+            Status::Waiting,
+            "a blocked foreign agent stays visible"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2769,5 +2890,213 @@ mod cross_session_tests {
         };
         assert!(s.ask_for(&home).is_none());
         assert!(s.ask_for(&foreign).is_some());
+    }
+
+    /// The headline regression: a foreign agent that keeps working must keep
+    /// reading `working`. Nothing but the poll refreshes it, so before the poll
+    /// existed this row decayed to `unknown` after a minute and stayed there.
+    #[test]
+    fn a_foreign_row_refreshed_by_the_poll_does_not_decay() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let mut ts = 100.0_f64;
+        for _ in 0..8 {
+            s.now += crate::SPOOL_POLL_INTERVAL * 4.0;
+            ts += crate::SPOOL_POLL_INTERVAL * 4.0;
+            s.apply_scan_result(scan_with(
+                found(&[("other", 3)]),
+                vec![spool(&[
+                    ("ts", &ts.to_string()),
+                    ("pane_id", "3"),
+                    ("session", "other"),
+                    ("status", "working"),
+                ])],
+            ));
+            s.age_foreign_rows();
+        }
+        assert!(s.now > STALE_AFTER * 2.0, "well past the decay threshold");
+        assert_eq!(s.agents[0].status, Status::Working);
+    }
+
+    /// With the epoch frozen, ages were measured against a reference that never
+    /// moved, so the last record read as current forever and fought the
+    /// tick-clock decay in `age_foreign_rows`.
+    #[test]
+    fn a_frozen_spool_epoch_still_ages_records() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let rec = || {
+            spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "working"),
+            ])
+        };
+        assert!(s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()])));
+        assert_eq!(s.agents[0].status, Status::Working);
+
+        s.agents[0].status = Status::Unknown;
+        s.now += STALE_AFTER;
+        assert!(
+            !s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()])),
+            "a record that has not moved in STALE_AFTER is stale, epoch frozen or not"
+        );
+        assert_eq!(s.agents[0].status, Status::Unknown);
+    }
+
+    /// A blocked agent writes nothing while it waits, so its record never
+    /// advances. Re-reading it still confirms the state: silence is what
+    /// `waiting` predicts.
+    #[test]
+    fn a_quiet_waiting_foreign_row_survives_the_poll() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let rec = || {
+            spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "waiting"),
+            ])
+        };
+        s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+        assert_eq!(s.agents[0].status, Status::Waiting);
+
+        for _ in 0..20 {
+            s.now += crate::SPOOL_POLL_INTERVAL;
+            s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+            s.age_foreign_rows();
+        }
+        assert!(s.now > STALE_AFTER, "past the decay threshold");
+        assert_eq!(s.agents[0].status, Status::Waiting, "still blocked on you");
+    }
+
+    /// The other half of the rule: `working` claims active progress, and an
+    /// unchanging record is evidence against it rather than for it.
+    #[test]
+    fn a_quiet_working_foreign_row_still_decays() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let rec = || {
+            spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "working"),
+            ])
+        };
+        s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+        assert_eq!(s.agents[0].status, Status::Working);
+
+        for _ in 0..20 {
+            s.now += crate::SPOOL_POLL_INTERVAL;
+            s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+            s.age_foreign_rows();
+        }
+        assert_eq!(s.agents[0].status, Status::Unknown);
+    }
+
+    #[test]
+    fn the_poll_fires_on_a_cadence_only_while_a_foreign_row_exists() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+        s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
+        assert!(!s.spool_poll_due(), "a home-only panel never polls");
+
+        s.apply_scan(found(&[("other", 3)]));
+        s.last_scan_at = s.now;
+        assert!(!s.spool_poll_due(), "not due yet");
+
+        s.now += crate::SPOOL_POLL_INTERVAL;
+        assert!(s.spool_poll_due());
+
+        s.scan_pending = true;
+        assert!(!s.spool_poll_due(), "a scan is already in flight");
+    }
+
+    /// Nothing will ever refresh a row whose session is gone, so polling for it
+    /// is wasted work.
+    #[test]
+    fn the_poll_ignores_rows_whose_session_is_gone() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
+        assert!(s.spool_poll_due());
+
+        s.apply_sessions(vec!["mob".to_string()]);
+        assert!(!s.spool_poll_due(), "the session is gone");
+    }
+
+    /// The re-confirm rule must not undo `apply_sessions`. A dead session's
+    /// processes are gone, so the scan drops the row and no record can reach
+    /// it - but a leftover file plus a surviving row must not read `waiting`.
+    #[test]
+    fn a_reconfirm_cannot_revive_a_dead_sessions_row() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        let rec = || {
+            spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "other"),
+                ("status", "waiting"),
+            ])
+        };
+        s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
+        assert_eq!(s.agents[0].status, Status::Waiting);
+
+        s.apply_sessions(vec!["mob".to_string()]);
+        assert_eq!(s.agents[0].status, Status::Unknown);
+
+        s.now += STALE_AFTER;
+        s.apply_scan_result(scan_with(Vec::new(), vec![rec()]));
+        assert!(
+            s.agents.is_empty() || s.agents[0].status == Status::Unknown,
+            "a dead session's row never comes back as waiting"
+        );
+    }
+
+    /// The clock must actually drive the poll. Everything else here tests
+    /// `apply_scan_result` directly, which would pass just as happily with the
+    /// poll never wired into the tick at all.
+    #[test]
+    fn the_tick_dispatches_the_poll() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        s.scan_pending = false;
+        s.last_scan_at = s.now;
+
+        let ticks = (crate::SPOOL_POLL_INTERVAL / TICK) as usize;
+        for _ in 0..ticks - 1 {
+            s.on_tick();
+            assert!(!s.scan_pending, "not due yet");
+        }
+        s.on_tick();
+        assert!(s.scan_pending, "the tick must dispatch a scan once the poll is due");
+        assert_eq!(s.last_scan_at, s.now);
+    }
+
+    /// A home-only panel must not acquire a background scan loop.
+    #[test]
+    fn the_tick_does_not_poll_without_a_foreign_row() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+        for _ in 0..(crate::SPOOL_POLL_INTERVAL / TICK) as usize * 3 {
+            s.on_tick();
+        }
+        assert!(!s.scan_pending, "nothing foreign to poll for");
+    }
+
+    /// `request_scan` stamps on dispatch, so a scan that never comes back
+    /// cannot wedge the poll behind a `last_scan_at` that never moves.
+    #[test]
+    fn the_poll_clock_is_stamped_on_dispatch() {
+        let mut s = state();
+        s.apply_scan(found(&[("other", 3)]));
+        s.now = 42.0;
+        s.request_scan();
+        assert_eq!(s.last_scan_at, 42.0);
+        assert!(s.scan_pending);
     }
 }

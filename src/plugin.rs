@@ -7,7 +7,7 @@ use crate::state::State;
 use crate::status::Status;
 use crate::style::{chars, DIM_LEVEL};
 use crate::util::truncate;
-use crate::{content_width, host, ribbon, PANE_TITLE, TICK};
+use crate::{content_width, host, ribbon, PANE_TITLE};
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
@@ -68,22 +68,7 @@ impl ZellijPlugin for State {
                 self.notifier.focused = visible;
                 false
             }
-            Event::Timer(_) => {
-                self.timer_running = false;
-                self.frame = self.frame.wrapping_add(1);
-                self.now += TICK;
-                let aged = self.age_foreign_rows();
-                self.notifier.flush(self.now);
-                self.publish_summary();
-                // A pending flush keeps the clock running on its own: the window
-                // must close even when no row is animating.
-                if self.notifier.flush_at.is_some() {
-                    self.force_timer();
-                } else {
-                    self.arm_timer();
-                }
-                aged || self.agents.iter().any(|a| a.status.is_active())
-            }
+            Event::Timer(_) => self.on_tick(),
             Event::PaneUpdate(manifest) => {
                 self.reconcile(manifest);
                 // A pane appearing or closing is the cheapest signal that the

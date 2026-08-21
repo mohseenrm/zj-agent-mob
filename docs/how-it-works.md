@@ -37,6 +37,17 @@ matters because this runs on the critical path of every tool call.
 The panel reads the directory on the same `run_command` that already runs the process scan, so
 polling costs one command rather than two.
 
+That scan runs on pane and session events, which is not enough on its own: an agent in another
+session can work for ten minutes without opening a pane, and meanwhile the row ages out. So while
+any foreign agent is on screen the panel also re-scans every `SPOOL_POLL_INTERVAL` (5s), well
+inside the 60s `STALE_AFTER` so a row gets many chances to refresh before it decays. The poll is
+gated on a foreign row existing, so a single-session panel never pays for it, and on the session
+still being listed, since nothing can refresh a row whose session is gone.
+
+The panel's clock is what paces this, so a foreign row keeps the timer running whatever its status.
+An `unknown` row in particular must: it is the row the poll exists to recover, and a panel that
+stopped ticking once its rows decayed could never bring them back.
+
 ### Urgent transitions skip the poll
 
 A poll cycle is too slow for the states that actually need you, so those are also pushed. Each
@@ -100,7 +111,20 @@ Four defences keep a stale record from showing wrong data:
 | Filename must match the record's own `session`/`pane_id` | A malformed or mislabelled file |
 
 Records are dated relative to the newest one seen rather than against a wall clock: the plugin has
-no clock, and this makes a host clock jump unable to pin a row as permanently current.
+no clock, and this makes a host clock jump unable to pin a row as permanently current. The
+reference point is anchored to the panel's tick count, so a record ages as *how far it sat behind
+the newest record in its batch, plus how long ago that batch arrived*. Without the second term a
+fleet that goes entirely quiet freezes the reference point, and the last record reads as current
+forever - which would fight the tick-clock decay and flap the row now that the spool is re-read
+every few seconds.
+
+One exception, because the rule above is about records and not about agents: a blocked or idle
+agent writes nothing while it sits there, so its record stops advancing and eventually ages out
+even though the state is still true. A re-read of an unchanged record therefore re-confirms
+`waiting`, `idle-wait`, `idle`, `done` and `failed` - states where silence is exactly what they
+predict, and where the process scan still says the agent is alive. It can only ever re-confirm a
+status the row already holds, never change one. `working` and `compact` are excluded: they claim
+active progress, and silence is evidence against that rather than for it.
 
 `SessionEnd` removes the file. A killed agent fires no `SessionEnd`, so the scan also sweeps
 records older than a day - far past `STALE_AFTER`, so they could never render anyway.

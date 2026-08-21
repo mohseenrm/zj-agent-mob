@@ -29,8 +29,11 @@ pub(crate) const SPINNER: [&str; 10] = [
 pub(crate) const TICK: f64 = 0.25;
 
 /// How long a foreign row's status is trusted before it decays to `unknown`.
-/// Nothing refreshes it: the hook only pipes into its own session.
 pub(crate) const STALE_AFTER: f64 = 60.0;
+
+/// How often the spool is re-read while any foreign agent is on screen. Well
+/// inside `STALE_AFTER`, so a row gets many chances to refresh before it decays.
+pub(crate) const SPOOL_POLL_INTERVAL: f64 = 5.0;
 
 /// Shown in the pane frame instead of the full wasm path.
 pub(crate) const PANE_TITLE: &str = "Agent Mob";

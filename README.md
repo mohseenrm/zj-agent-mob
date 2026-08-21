@@ -178,7 +178,8 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
 | `found` | Spotted by the process scan, but it has never fired a hook | - |
-| `unknown` | Its Zellij session is gone, so its state is unknowable | - |
+| `unknown` | Running, but nothing has reported on it in a while | - |
+| `gone` | Its Zellij session is gone, so its state is unknowable | - |
 
 Rows sort in that order, so whatever needs you most is at the top. A `found` row is normal rather than broken: the agent was already running when hooks were installed, and it fills in the moment it next does anything.
 

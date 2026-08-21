@@ -74,6 +74,17 @@ impl Status {
     pub(crate) fn is_reported(&self) -> bool {
         !matches!(self, Status::Discovered | Status::Unknown)
     }
+
+    /// A state an agent can legitimately sit in without emitting anything. A
+    /// re-read of an unchanged record re-confirms these, because silence is
+    /// what they predict. `Working` and `Compact` claim active progress, which
+    /// silence contradicts, so those are left to decay.
+    pub(crate) fn persists_while_quiet(&self) -> bool {
+        matches!(
+            self,
+            Status::Waiting | Status::IdleWait | Status::Idle | Status::Done | Status::Failed
+        )
+    }
 }
 
 impl Status {
