@@ -117,7 +117,13 @@ impl Agent {
             home,
         } = ctx;
         let marker = if selected { "\u{25b6}" } else { " " };
-        let label = self.status.label();
+        // `unknown` covers two situations the user acts on differently: the
+        // session is gone and the agent is unreachable, or the row simply aged
+        // out while its session is alive, which points at missing hooks there.
+        let label = match self.status {
+            Status::Unknown if !self.session_alive => "gone",
+            _ => self.status.label(),
+        };
 
         // Ranges are tracked as the string is built, in CHARACTER offsets: both
         // the marker and the spinner icon are multi-byte, so byte offsets would
@@ -550,10 +556,26 @@ mod render_tests {
         a.session_alive = false;
         a.status = Status::Unknown;
         let row = item_text(&a.list_item(0, ctx(false, "?", 0.0, 110, true, "mob")));
-        assert!(row.contains("unknown"), "{:?}", row);
+        assert!(row.contains("gone"), "the list row is what you scan: {:?}", row);
+        assert!(
+            !row.contains("unknown"),
+            "a gone session is not merely stale: {:?}",
+            row
+        );
         let d = item_text(&a.detail_item(false, 110));
         assert!(d.contains("(session exited)"), "{:?}", d);
         assert!(!d.contains("(pane gone)"), "the session is the bigger fact: {:?}", d);
+    }
+
+    /// The other half: a row that aged out while its session is still alive is
+    /// stale, not gone, and usually means hooks are missing over there.
+    #[test]
+    fn a_stale_row_in_a_live_session_still_says_unknown() {
+        let mut a = agent();
+        a.status = Status::Unknown;
+        let row = item_text(&a.list_item(0, ctx(false, "?", 0.0, 110, true, "mob")));
+        assert!(row.contains("unknown"), "{:?}", row);
+        assert!(!row.contains("gone"), "the session is alive: {:?}", row);
     }
 
     /// The sort already puts a blocked agent on top; past a threshold the colour

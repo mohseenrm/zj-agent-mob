@@ -10,7 +10,8 @@
 - [<kbd>x</kbd> does nothing on an agent from another session](#x-does-nothing-on-an-agent-from-another-session)
 - [<kbd>y</kbd> / <kbd>m</kbd> do nothing](#y--m-do-nothing)
 - [No desktop notifications](#no-desktop-notifications)
-- [A row says `unknown` / `(session exited)`](#a-row-says-unknown--session-exited)
+- [A row says `gone` / `(session exited)`](#a-row-says-gone--session-exited)
+- [A row in another session says `unknown`](#a-row-in-another-session-says-unknown)
 - [The install screen says "Installer not found"](#the-install-screen-says-installer-not-found)
 - [The install screen shows `?` / "unknown" for everything](#the-install-screen-shows---unknown-for-everything)
 - [Zellij fails to load the plugin](#zellij-fails-to-load-the-plugin)
@@ -130,8 +131,10 @@ order:
    check `ZJ_AGENT_SPOOL` is not set to `0`, and see
    [the panel says "no agents"](#the-panel-says-no-agents-in-this-session) for whether the hook
    runs at all.
-3. **Is the record fresh?** Records older than 60s are ignored on read, so a paused agent falls
-   back to `found`. `cat` one and check its `ts=` against `date +%s`.
+3. **Is the record fresh?** A record older than 60s no longer refreshes a `working` row, which
+   decays to `unknown`. `cat` one and check its `ts=` against `date +%s`. A blocked or finished
+   agent is exempt: it writes nothing while it waits, so its unchanged record keeps re-confirming
+   `waiting` / `done` for as long as the process is alive.
 4. **Did the pane id get recycled?** A record whose `session_id` disagrees with the running agent
    is ignored on purpose - it belongs to a previous agent on that pane. Restarting the agent
    rewrites it.
@@ -193,7 +196,7 @@ In order:
    end run' 'zj-agent-mob' 'test'
    ```
 
-## A row says `unknown` / `(session exited)`
+## A row says `gone` / `(session exited)`
 
 Its Zellij session is no longer running, so nothing can report on it and its real state is
 unknowable. The row is kept rather than dropped: an agent silently vanishing hides whether it
@@ -201,6 +204,32 @@ finished, crashed, or was never there.
 
 <kbd>Enter</kbd> on such a row attaches (resurrects) the session rather than focusing a pane - the
 pane no longer exists. <kbd>x</kbd> is refused: there is no process left to signal.
+
+## A row in another session says `unknown`
+
+The process scan can see the agent, so it is running, but no status has reached the panel in the
+last 60 seconds. This is distinct from `gone`, where the whole session has exited.
+
+The panel re-reads the spool every 5 seconds, so its own staleness is ruled out. That leaves the
+agent's side: **the hook is almost certainly not installed in that session's agent.** A hook writes
+a status record on every event, so an agent that has been running for a minute without producing
+one is not reporting at all.
+
+Confirm by looking for its record - the filename is `<session>.<pane_id>`:
+
+```sh
+ls -l "${TMPDIR:-/tmp}/zj-agent-mob-$(id -u)/status/"
+```
+
+No file for that agent means the hook never ran. Re-run `init.sh`, then **restart that agent**:
+hooks are read at startup, so an already-running agent keeps the old configuration.
+
+Two benign cases also read `unknown`, both self-correcting:
+
+- `ZJ_AGENT_SPOOL=0` is set for that agent, which opts it out of the cross-session transport. Its
+  status still reaches a panel in its own session.
+- The agent is genuinely mid-turn and quiet. Only `working` and `compact` decay this way - a
+  blocked or finished agent keeps its status, since silence is what those states predict.
 
 ## The install screen says "Installer not found"
 
@@ -211,7 +240,7 @@ The usual cause is a partial install: the wasm was copied into `~/.config/zellij
 Re-run the installer to bootstrap it:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.3.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.5.0/init.sh | sh
 ```
 
 or `./init.sh` from a clone. Then press <kbd>r</kbd> on the install screen to re-read state.

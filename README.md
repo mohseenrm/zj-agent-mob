@@ -57,7 +57,7 @@ Three steps: install, bind a key, restart your agents.
 No clone and no Rust toolchain required:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.4.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.5.0/init.sh | sh
 ```
 
 This downloads the plugin and hook script for that release, wires up whichever of Claude Code and Codex you have, and leaves an installer at `~/.config/zj-agent-mob/install.sh` so the in-panel install screen works from then on.
@@ -65,7 +65,7 @@ This downloads the plugin and hook script for that release, wires up whichever o
 Prefer to read before running? Same thing in two steps:
 
 ```sh
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.4.0/init.sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.5.0/init.sh
 less init.sh && sh init.sh
 ```
 
@@ -178,7 +178,8 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
 | `found` | Spotted by the process scan, but it has never fired a hook | - |
-| `unknown` | Its Zellij session is gone, so its state is unknowable | - |
+| `unknown` | Running, but nothing has reported on it in a while | - |
+| `gone` | Its Zellij session is gone, so its state is unknowable | - |
 
 Rows sort in that order, so whatever needs you most is at the top. A `found` row is normal rather than broken: the agent was already running when hooks were installed, and it fills in the moment it next does anything.
 
