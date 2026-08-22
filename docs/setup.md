@@ -3,6 +3,7 @@
 - [Install](#install)
   - [From a release](#from-a-release)
   - [From source](#from-source)
+  - [Reinstalling from a checkout](#reinstalling-from-a-checkout)
 - [The install screen](#the-install-screen)
 - [Register the plugin with Zellij](#register-the-plugin-with-zellij)
 - [Configuration](#configuration)
@@ -66,6 +67,31 @@ By default the installer downloads only what the source tree does not already pr
 
 > [!IMPORTANT]
 > Restart any running `claude` / `codex` sessions after installing. Hooks are read at session start, so existing sessions won't report status.
+
+### Reinstalling from a checkout
+
+`init.sh` always overwrites the hook and the wasm, but two things survive it and
+will keep you on old behaviour:
+
+- **Zellij caches compiled plugins.** A new wasm on disk is not the wasm a
+  running session has loaded.
+- **Spool records outlive a hook change.** A record written by an older hook
+  stays in `$TMPDIR` until it is swept.
+
+`scripts/reinstall-local.sh` does the whole cycle, which is what you want when
+you are moving the same checkout across machines:
+
+```sh
+./scripts/reinstall-local.sh          # build, install, clear both caches
+./scripts/reinstall-local.sh --check  # is the install current? exits 1 if not
+```
+
+`--check` compares the installed wasm and hook against the checkout and prints
+`ok` or `STALE` for each, so you can tell at a glance whether a machine is
+actually running what you think it is.
+
+Afterwards, restart your agents *and* start a new Zellij session - a new session
+is the reliable way to make Zellij load the new plugin.
 
 ## The install screen
 

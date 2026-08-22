@@ -1023,6 +1023,57 @@ fn record(path: &Path) -> BTreeMap<String, String> {
     parse_args(first).unwrap_or_else(|frag| panic!("record fragment without a key: {frag:?} in {first}"))
 }
 
+/// A counter event carries no status, but the hook still writes a full
+/// snapshot. Writing `status=` empty makes the newest file on disk unparseable,
+/// so the plugin skips it on every poll and the row rots to `unknown` while the
+/// agent is plainly still running. The status must be inherited instead.
+#[test]
+fn a_counter_event_does_not_blank_the_spooled_status() {
+    let h = Hook::new();
+    let working = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "uuid-1",
+        "cwd": "/Users/x/Projects/web",
+    })
+    .to_string();
+    h.env("ZELLIJ_SESSION_NAME", "mob").run(&working);
+    let file = h.path("spool/mob.3");
+    assert_eq!(record(&file)["status"], "working");
+
+    let subagent = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_type": "Explore",
+    })
+    .to_string();
+    h.env("ZELLIJ_SESSION_NAME", "mob").run(&subagent);
+
+    let rec = record(&file);
+    assert_eq!(
+        rec["status"], "working",
+        "a statusless counter event must inherit, not blank, the status: {rec:?}"
+    );
+    assert_eq!(rec["session_id"], "uuid-1", "identity must survive too: {rec:?}");
+    assert_eq!(rec["cwd"], "/Users/x/Projects/web", "cwd must survive too: {rec:?}");
+}
+
+/// With no previous record there is nothing to inherit, and a counter event
+/// knows only that a subagent started. An unparseable record would strand the
+/// row, so no file is better than a bad one.
+#[test]
+fn a_counter_event_with_no_prior_record_writes_nothing() {
+    let h = Hook::new();
+    let subagent = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_type": "Explore",
+    })
+    .to_string();
+    h.env("ZELLIJ_SESSION_NAME", "mob").run(&subagent);
+    assert!(
+        !h.path("spool/mob.3").exists(),
+        "wrote an unparseable statusless record instead of skipping"
+    );
+}
+
 #[test]
 fn a_status_event_writes_a_spool_record() {
     let h = Hook::new();

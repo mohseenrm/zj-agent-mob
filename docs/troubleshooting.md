@@ -210,19 +210,36 @@ pane no longer exists. <kbd>x</kbd> is refused: there is no process left to sign
 The process scan can see the agent, so it is running, but no status has reached the panel in the
 last 60 seconds. This is distinct from `gone`, where the whole session has exited.
 
-The panel re-reads the spool every 5 seconds, so its own staleness is ruled out. That leaves the
-agent's side: **the hook is almost certainly not installed in that session's agent.** A hook writes
-a status record on every event, so an agent that has been running for a minute without producing
-one is not reporting at all.
-
-Confirm by looking for its record - the filename is `<session>.<pane_id>`:
+The panel re-reads the spool every 5 seconds, so a poll that is merely late is ruled out. Look at
+the agent's record - the filename is `<session>.<pane_id>`:
 
 ```sh
-ls -l "${TMPDIR:-/tmp}/zj-agent-mob-$(id -u)/status/"
+cat "${TMPDIR:-/tmp}/zj-agent-mob-$(id -u)/status/"*
 ```
 
-No file for that agent means the hook never ran. Re-run `init.sh`, then **restart that agent**:
-hooks are read at startup, so an already-running agent keeps the old configuration.
+**No file for that agent.** The hook never ran, so the agent is not reporting at all. Re-run
+`init.sh`, then **restart that agent**: hooks are read at startup, so an already-running agent
+keeps the old configuration.
+
+**A file with `status=` empty**, like:
+
+```
+ts=1787407612,pane_id=2,session=dotfiles-new,tool=claude,status=,session_id=21cb996b-...
+```
+
+This is a hook older than v0.5.1. Counter events (`SubagentStart`, `TaskCreated`) carry no status,
+and that hook wrote the empty value into the record anyway. The panel cannot parse a statusless
+record, so it skips it - and since nothing overwrites that file afterwards, every later poll skips
+it too and the row never recovers. An agent that spawns a subagent gets stuck this way.
+
+Fix it by updating the hook and clearing the record:
+
+```sh
+./scripts/reinstall-local.sh   # or re-run init.sh from a v0.5.1+ release
+```
+
+Then restart that agent. Newer hooks inherit the previous status instead of blanking it, and skip
+the write entirely when there is nothing to inherit.
 
 Two benign cases also read `unknown`, both self-correcting:
 

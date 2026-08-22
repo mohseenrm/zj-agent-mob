@@ -232,17 +232,23 @@ if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ende
     # carry no session_id or cwd (Notification, the counter events) inherit the
     # last known values instead of blanking them - session_id in particular is
     # what stops a recycled pane id inheriting a dead agent's status.
-    if [ -z "$session_id" ] || [ -z "$cwd" ]; then
+    # Counter events carry no status; an empty one is unparseable and would
+    # strand the row at `unknown`, so inherit it too.
+    if [ -z "$session_id" ] || [ -z "$cwd" ] || [ -z "$status" ]; then
       prev=$(head -n 1 "$sfile" 2>/dev/null || true)
       if [ -n "$prev" ]; then
         [ -n "$session_id" ] || session_id=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^session_id=//p' | head -1)
         [ -n "$cwd" ] || cwd=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^cwd=//p' | head -1)
+        [ -n "$status" ] || status=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^status=//p' | head -1)
       fi
+    fi
+    if [ -z "$status" ]; then
+      SKIP_SPOOL=1
     fi
     SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type"
     # Rename is atomic within a filesystem, so a reader sees the old record or
     # the new one, never a half-written one. $$ keeps concurrent hooks apart.
-    if printf 'ts=%s,%s\n' "$(date +%s)" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then
+    if [ "${SKIP_SPOOL:-0}" != "1" ] && printf 'ts=%s,%s\n' "$(date +%s)" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then
       mv -f "$sfile.$$.tmp" "$sfile" 2>/dev/null || rm -f "$sfile.$$.tmp" 2>/dev/null || true
     else
       rm -f "$sfile.$$.tmp" 2>/dev/null || true

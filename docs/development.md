@@ -62,6 +62,19 @@ zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
   "file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
 ```
 
+That reloads the plugin but not the hook, which is the right loop for plugin-only
+changes. When you have touched `scripts/zj-agent-mob-hook.sh`, or you are syncing
+a checkout onto another machine, do the full cycle instead:
+
+```sh
+./scripts/reinstall-local.sh          # build, install, clear plugin + spool caches
+./scripts/reinstall-local.sh --check  # installed == checkout? exits 1 if not
+```
+
+A hook change also needs the *agent* restarted, since hooks are read at session
+start. `--check` is worth running first when a machine is behaving oddly: it
+catches the case where the installed wasm is some older build you no longer have.
+
 Feed the panel a status without running a real agent:
 
 ```sh

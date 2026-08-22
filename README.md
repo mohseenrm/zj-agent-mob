@@ -80,6 +80,11 @@ cargo build --release --target wasm32-wasip1
 
 From a clone, `./init.sh` uses your local build and downloads nothing.
 
+Reinstalling over an existing install, or syncing a checkout across machines? Use
+`./scripts/reinstall-local.sh`, which also clears Zellij's plugin cache and any stale
+status records - both of which survive a plain `init.sh` and keep old behaviour live.
+`--check` reports whether what is installed matches your checkout.
+
 </details>
 
 ### 2. Bind a key
@@ -178,7 +183,7 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
 | `found` | Spotted by the process scan, but it has never fired a hook | - |
-| `unknown` | Running, but nothing has reported on it in a while | - |
+| `unknown` | Running, but nothing has reported on it in a while ([stuck there?](docs/troubleshooting.md#a-row-in-another-session-says-unknown)) | - |
 | `gone` | Its Zellij session is gone, so its state is unknowable | - |
 
 Rows sort in that order, so whatever needs you most is at the top. A `found` row is normal rather than broken: the agent was already running when hooks were installed, and it fills in the moment it next does anything.
