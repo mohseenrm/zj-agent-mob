@@ -28,7 +28,7 @@ impl Hint {
 
 pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("\u{21b5}", "jump"),
-    Hint::new("1-9", "quick"),
+    Hint::new("1-9/g", "goto"),
     Hint::new("x", "kill"),
     Hint::new("d", "dismiss"),
     Hint::new("i", "install"),
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn hint_text_is_the_bare_key_and_action() {
         assert_eq!(Hint::new("x", "kill").text(), "x kill");
-        assert_eq!(Hint::new("1-9", "quick").text(), "1-9 quick");
+        assert_eq!(Hint::new("1-9/g", "goto").text(), "1-9/g goto");
         assert_eq!(Hint::new("\u{21b5}", "jump").text(), "\u{21b5} jump");
     }
 
@@ -162,7 +162,7 @@ mod tests {
     fn list_footer_matches_the_documented_row() {
         assert_eq!(
             plain_line(LIST_HINTS),
-            " \u{21b5} jump  1-9 quick  x kill  d dismiss  i install  q hide"
+            " \u{21b5} jump  1-9/g goto  x kill  d dismiss  i install  q hide"
         );
     }
 
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn list_hints_cover_the_documented_keys() {
         let keys: Vec<&str> = LIST_HINTS.iter().map(|h| h.key).collect();
-        for expect in ["x", "d", "i", "q", "1-9"] {
+        for expect in ["x", "d", "i", "q", "1-9/g"] {
             assert!(keys.contains(&expect), "missing hint for {:?}", expect);
         }
     }

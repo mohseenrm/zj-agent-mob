@@ -2,6 +2,7 @@
 
 - [Status transport](#status-transport)
 - [Cross-session status: the spool](#cross-session-status-the-spool)
+- [Cost per turn](#cost-per-turn)
 - [Task summaries](#task-summaries)
 - [Counter events](#counter-events)
 - [Answering permission prompts](#answering-permission-prompts)
@@ -132,6 +133,62 @@ records older than a day - far past `STALE_AFTER`, so they could never render an
 The directory is created `0700` and namespaced by uid, because on a shared `/tmp` these records
 contain task summaries, which are the user's own prompts. Set `ZJ_AGENT_SPOOL=0` to opt out
 entirely; the pipe keeps working for the agent's own session.
+
+## Cost per turn
+
+The hook runs on the agent's critical path, so it is worth knowing exactly what
+one turn costs before tuning `ZJ_AGENT_HEARTBEAT` and `ZJ_AGENT_FANOUT`.
+
+**Per hook event, always:**
+
+| Cost | When |
+|---|---|
+| 1 `jq` | Every event. One invocation parses the whole payload into shell variables via `@sh`. |
+| 1 `zellij pipe` | Every event that produces a status or a counter delta. |
+| 1 file write | Every event, unless `ZJ_AGENT_SPOOL=0`. Done with a shell redirect, not a subprocess. |
+
+**Only on turn-opening boundaries** (`SessionStart`, `UserPromptSubmit`):
+
+| Cost | Notes |
+|---|---|
+| 1 `tail -n 300` | Bounded window, so a multi-megabyte transcript is never read whole. |
+| 1-2 more `jq` | Claude tries `ai-title` and falls back to `last-prompt`; Codex reads `event_msg` once. |
+
+**Only on `waiting` / `idlewait` / `failed` / `done`** — the states that actually
+need you:
+
+| Cost | Notes |
+|---|---|
+| 1 extra `zellij pipe` **per open panel elsewhere** | Skipped entirely with `ZJ_AGENT_FANOUT=0`. The beacon files are what it counts, so a machine with one panel pays nothing. |
+
+### What dominates, and what to turn off
+
+`PreToolUse` / `PostToolUse` fire **once per tool call**, so in a turn with a
+dozen edits they are the whole cost: everything else fires once or twice. That
+is why `ZJ_AGENT_HEARTBEAT=0` roughly halves hook volume - it drops both tool
+events and the high-frequency counter events (`SubagentStart`, `TaskCreated`)
+while leaving turn boundaries, notifications, and permission prompts intact.
+
+The tradeoff is stated in
+[troubleshooting](troubleshooting.md#waiting-stays-on-screen-after-youve-answered):
+with no heartbeat, `waiting` persists until the turn ends, because Claude has no
+"permission granted" event and the next tool call is what would have cleared it.
+
+Rough guide:
+
+- **Default (everything on).** Live status, live tool detail, cross-session
+  urgency with no poll delay. Right unless you can measure a problem.
+- **`ZJ_AGENT_HEARTBEAT=0`.** Halves the volume. Status still moves at turn
+  boundaries; mid-turn tool detail and subagent counters stop updating.
+- **`ZJ_AGENT_FANOUT=0`.** Only worth it with several panels open at once.
+  Foreign rows fall back to the 5-second spool poll, so urgent states arrive
+  late rather than not at all.
+- **`ZJ_AGENT_SPOOL=0`.** Drops the file write and opts the agent out of
+  cross-session visibility entirely. Its own session's panel is unaffected.
+
+The panel's own cost is separate: `discover::scan_script` runs one `ps axeww`
+plus a spool read on every `PaneUpdate`, and every 5 seconds
+(`SPOOL_POLL_INTERVAL`) while a foreign row is on screen.
 
 ## Task summaries
 

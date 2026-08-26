@@ -127,11 +127,11 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 |---|---|---|---|
 | `main.rs` | 16 | | `register_plugin!` + WASI entry point |
 | `lib.rs` | 55 | | Module wiring and shared constants |
-| `plugin.rs` | 436 | | Zellij lifecycle: permissions, subscriptions, `render`, the permission prompt box, the reply editor |
-| `state.rs` | 614 | 98 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership, the fleet summary |
+| `plugin.rs` | 477 | 11 | Zellij lifecycle: permissions, subscriptions, `render`, the list viewport, the permission prompt box, the reply editor |
+| `state.rs` | 630 | 100 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership, the fleet summary |
 | `install.rs` | 377 | 22 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 270 | 21 | Keyboard: selection, jump-to-pane (and cross-session switch), two-step kill, approve/reject, quick reply |
-| `agent.rs` | 229 | 25 | One agent, its `(session, pane)` identity, and how its row is built |
+| `keys.rs` | 325 | 31 | Keyboard: selection, jump-to-pane (and cross-session switch), vim-style `g`<var>N</var> count goto, two-step kill, approve/reject, quick reply |
+| `agent.rs` | 240 | 29 | One agent, its `(session, pane)` identity, and how its row is built |
 | `notify.rs` | 185 | 18 | Desktop notifications: triggers, per-agent cooldown, burst coalescing, message text |
 | `status.rs` | 98 | | The agent states and their presentation |
 | `ribbon.rs` | 89 | 7 | Ribbon line serialization |
@@ -140,7 +140,7 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 | `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
 | `style.rs` | 23 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover, 215 in total, none needing a running Zellij, plus 173 end-to-end cases across `tests/hook_e2e.rs` (75) and `tests/e2e-install.sh` (98).
+Line counts exclude tests. Tests live beside the code they cover, 272 in total, none needing a running Zellij, plus 178 end-to-end cases across `tests/hook_e2e.rs` (80) and `tests/e2e-install.sh` (98).
 
 Ten of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps` and a real staged spool directory, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
 

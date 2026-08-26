@@ -66,7 +66,10 @@ impl ZellijPlugin for State {
             }
             Event::Visible(visible) => {
                 self.notifier.focused = visible;
-                false
+                match visible {
+                    true => self.clear_notified(),
+                    false => false,
+                }
             }
             Event::Timer(_) => self.on_tick(),
             Event::PaneUpdate(manifest) => {
@@ -237,6 +240,60 @@ pub(crate) fn reply_row(text: &str, cols: usize) -> Text {
     Text::new(line).color_range(2, at)
 }
 
+/// Which agent groups fit in `budget` rows, scrolled so `selected` is whole.
+///
+/// Groups are variable height (a detail line, a prompt box, a reply editor), so
+/// the window is computed in rows rather than assumed to be one row per agent.
+struct View {
+    first: usize,
+    count: usize,
+    hidden_above: usize,
+    hidden_below: usize,
+}
+
+fn viewport(groups: &[Vec<Text>], scroll: usize, selected: usize, budget: usize) -> View {
+    let total = groups.len();
+    let height = |i: usize| groups[i].len();
+    let mut first = scroll.min(selected).min(total.saturating_sub(1));
+
+    // Walk `first` forward until the selected group's last row fits. The `↑`/`↓`
+    // markers cost a row each, so they are charged as the window is measured.
+    loop {
+        let mut used = usize::from(first > 0);
+        let mut last = first;
+        let mut fits = false;
+        for i in first..total {
+            let next = used + height(i) + usize::from(i + 1 < total);
+            if next > budget {
+                break;
+            }
+            used += height(i);
+            last = i;
+            fits = true;
+        }
+        if !fits || last >= selected || first >= selected {
+            let count = match fits {
+                true => last - first + 1,
+                false => 0,
+            };
+            return View {
+                first,
+                count,
+                hidden_above: first,
+                hidden_below: total - first - count,
+            };
+        }
+        first += 1;
+    }
+}
+
+/// The affordance that stops a hidden row from being silently hidden.
+fn more_row(n: usize, up: bool, width: usize) -> Text {
+    let arrow = if up { "\u{2191}" } else { "\u{2193}" };
+    let line = truncate(&format!("  {} {} more", arrow, n), width);
+    Text::new(line).color_range(DIM_LEVEL, ..)
+}
+
 impl State {
     fn rename_pane(&self) {
         host::rename_own_pane(PANE_TITLE);
@@ -282,7 +339,10 @@ impl State {
         self.render_rows(rows, y);
     }
 
-    fn render_list(&self, rows: usize, width: usize) {
+    /// Returns the number of rows emitted, which must never exceed `rows`: a
+    /// row printed past the bottom edge is clipped by the terminal, taking the
+    /// footer and the key hints with it.
+    fn render_list(&mut self, rows: usize, width: usize) -> usize {
         let (failed, waiting, working, done) = self.counts();
         // A zero failure count is omitted so the common case reads unchanged.
         let mut parts = Vec::new();
@@ -333,32 +393,57 @@ impl State {
         let detail_lines = rows >= 4 + self.agents.len() * 2 && width >= 60;
         let show_cwd = width >= 50;
 
+        // One group per agent: its row plus whatever renders underneath it. The
+        // viewport pages by group so a selected agent's prompt box is never cut
+        // in half.
+        let groups: Vec<Vec<Text>> = self
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(i, agent)| {
+                let mut g = vec![agent.list_item(
+                    i,
+                    crate::agent::RowCtx {
+                        selected: i == self.selected,
+                        icon: self.icon_for(agent),
+                        now: self.now,
+                        cols: width,
+                        show_cwd,
+                        home: &self.session_name,
+                    },
+                )];
+                if detail_lines {
+                    g.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), width));
+                }
+                // The prompt belongs to one agent, so it renders under that row.
+                if i == self.selected {
+                    if let Some(ask) = self.ask_for(&agent.id) {
+                        g.extend(ask_rows(ask, width));
+                    }
+                    if let Some(reply) = self.reply.as_ref().filter(|r| r.id == agent.id) {
+                        g.push(reply_row(&reply.text, width));
+                    }
+                }
+                g
+            })
+            .collect();
+
+        // Everything that is not a list row: header, its rule, the footer rule,
+        // the hints, and the error note when there is one.
+        let chrome = 4 + usize::from(self.action_error.is_some());
+        let budget = rows.saturating_sub(chrome);
+        let view = viewport(&groups, self.scroll, self.selected, budget);
+        self.scroll = view.first;
+
         let mut items = Vec::new();
-        for (i, agent) in self.agents.iter().enumerate() {
-            let icon = self.icon_for(agent);
-            items.push(agent.list_item(
-                i,
-                crate::agent::RowCtx {
-                    selected: i == self.selected,
-                    icon,
-                    now: self.now,
-                    cols: width,
-                    show_cwd,
-                    home: &self.session_name,
-                },
-            ));
-            if detail_lines {
-                items.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), width));
-            }
-            // The prompt belongs to one agent, so it renders under that row.
-            if i == self.selected {
-                if let Some(ask) = self.ask_for(&agent.id) {
-                    items.extend(ask_rows(ask, width));
-                }
-                if let Some(reply) = self.reply.as_ref().filter(|r| r.id == agent.id) {
-                    items.push(reply_row(&reply.text, width));
-                }
-            }
+        if view.hidden_above > 0 && view.count > 0 {
+            items.push(more_row(view.hidden_above, true, width));
+        }
+        for g in groups.into_iter().skip(view.first).take(view.count) {
+            items.extend(g);
+        }
+        if view.hidden_below > 0 && view.count > 0 {
+            items.push(more_row(view.hidden_below, false, width));
         }
         y = self.render_rows(items, y);
         y = self.render_rule(y, width);
@@ -371,6 +456,15 @@ impl State {
             .agents
             .get(self.selected)
             .is_some_and(|a| self.ask_for(&a.id).is_some());
+        // A pending count replaces the footer with what has been typed so far:
+        // otherwise the digits vanish into a buffer with nothing on screen.
+        // Echoed as vim would show it, count first.
+        if let Some(buf) = self.jump_buf.as_deref() {
+            let line = truncate(&format!("  g{}\u{2588}   \u{21b5} jump   esc cancel", buf), width);
+            let count = chars("  g") + chars(buf) + 1;
+            print_text_with_coordinates(Text::new(line).color_range(2, 2..count), 0, y, None, None);
+            return y + 1;
+        }
         let hints = if self.reply.is_some() {
             ribbon::REPLY_EDIT_HINTS
         } else if selected_has_ask {
@@ -381,6 +475,7 @@ impl State {
             ribbon::LIST_HINTS
         };
         self.render_hints(hints, y, width);
+        y + 1
     }
 
     /// One row per `Text`, each at its own `y`. Returns the next free row.
@@ -484,5 +579,206 @@ mod reply_row_tests {
         assert!(row.contains("reply:"), "{:?}", row);
         assert!(row.contains("yes"), "{:?}", row);
         assert!(row.ends_with('\u{2588}'), "{:?}", row);
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use crate::state::State;
+    use std::collections::BTreeMap;
+
+    fn state_with(n: usize) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for i in 0..n {
+            let args: BTreeMap<String, String> = [
+                ("pane_id", i.to_string()),
+                ("status", "working".to_string()),
+                ("task", format!("task {}", i)),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    /// The bug this exists for: rows were emitted from y=2 with no upper bound,
+    /// so the footer rule and the key ribbon landed outside the pane.
+    #[test]
+    fn the_list_never_emits_more_rows_than_the_pane_has() {
+        for rows in [6usize, 8, 10, 14, 20, 30] {
+            for agents in [1usize, 3, 9, 20, 50] {
+                let mut s = state_with(agents);
+                for sel in [0, agents / 2, agents - 1] {
+                    s.selected = sel;
+                    let emitted = s.render_list(rows, 100);
+                    assert!(
+                        emitted <= rows,
+                        "rows={} agents={} selected={} emitted {}",
+                        rows,
+                        agents,
+                        sel,
+                        emitted
+                    );
+                }
+            }
+        }
+    }
+
+    /// Scroll-to-selection: paging by keyboard must keep the cursor on screen.
+    /// Asserted against `viewport` directly, which is the only thing that knows
+    /// how many whole groups the window holds.
+    #[test]
+    fn the_selected_row_stays_inside_the_viewport() {
+        let groups: Vec<Vec<zellij_tile::prelude::Text>> = (0..40)
+            .map(|i| vec![zellij_tile::prelude::Text::new(format!("row {}", i))])
+            .collect();
+        let mut scroll = 0;
+        // Walks the selection down then back up, carrying `scroll` between
+        // frames exactly as the real render does.
+        for sel in (0..40).chain((0..40).rev()) {
+            let v = super::viewport(&groups, scroll, sel, 8);
+            scroll = v.first;
+            assert!(v.count > 0, "selected {} produced an empty window", sel);
+            assert!(
+                v.first <= sel && sel < v.first + v.count,
+                "selected {} outside [{}, {})",
+                sel,
+                v.first,
+                v.first + v.count
+            );
+            assert_eq!(
+                v.hidden_above + v.count + v.hidden_below,
+                40,
+                "every row is either shown or counted as hidden"
+            );
+        }
+    }
+
+    /// The same frame rendered twice must not drift.
+    #[test]
+    fn a_repeat_render_is_stable() {
+        let mut s = state_with(30);
+        s.selected = 20;
+        let first = s.render_list(12, 100);
+        let scroll = s.scroll;
+        assert_eq!(s.render_list(12, 100), first);
+        assert_eq!(s.scroll, scroll);
+    }
+
+    /// An action error costs a row, so the budget has to shrink with it.
+    #[test]
+    fn an_action_error_does_not_push_the_hints_off_the_pane() {
+        let mut s = state_with(30);
+        s.action_error = Some("kill failed: no such session".into());
+        for rows in [6usize, 9, 15] {
+            assert!(s.render_list(rows, 100) <= rows, "rows={}", rows);
+        }
+    }
+
+    /// A hidden row must be advertised rather than silently dropped.
+    #[test]
+    fn hidden_rows_are_announced() {
+        assert!(crate::util::testing::item_text(&super::more_row(7, false, 40)).contains("7 more"));
+        assert!(crate::util::testing::item_text(&super::more_row(2, true, 40)).starts_with("  \u{2191}"));
+    }
+
+    /// Scrolling far down then selecting row 0 must page back up.
+    #[test]
+    fn scrolling_back_to_the_top_is_possible() {
+        let mut s = state_with(40);
+        s.selected = 39;
+        s.render_list(10, 100);
+        assert!(s.scroll > 0, "selecting the last row must have scrolled");
+        s.selected = 0;
+        s.render_list(10, 100);
+        assert_eq!(s.scroll, 0, "selecting the first row must scroll back to the top");
+    }
+
+    /// A pane too short for even one agent drops every row rather than
+    /// spilling. The chrome - header, two rules, hints - is the irreducible
+    /// floor; nothing above it is emitted.
+    #[test]
+    fn a_pane_with_no_room_for_any_row_emits_only_chrome() {
+        const CHROME: usize = 4;
+        let mut s = state_with(10);
+        for rows in [0usize, 1, 2, 3, 4, 5] {
+            let emitted = s.render_list(rows, 100);
+            assert!(emitted <= CHROME.max(rows), "rows={} emitted {}", rows, emitted);
+        }
+    }
+
+    /// The exact-fit case: with no rows hidden there is no marker to pay for,
+    /// so every agent must be shown rather than one being dropped to make room
+    /// for a "0 more" nobody needs.
+    #[test]
+    fn a_list_that_exactly_fills_the_pane_hides_nothing() {
+        // 4 rows of chrome plus one row per agent, detail lines off.
+        let mut s = state_with(6);
+        let emitted = s.render_list(4 + 6, 100);
+        assert_eq!(emitted, 4 + 6, "all six rows fit with no marker");
+        assert_eq!(s.scroll, 0);
+    }
+
+    /// One row too many: the marker is charged, so one fewer agent is shown and
+    /// the count it reports must match what was actually dropped.
+    #[test]
+    fn the_more_marker_reports_the_true_hidden_count() {
+        let mut s = state_with(6);
+        // Budget 5: four agents plus the marker row.
+        let emitted = s.render_list(4 + 5, 100);
+        assert_eq!(emitted, 4 + 5);
+        let groups = 6;
+        let shown = 5 - 1;
+        assert_eq!(groups - shown, 2, "two agents hidden behind the marker");
+    }
+
+    /// The reason the window pages by group rather than by row: a selected
+    /// agent's prompt box is four rows tall, and showing half of it is worse
+    /// than scrolling past the agent above it.
+    #[test]
+    fn a_tall_group_is_shown_whole_or_not_at_all() {
+        use zellij_tile::prelude::Text;
+        // Heights 1, 1, 5 (a selected row with a prompt box), 1, 1, ...
+        let groups: Vec<Vec<Text>> = (0..10)
+            .map(|i| {
+                let h = if i % 3 == 2 { 5 } else { 1 };
+                (0..h).map(|r| Text::new(format!("{}.{}", i, r))).collect()
+            })
+            .collect();
+        let mut scroll = 0;
+        for sel in 0..10 {
+            for budget in [3usize, 6, 8, 12] {
+                let v = super::viewport(&groups, scroll, sel, budget);
+                let rows: usize = groups[v.first..v.first + v.count].iter().map(|g| g.len()).sum();
+                let markers = usize::from(v.hidden_above > 0) + usize::from(v.hidden_below > 0);
+                assert!(
+                    rows + markers <= budget || v.count == 0,
+                    "sel={} budget={} used {} rows plus {} markers",
+                    sel,
+                    budget,
+                    rows,
+                    markers
+                );
+            }
+            scroll = super::viewport(&groups, scroll, sel, 12).first;
+        }
+    }
+
+    /// A pending count has to be visible: the digits go into a buffer, and a
+    /// footer that still reads "1-9/g goto" hides that anything is happening.
+    #[test]
+    fn a_pending_count_replaces_the_footer_and_still_fits() {
+        let mut s = state_with(12);
+        s.jump_buf = Some("12".into());
+        for rows in [6usize, 10, 20] {
+            assert!(s.render_list(rows, 100) <= rows, "rows={}", rows);
+        }
     }
 }

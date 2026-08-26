@@ -19,6 +19,8 @@
 - [Approve / reject from the panel does nothing](#approve--reject-from-the-panel-does-nothing)
 - [Hooks landed in my dotfiles repo](#hooks-landed-in-my-dotfiles-repo)
 - [The panel is cramped or columns are missing](#the-panel-is-cramped-or-columns-are-missing)
+- [The list says `↓ N more` and I cannot see every agent](#the-list-says--n-more-and-i-cannot-see-every-agent)
+- [A row has a `!` next to it](#a-row-has-a--next-to-it)
 
 ## Changes to the plugin seem to have no effect
 
@@ -81,7 +83,7 @@ Check which situation you are in with `readlink ~/.config/zellij/plugins/zj-agen
 **First, check whether the panel says `found` instead.** A row like
 
 ```
-  1 ◌ claude  found         --   no report yet
+   1 ◌ claude  found         --   no report yet
 ```
 
 means the plugin located a running agent by scanning process environments, but that agent has
@@ -257,7 +259,7 @@ The usual cause is a partial install: the wasm was copied into `~/.config/zellij
 Re-run the installer to bootstrap it:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.5.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.6.0/init.sh | sh
 ```
 
 or `./init.sh` from a clone. Then press <kbd>r</kbd> on the install screen to re-read state.
@@ -308,3 +310,33 @@ That's intended. `init.sh` resolves symlinks and writes through to the real file
 ## The panel is cramped or columns are missing
 
 The layout degrades by width: the project column is dropped under 50 columns, and the per-agent detail line needs at least 60 columns plus two rows per agent. Resize the floating pane, or set a larger `width` / `height` in the layout.
+
+## The list says `↓ N more` and I cannot see every agent
+
+Working as intended. The panel clips the list to the pane rather than printing
+rows past the bottom edge, which used to take the footer rule and the key hints
+with them.
+
+The viewport follows the selection, so <kbd>j</kbd> / <kbd>k</kbd> past the last
+visible row scrolls rather than stopping. <kbd>1</kbd>–<kbd>9</kbd> still reach
+the first nine rows wherever the view is, and <kbd>g</kbd> opens a count for any
+row by its printed number - `g25`<kbd>Enter</kbd>, or `g25G` if you think in vim.
+<kbd>gg</kbd> and <kbd>G</kbd> are the first and last rows.
+
+To see more at once, make the floating pane taller (`height` in the layout).
+Under about two rows per agent the per-agent detail line is dropped first, which
+roughly doubles how many rows fit.
+
+## A row has a `!` next to it
+
+That agent fired a desktop notification since you last had the panel focused. It
+exists so coming back from a banner does not mean re-scanning the whole list for
+whichever row changed.
+
+Every marker clears the moment the panel becomes visible, so if they persist the
+plugin is not receiving `Visible` events - which would also mean notifications
+are firing while the panel is on screen. Nothing to do about it from the panel;
+it points at the Zellij session rather than the plugin.
+
+No markers ever appearing is the normal state when notifications are off. See
+[no desktop notifications](#no-desktop-notifications).

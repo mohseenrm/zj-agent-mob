@@ -57,7 +57,7 @@ Three steps: install, bind a key, restart your agents.
 No clone and no Rust toolchain required:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.5.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.6.0/init.sh | sh
 ```
 
 This downloads the plugin and hook script for that release, wires up whichever of Claude Code and Codex you have, and leaves an installer at `~/.config/zj-agent-mob/install.sh` so the in-panel install screen works from then on.
@@ -65,7 +65,7 @@ This downloads the plugin and hook script for that release, wires up whichever o
 Prefer to read before running? Same thing in two steps:
 
 ```sh
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.5.0/init.sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.6.0/init.sh
 less init.sh && sh init.sh
 ```
 
@@ -151,6 +151,8 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | Move selection |
 | <kbd>Enter</kbd> | Jump to that agent's pane (across tabs *and* sessions) and hide the panel |
 | <kbd>1</kbd>–<kbd>9</kbd> | Jump straight to agent N |
+| <kbd>g</kbd> <var>N</var> <kbd>Enter</kbd> | Jump to any row by number, including past 9. <kbd>g</kbd> opens a count, <kbd>Enter</kbd> or <kbd>G</kbd> closes it: `g25`<kbd>Enter</kbd>, or `g25G` for the vim spelling |
+| <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd> | First row / last row |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
 | <kbd>y</kbd> | Answer a blocked agent with `y` (only shown while it is waiting) |
