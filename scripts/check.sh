@@ -1,70 +1,104 @@
 #!/bin/sh
-# Run the same checks CI does, in the same order, and stop where CI would.
+# The checks, defined once. CI runs them step by step; you run them all at once.
 #
-# CI is two jobs across five steps documented in development.md. Copying them
-# out of a doc by hand is how a push fails on the one you forgot, so this is the
-# single command for the pre-push loop.
+# Every command CI executes lives here rather than in ci.yml, so the two cannot
+# drift: the workflow calls `./scripts/check.sh <step>` per step, which keeps
+# GitHub's per-step log sections and parallel jobs while this file stays the
+# single source of truth.
 #
 #   ./scripts/check.sh          everything
-#   ./scripts/check.sh fast     skip the wasm build and the installer e2e
-#   ./scripts/check.sh -l       list the steps without running them
+#   ./scripts/check.sh fast     skip the wasm build, exports and installer e2e
+#   ./scripts/check.sh test     one step by name (what CI calls)
+#   ./scripts/check.sh -l       list the steps
 set -eu
 
 cd "$(dirname "$0")/.."
 
-MODE="${1:-all}"
 WASM=target/wasm32-wasip1/release/zj-agent-mob.wasm
 EXPORTS="_start load update render pipe plugin_version"
+SHELL_SCRIPTS="init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh"
 
-# Each step is `name|when|command`. `fast` steps run in both modes.
-steps() {
-  cat <<'STEPS'
-fmt|fast|cargo fmt --all --check
-clippy|fast|cargo clippy --all-targets -- -D warnings
-test|fast|cargo test --all-targets
-shellcheck|fast|shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh tests/e2e-install.sh
-wasm|all|cargo build --release --target wasm32-wasip1
-exports|all|check_exports
-installer|all|./tests/e2e-install.sh
-STEPS
+# `fast` steps are the ones quick enough for a tight local loop; `all` steps
+# also run on a bare `./scripts/check.sh`.
+STEPS="fmt clippy test shellcheck wasm exports installer"
+FAST_STEPS="fmt clippy test shellcheck"
+
+run_step() {
+  case "$1" in
+    fmt) cargo fmt --all --check ;;
+    clippy) cargo clippy --all-targets -- -D warnings ;;
+    # Tests run natively: host calls are stubbed off-wasm precisely so this works.
+    test) cargo test --all-targets ;;
+    shellcheck) run_shellcheck ;;
+    wasm) cargo build --release --target wasm32-wasip1 ;;
+    exports) check_exports ;;
+    # The installer is the only supported path to a working install, and what it
+    # writes is read by Claude Code and Codex themselves: a wrong event name or
+    # matcher silences every agent and no Rust test would notice.
+    installer) ./tests/e2e-install.sh ;;
+    *)
+      echo "unknown step: $1" >&2
+      echo "steps: $STEPS" >&2
+      return 2
+      ;;
+  esac
 }
 
-# Zellij's loader needs all six or it fails at load with "could not find
-# exported function", which no other check here would catch.
+# Word splitting on the script list is intended, hence the disable.
+run_shellcheck() {
+  # shellcheck disable=SC2086
+  shellcheck --shell=sh $SHELL_SCRIPTS
+}
+
+# Zellij's loader needs the WASI `_start` export, which only a bin target
+# provides. A cdylib-only build fails at load with "could not find exported
+# function", which no other check here would catch.
 check_exports() {
-  command -v wasm-objdump >/dev/null 2>&1 || {
-    echo "  skipped: wasm-objdump not installed (brew install wabt)"
+  if ! command -v wasm-objdump >/dev/null 2>&1; then
+    echo "skipped: wasm-objdump not installed (brew install wabt)"
     return 0
-  }
+  fi
   dump=$(wasm-objdump -x "$WASM")
+  missing=''
   for sym in $EXPORTS; do
-    printf '%s' "$dump" | grep -q "<$sym> -> \"$sym\"" || {
-      echo "  missing export: $sym"
-      return 1
-    }
+    printf '%s' "$dump" | grep -q "<$sym> -> \"$sym\"" || missing="$missing $sym"
   done
-  echo "  all six exports present"
+  if [ -n "$missing" ]; then
+    # ::error:: is a GitHub annotation; harmless noise in a local run.
+    echo "::error::wasm is missing the$missing export(s)"
+    return 1
+  fi
+  echo "all required exports present"
 }
 
-if [ "$MODE" = "-l" ] || [ "$MODE" = "--list" ]; then
-  printf '%s\n' "steps, in CI order:"
-  cat <<'LIST'
+usage() {
+  cat <<EOF
+usage: $0 [all|fast|-l|<step>]
+
+steps, in CI order:
   fmt         cargo fmt --all --check
   clippy      cargo clippy --all-targets -- -D warnings
   test        cargo test --all-targets              (unit + hook e2e)
-  shellcheck  shellcheck the three shipped scripts
-  wasm        cargo build --release --target wasm32-wasip1   [skipped by `fast`]
-  exports     the six symbols Zellij loads                   [skipped by `fast`]
-  installer   ./tests/e2e-install.sh                         [skipped by `fast`]
-LIST
-  exit 0
-fi
+  shellcheck  shellcheck the shipped scripts
+  wasm        cargo build --release --target wasm32-wasip1   [skipped by \`fast\`]
+  exports     the six symbols Zellij loads                   [skipped by \`fast\`]
+  installer   ./tests/e2e-install.sh                         [skipped by \`fast\`]
+EOF
+}
+
+MODE="${1:-all}"
 
 case "$MODE" in
-  all | fast) ;;
+  -l | --list | -h | --help)
+    usage
+    exit 0
+    ;;
+  all) selected="$STEPS" ;;
+  fast) selected="$FAST_STEPS" ;;
   *)
-    echo "usage: $0 [all|fast|-l]" >&2
-    exit 2
+    # A single step: run it directly so CI gets its exit code and nothing else.
+    run_step "$MODE"
+    exit $?
     ;;
 esac
 
@@ -72,22 +106,15 @@ failed=''
 ran=0
 start=$(date +%s)
 
-# The loop reads from a heredoc rather than a pipe so `failed` survives it.
-while IFS='|' read -r name when cmd; do
-  [ -n "$name" ] || continue
-  if [ "$MODE" = fast ] && [ "$when" = all ]; then
-    continue
-  fi
+for name in $selected; do
   printf '\033[1m==> %s\033[0m\n' "$name"
-  if eval "$cmd"; then
+  # Keep going: a `cargo fmt` diff should not hide a failing test.
+  if run_step "$name"; then
     ran=$((ran + 1))
   else
-    # Keep going: one `cargo fmt` diff should not hide a failing test.
     failed="$failed $name"
   fi
-done <<EOF
-$(steps)
-EOF
+done
 
 elapsed=$(($(date +%s) - start))
 

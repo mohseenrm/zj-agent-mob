@@ -4,7 +4,6 @@
 - [Iterating against a live session](#iterating-against-a-live-session)
 - [Cutting a release](#cutting-a-release)
 - [Why a bin target](#why-a-bin-target)
-- [Module layout](#module-layout)
 - [Rendering note](#rendering-note)
 
 ## Getting started
@@ -62,6 +61,12 @@ Between them these cover the two seams the Rust suite cannot reach, and neither 
 cargo test --test hook_e2e
 ./tests/e2e-install.sh
 ```
+
+Ten of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps` and a real staged spool directory, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
+
+Two tests run the whole loop rather than one layer: `the_real_hook_and_scan_produce_a_live_foreign_row` drives the real hook script, the real scan script, and the real merge in sequence, and `real_machine_capture_renders_live_cross_session_rows` replays bytes captured from two live Zellij sessions. Between them they cover the seams each single-layer test assumes.
+
+Zellij host calls (`focus_terminal_pane`, `hide_self`, `run_command`, ...) are WASM imports with no native symbol, so they're behind the `host` shim that no-ops off-wasm. That keeps the whole state machine and all layout code unit-testable with a plain `cargo test`.
 
 ## Iterating against a live session
 
@@ -132,33 +137,6 @@ wasm-objdump -x target/wasm32-wasip1/release/zj-agent-mob.wasm | grep -A8 'Expor
 ```
 
 You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI asserts all six.
-
-## Module layout
-
-| File | Lines | Tests | Role |
-|---|---|---|---|
-| `main.rs` | 16 | | `register_plugin!` + WASI entry point |
-| `lib.rs` | 63 | | Module wiring and shared constants |
-| `plugin.rs` | 598 | 16 | Zellij lifecycle: permissions, subscriptions, `render`, the list viewport, group headings, the permission prompt box, the reply editor |
-| `state.rs` | 1117 | 132 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership, grouping, the fleet summary |
-| `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 376 | 40 | Keyboard: selection, jump-to-pane (and cross-session switch), vim-style `g`<var>N</var> count goto, grouping toggle, two-step kill, approve/reject, quick reply |
-| `agent.rs` | 321 | 35 | One agent, its `(session, pane)` identity, why it is blocked, and how its row is built |
-| `notify.rs` | 206 | 21 | Desktop notifications: triggers, per-agent cooldown, burst coalescing, message text |
-| `status.rs` | 109 | | The agent states and their presentation |
-| `ribbon.rs` | 90 | 7 | Ribbon line serialization |
-| `discover.rs` | 204 | 22 | Process-environment scan across every session, reading the cross-session status spool, and the panel beacon |
-| `host.rs` | 139 | | Host-call shim |
-| `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
-| `style.rs` | 23 | | ANSI constants |
-
-Line counts exclude tests. Tests live beside the code they cover, 297 in total, none needing a running Zellij, plus 184 end-to-end cases across `tests/hook_e2e.rs` (86) and `tests/e2e-install.sh` (98).
-
-Ten of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps` and a real staged spool directory, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
-
-Two tests run the whole loop rather than one layer: `the_real_hook_and_scan_produce_a_live_foreign_row` drives the real hook script, the real scan script, and the real merge in sequence, and `real_machine_capture_renders_live_cross_session_rows` replays bytes captured from two live Zellij sessions. Between them they cover the seams each single-layer test assumes.
-
-Zellij host calls (`focus_terminal_pane`, `hide_self`, `run_command`, ...) are WASM imports with no native symbol, so they're behind the `host` shim that no-ops off-wasm. That keeps the whole state machine and all layout code unit-testable with a plain `cargo test`.
 
 ## Rendering note
 

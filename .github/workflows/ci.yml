@@ -1,5 +1,9 @@
 name: CI
 
+# Every check runs through `scripts/check.sh <step>`, so the commands live in
+# one place and cannot drift from the local pre-push loop. The steps stay
+# separate here to keep GitHub's per-step log sections and the two parallel jobs.
+
 on:
   pull_request:
   push:
@@ -28,31 +32,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo fmt --all --check
+      # tests/hook_e2e.rs drives the real hook script, which shells out to jq;
+      # wabt provides the wasm-objdump the exports check needs.
+      - name: Install jq and wabt
+        run: sudo apt-get update && sudo apt-get install -y jq wabt
 
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: ./scripts/check.sh fmt
 
-      # tests/hook_e2e.rs drives the real hook script, which shells out to jq.
-      - name: Install jq (the hook depends on it)
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - run: ./scripts/check.sh clippy
 
-      # Tests run natively: host calls are stubbed off-wasm precisely so this works.
-      - run: cargo test --all-targets
+      - run: ./scripts/check.sh test
 
-      - run: cargo build --release --target wasm32-wasip1
+      - run: ./scripts/check.sh wasm
 
-      # Zellij's loader needs the WASI `_start` export, which only a bin target
-      # provides. A cdylib-only build fails at load with "could not find
-      # exported function", which no other check here would catch.
-      - name: Verify the wasm exports Zellij needs
-        run: |
-          sudo apt-get update && sudo apt-get install -y wabt
-          exports=$(wasm-objdump -x target/wasm32-wasip1/release/zj-agent-mob.wasm)
-          for sym in _start load update render pipe plugin_version; do
-            printf '%s' "$exports" | grep -q "<$sym> -> \"$sym\"" \
-              || { echo "::error::wasm is missing the $sym export"; exit 1; }
-          done
-          echo "all required exports present"
+      - run: ./scripts/check.sh exports
 
   shell:
     name: shellcheck
@@ -60,17 +53,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: shellcheck
-        run: |
-          sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh \
-            scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      # The hook end-to-end tests live in tests/hook_e2e.rs and run under
-      # `cargo test` in the rust job above.
+      - run: ./scripts/check.sh shellcheck
 
-      # The installer is the only supported path to a working install, and what
-      # it writes is read by Claude Code and Codex themselves: a wrong event
-      # name or matcher silences every agent and no Rust test would notice.
-      - name: Installer end-to-end tests
-        run: ./tests/e2e-install.sh
+      - run: ./scripts/check.sh installer

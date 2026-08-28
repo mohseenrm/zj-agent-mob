@@ -11,32 +11,24 @@ Run enough Claude Code and Codex agents and they scatter across panes, tabs, and
 
 ![Four agents appear across three Zellij sessions, a permission prompt is approved from the panel, statuses move through compact, failed and done, then the kill confirm, the install screen, and finally Enter jumps into an agent in another session](demo/tour.gif)
 
-A blocked agent is invisible until you happen to cycle past its pane. Rows sort by urgency, so whatever needs you the most, sits at the top.
+A blocked agent is invisible until you happen to cycle past its pane. Rows sort
+by urgency, so whatever needs you most sits at the top.
 
-- **See every agent at once**, across sessions, with live status and the task each one is on.
+- **Every agent at once**, across sessions, with live status and the task each is on.
 - **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
-- **Get told when you are away**: a desktop notification the moment an agent blocks or fails, wherever your attention is.
-- **Answer permission prompts in place** with <kbd>a</kbd> / <kbd>r</kbd>, without leaving the panel (opt-in).
-- **Reply without leaving the panel**: <kbd>y</kbd> to continue, <kbd>m</kbd> to type an answer.
-- **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident, in any session.
-- **No daemon and no socket.** Agent hooks pipe straight to the plugin, and drop a
-  disposable status file so other sessions can read it.
+- **Told when you are away**: a desktop notification the moment an agent blocks or fails.
+- **Answer in place**: <kbd>a</kbd> / <kbd>r</kbd> for permission prompts (opt-in),
+  <kbd>y</kbd> / <kbd>m</kbd> to reply.
+- **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident.
+- **No daemon and no socket.** Hooks pipe straight to the plugin and drop a
+  disposable status file for other sessions to read.
 
 > Inspired by [herdr](https://herdr.dev), without adopting an entire new multiplexer.
 
-## Contents
-
-- [Requirements](#requirements)
-- [Quick start](#quick-start)
-- [Screens](#screens)
-- [Keys](#keys)
-- [Statuses](#statuses)
-- [Known limitations](#known-limitations)
-- Additional docs:
-  - [Setup: install, Zellij configuration](docs/setup.md)
-  - [How it works: status transport, task summaries](docs/how-it-works.md)
-  - [Local development](docs/development.md)
-  - [Troubleshooting](docs/troubleshooting.md)
+**Docs:** [setup](docs/setup.md) ·
+[how it works](docs/how-it-works.md) ·
+[development](docs/development.md) ·
+[troubleshooting](docs/troubleshooting.md)
 
 ## Requirements
 
@@ -118,29 +110,44 @@ See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install 
 
 ## Screens
 
-**First run.** If neither agent's hooks are installed, nothing can report status, so the panel offers to install them rather than sitting empty. Press <kbd>1</kbd>, <kbd>2</kbd>, or <kbd>3</kbd> to install without leaving Zellij.
+<table>
+<tr>
+<td width="50%">
+
+**The agent list.** One row per agent: status, elapsed time, project, task, and
+an indented detail line.
+
+![The agent list: one row per agent with status, elapsed time, project, and task](docs/img/02-agent-list.png)
+
+</td>
+<td width="50%">
+
+**First run.** With no hooks installed nothing can report, so the panel offers
+to install rather than sitting empty.
 
 ![The setup screen listing four quick actions: install for Claude Code, for Codex, for both, or quit](docs/img/01-setup.png)
 
-**Hooks installed, nothing running yet.** Start `claude` or `codex` in any pane and it appears here.
+</td>
+</tr>
+<tr>
+<td width="50%">
 
-![The empty state telling you to start claude or codex in a pane](docs/img/00-empty.png)
-
-**The agent list.** One row per agent with status, elapsed time, project, and task, each with an indented detail line.
-
-![The agent list: one row per agent with status, elapsed time, project, and task, each with an indented detail line](docs/img/02-agent-list.png)
-
-**Killing an agent.** <kbd>x</kbd> sends an interrupt and arms the row; pressing it again closes the pane.
+**Killing an agent.** <kbd>x</kbd> interrupts and arms the row; again closes the
+pane.
 
 ![The agent list with the selected row showing "press x again to close pane" in red](docs/img/03-kill-armed.png)
 
-**The install screen** (<kbd>i</kbd>) toggles each target: pressing a row's key installs it when absent and uninstalls it when present.
+</td>
+<td width="50%">
+
+**The install screen** (<kbd>i</kbd>). Each target toggles independently, so
+running only one agent's hooks is supported.
 
 ![The install screen showing Claude Code hooks, Codex hooks, and Plugin wasm all installed](docs/img/04-install.png)
 
-Targets are independent, so running only one agent's hooks is a supported state:
-
-![The install screen with Claude Code and the plugin installed but Codex hooks absent](docs/img/05-install-partial.png)
+</td>
+</tr>
+</table>
 
 ## Keys
 
@@ -193,15 +200,14 @@ Rows sort in that order, so whatever needs you most is at the top. A `found` row
 
 ### Ordering and grouping
 
-By default rows sort purely by urgency, which is right until the same project is
-scattered across the screen. <kbd>s</kbd> cycles to grouped-by-project, then
-grouped-by-session, then back. Within a group urgency still decides order, and
-each group sorts by its **most urgent member**, so grouping can never bury a
-blocked agent under a quiet project:
+<kbd>s</kbd> cycles the ordering: urgency (default), grouped by project, then
+grouped by session. Each group is ranked by its **most urgent member**, so
+grouping never buries a blocked agent under a quiet project. The active mode
+shows in the header; the default needs no announcing.
 
 ```
 zj-agent-mob   1 waiting · 2 working   [project groups · s]
-────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────
   api (2)
 ▶ 1 ● claude  waiting    12s  api        Fix the failing auth test
       └ wants: permission · needs approval: git push --force · pane:6
@@ -210,23 +216,17 @@ zj-agent-mob   1 waiting · 2 working   [project groups · s]
   3 ⠙ codex   working   2m10s  web        Update the checkout flow
 ```
 
-The active mode shows in the header; the default needs no announcing, so nothing
-appears until you press <kbd>s</kbd>.
-
 ### Why an agent is blocked
 
-A `waiting` row also says what kind of answer it wants, because they need
-different things from you:
+A `waiting` row says what kind of answer it wants, so you can triage without
+visiting a pane. Only a `permission` is a yes/no the panel can answer:
 
-| `wants:` | Means | You can |
-|---|---|---|
-| `permission` | A tool-permission prompt | Answer with <kbd>a</kbd> / <kbd>r</kbd> (with `ZJ_AGENT_APPROVE=1`) |
-| `plan` | A plan waiting to be accepted | Read it - <kbd>Enter</kbd> to the pane |
-| `question` | A free-text question | Reply with <kbd>m</kbd>, or jump to the pane |
-| `idle` | Nobody has typed in a while | Nothing is blocked on a decision |
-
-This is what lets you triage the list without visiting a pane: a `permission` is
-often answerable from the panel, a `plan` never is.
+| `wants:` | You can |
+|---|---|
+| `permission` | Answer with <kbd>a</kbd> / <kbd>r</kbd> (needs `ZJ_AGENT_APPROVE=1`) |
+| `plan` | Read it - <kbd>Enter</kbd> to the pane |
+| `question` | Reply with <kbd>m</kbd>, or jump to the pane |
+| `idle` | Nothing is blocked on a decision |
 
 ### Answering permission prompts from the panel
 
@@ -266,29 +266,33 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 
 ### Fleet status in your status bar
 
-The panel can publish a one-line summary (`2 waiting · 3 working`) for a status bar to render,
-so you know whether anyone needs you without opening anything:
+Set `summary_file` and the panel publishes the fleet's state on every change, so
+you know whether anyone needs you without opening anything:
 
 ```kdl
-    summary_file "/tmp/zj-agent-mob-summary"
+    summary_file "/tmp/zj-agent-mob.summary"
 ```
 
-It is written on every change and also piped as `zj-agent-mob-summary`, so
-[zjstatus](https://github.com/dj95/zjstatus) can pick it up with its `pipe` widget, and anything
-else (a starship prompt, a shell script) can read the file.
+Two files, both written atomically: the prose line (`2 waiting · 3 working`,
+empty when nothing needs you) and `<path>.kv` for consumers that would rather
+not parse prose:
 
-A second file, `<path>.kv`, carries the same counts as
-`failed=0 waiting=2 working=1 done=0 found=0 total=3` for consumers that would
-rather not parse prose. Both are written atomically, and both formats are a
-stated contract - see [the fleet summary](docs/setup.md#the-fleet-summary-in-your-status-bar)
-for worked starship, tmux and shell examples.
+```
+failed=0 waiting=2 working=1 done=0 found=0 total=3
+```
+
+The prose line is also piped as `zj-agent-mob-summary`, so
+[zjstatus](https://github.com/dj95/zjstatus) can pick it up with its `pipe`
+widget. Both formats are a stated contract - see
+[the fleet summary](docs/setup.md#the-fleet-summary-in-your-status-bar) for
+worked starship, tmux and shell examples.
 
 ## Known limitations
 
 - Agents started before `init.sh` ran aren't tracked (no hooks installed yet). Restart them.
-- Agents in other Zellij sessions report live status through a status file in `$TMPDIR`. The states that need you (`waiting`, `failed`, `done`) are piped across immediately; the quieter ones are picked up on the panel's next scan.
+- Agents in other sessions report through a status file in `$TMPDIR`. The states that need you (`waiting`, `failed`, `done`) pipe across immediately; quieter ones wait for the next scan (5s).
 - Claude has no "permission granted" event, so `waiting` to `working` relies on the next tool-event heartbeat. With `ZJ_AGENT_HEARTBEAT=0`, `waiting` persists until the turn ends.
-- Notifications need a notifier on `PATH` (`terminal-notifier` or `osascript` on macOS, `notify-send` on Linux). With none, the panel behaves exactly as before.
+- Notifications need a notifier on `PATH` (`terminal-notifier` / `osascript` on macOS, `notify-send` on Linux). Without one, everything else still works.
 
 Hitting something not listed here? See [docs/troubleshooting.md](docs/troubleshooting.md).
 

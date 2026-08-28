@@ -102,6 +102,11 @@ After the first run you can do all of this from inside the panel instead: press 
 
 ![The install screen with Claude Code hooks and the plugin installed, Codex hooks absent](img/05-install-partial.png)
 
+With hooks installed but no agent running yet, the panel says so rather than
+looking broken - start `claude` or `codex` in any pane and it fills in:
+
+![The empty state telling you to start claude or codex in a pane](img/00-empty.png)
+
 Each row toggles: pressing its key installs when absent and uninstalls when present.
 
 If neither agent is hooked, the panel skips the empty state and offers the same install directly:
