@@ -68,6 +68,11 @@ pub struct State {
     pub(crate) summary_path: String,
     /// A free-text reply being typed for the selected agent.
     pub(crate) reply: Option<Reply>,
+    /// Digits typed after `G`, awaiting Enter or a non-digit. Vim-style, so a
+    /// row past 9 is still reachable without stealing a letter command.
+    pub(crate) jump_buf: Option<String>,
+    /// First visible row, kept so the selection stays on screen.
+    pub(crate) scroll: usize,
     /// The last cross-session action that failed. Those run through the `zellij`
     /// binary, so a failure is otherwise invisible: the row would vanish while
     /// the agent kept running.
@@ -404,6 +409,7 @@ impl State {
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
+                notified: false,
             });
         }
 
@@ -434,6 +440,9 @@ impl State {
             .map(|a| a.display_task().to_string())
             .unwrap_or_default();
         if self.notifier.queue(id, status, &task, self.now) {
+            if let Some(a) = self.agents.iter_mut().find(|a| &a.id == id) {
+                a.notified = true;
+            }
             self.force_timer();
         }
     }
@@ -790,6 +799,7 @@ impl State {
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
+                notified: false,
             });
             changed = true;
         }
@@ -908,6 +918,9 @@ impl State {
         // notifier lives on `self`.
         for (id, status, task) in transitions {
             if self.notifier.queue(&id, status, &task, now) {
+                if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
+                    a.notified = true;
+                }
                 self.force_timer();
             }
         }
@@ -991,6 +1004,19 @@ impl State {
                 self.reply = None;
             }
         }
+    }
+
+    /// Clears the notified gutter. Called when the panel becomes visible: the
+    /// marks exist to survive the trip back from a banner, not past that.
+    pub(crate) fn clear_notified(&mut self) -> bool {
+        let mut changed = false;
+        for a in self.agents.iter_mut() {
+            if a.notified {
+                a.notified = false;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn clamp_selection(&mut self) {
@@ -3098,5 +3124,30 @@ mod cross_session_tests {
         s.request_scan();
         assert_eq!(s.last_scan_at, 42.0);
         assert!(s.scan_pending);
+    }
+
+    /// The marker exists to survive the trip back from a banner, not past that.
+    #[test]
+    fn focusing_the_panel_clears_the_notified_markers() {
+        let mut s = State::default();
+        s.notifier.binary = "osascript".into();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        assert!(s.agents[0].notified, "a notified transition marks its row");
+        assert!(s.clear_notified(), "clearing reports the change");
+        assert!(!s.agents[0].notified);
+        assert!(!s.clear_notified(), "a second clear is a no-op");
+    }
+
+    /// A suppressed notification must not mark the row: nothing fired, so there
+    /// is nothing to come back to.
+    #[test]
+    fn a_suppressed_notification_leaves_the_row_unmarked() {
+        let mut s = State::default();
+        s.notifier.binary = "osascript".into();
+        s.notifier.focused = true;
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        assert!(!s.agents[0].notified);
     }
 }

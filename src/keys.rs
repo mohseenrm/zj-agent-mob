@@ -181,6 +181,62 @@ impl State {
         }
     }
 
+    /// The count started by `g`. Vim puts the count before the motion (`25G`),
+    /// but a bare `1`-`9` already jumps on its own here, so the digits cannot
+    /// lead: pressing `2` has focused the pane and hidden the panel before a
+    /// second digit could arrive. `g` opens the count instead, and `gg` / `G`
+    /// keep their real vim meanings.
+    ///
+    /// Any other key cancels rather than guessing, so a mistyped prefix cannot
+    /// fire a jump at whatever row it happened to parse to.
+    fn handle_jump_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Char(c @ '0'..='9') => {
+                if let Some(b) = &mut self.jump_buf {
+                    // Four digits is far past any real fleet, and caps the parse.
+                    if b.len() < 4 {
+                        b.push(c);
+                    }
+                }
+                true
+            }
+            BareKey::Backspace => {
+                if let Some(b) = &mut self.jump_buf {
+                    b.pop();
+                }
+                true
+            }
+            // `gg` with no count is vim's "first row".
+            BareKey::Char('g') if self.jump_buf.as_deref() == Some("") => {
+                self.jump_buf = None;
+                self.jump_to_row(1);
+                true
+            }
+            // `G` closes a count the way vim does (`25G`); Enter is the same
+            // thing for anyone who does not think in vim.
+            BareKey::Enter | BareKey::Char('G') | BareKey::Char('g') => {
+                let n = self.jump_buf.take().and_then(|b| b.parse::<usize>().ok());
+                if let Some(n) = n {
+                    self.jump_to_row(n);
+                }
+                true
+            }
+            _ => {
+                self.jump_buf = None;
+                true
+            }
+        }
+    }
+
+    /// Selects and focuses a 1-based row. Out of range does nothing: clamping
+    /// would jump somewhere the user did not name.
+    fn jump_to_row(&mut self, n: usize) {
+        if n >= 1 && n <= self.agents.len() {
+            self.selected = n - 1;
+            self.focus_selected();
+        }
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyWithModifier) -> bool {
         if self.install.open {
             return self.handle_install_key(key);
@@ -190,6 +246,9 @@ impl State {
         }
         if self.reply.is_some() {
             return self.handle_reply_key(key);
+        }
+        if self.jump_buf.is_some() {
+            return self.handle_jump_key(key);
         }
         // Any deliberate keypress means the last failure has been seen.
         self.action_error = None;
@@ -211,6 +270,19 @@ impl State {
             }
             BareKey::Enter => {
                 self.focus_selected();
+                true
+            }
+            // Opens a count for rows past the 1-9 fast path: `g25` then Enter,
+            // or `g25G` for the vim spelling. `gg` is the first row.
+            BareKey::Char('g') => {
+                self.jump_buf = Some(String::new());
+                self.kill_armed = None;
+                true
+            }
+            // Vim's "last line". No count can reach it without knowing how many
+            // rows there are, which is exactly what this saves you looking up.
+            BareKey::Char('G') => {
+                self.jump_to_row(self.agents.len());
                 true
             }
             BareKey::Char(c @ '1'..='9') => {
@@ -732,5 +804,170 @@ mod tests {
         s.handle_key(key('j'));
         assert_eq!(s.selected, 0, "j moves the install cursor, not the agent cursor");
         assert_eq!(s.install.target_at_cursor(), crate::install::Target::Codex);
+    }
+
+    /// Rows past 9 have a number on screen that no single key can reach, so the
+    /// count is the only way to get to them.
+    #[test]
+    fn g_then_digits_then_enter_jumps_past_row_nine() {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for i in 0..25u32 {
+            s.handle_status(&args_map(&[("pane_id", &i.to_string()), ("status", "idle")]));
+        }
+        s.handle_key(key('g'));
+        assert_eq!(s.jump_buf.as_deref(), Some(""), "g opens the count");
+        s.handle_key(key('2'));
+        s.handle_key(key('5'));
+        assert_eq!(s.jump_buf.as_deref(), Some("25"));
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(s.jump_buf, None, "committing closes the buffer");
+        assert_eq!(s.selected, 24, "g25 selects the 25th row, 1-based");
+    }
+
+    /// A number past the end must not move the cursor to a row that is not
+    /// there; clamping would jump somewhere the user did not name.
+    #[test]
+    fn a_count_past_the_end_of_the_list_does_nothing() {
+        let mut s = state_with_agents(3);
+        s.selected = 1;
+        for c in ['g', '9', '9'] {
+            s.handle_key(key(c));
+        }
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(s.selected, 1, "an out-of-range goto leaves the selection alone");
+        assert_eq!(s.jump_buf, None);
+    }
+
+    /// While the count is open every key belongs to it, so `x` cannot kill.
+    #[test]
+    fn a_pending_count_swallows_other_keys_instead_of_acting_on_them() {
+        let mut s = state_with_agents(3);
+        s.handle_key(key('g'));
+        s.handle_key(key('x'));
+        assert_eq!(s.jump_buf, None, "a non-digit cancels the count");
+        assert_eq!(s.kill_armed, None, "and must not arm a kill");
+        assert_eq!(s.agents.len(), 3);
+    }
+
+    #[test]
+    fn backspace_edits_the_count() {
+        let mut s = state_with_agents(3);
+        for c in ['g', '1', '2'] {
+            s.handle_key(key(c));
+        }
+        s.handle_key(KeyWithModifier::new(BareKey::Backspace));
+        assert_eq!(s.jump_buf.as_deref(), Some("1"));
+    }
+
+    fn state_with_agents(n: u32) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for i in 0..n {
+            s.handle_status(&args_map(&[("pane_id", &i.to_string()), ("status", "idle")]));
+        }
+        s
+    }
+
+    /// Vim's own ordering: the count precedes the motion, and `G` closes it.
+    #[test]
+    fn a_count_closed_with_capital_g_is_the_vim_spelling() {
+        let mut s = state_with_agents(30);
+        for c in ['g', '2', '5', 'G'] {
+            s.handle_key(key(c));
+        }
+        assert_eq!(s.selected, 24, "g25G lands on row 25");
+        assert_eq!(s.jump_buf, None);
+    }
+
+    /// `gg` is the first row and `G` the last, as in vim.
+    #[test]
+    fn gg_goes_to_the_first_row_and_capital_g_to_the_last() {
+        let mut s = state_with_agents(12);
+        s.selected = 5;
+        s.handle_key(key('G'));
+        assert_eq!(s.selected, 11, "G with no count is the last row");
+        assert_eq!(s.jump_buf, None, "G alone opens no count");
+
+        s.handle_key(key('g'));
+        s.handle_key(key('g'));
+        assert_eq!(s.selected, 0, "gg is the first row");
+        assert_eq!(s.jump_buf, None);
+    }
+
+    /// `G` on an empty list must not index a row that is not there.
+    #[test]
+    fn capital_g_on_an_empty_list_is_inert() {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            ..Default::default()
+        };
+        assert!(s.handle_key(key('G')));
+        assert_eq!(s.selected, 0);
+        assert!(s.agents.is_empty());
+    }
+
+    /// A count of zero names no row, so it must not wrap to the last one.
+    #[test]
+    fn a_zero_count_does_nothing() {
+        let mut s = state_with_agents(5);
+        s.selected = 2;
+        for c in ['g', '0'] {
+            s.handle_key(key(c));
+        }
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(s.selected, 2, "g0 names no row");
+    }
+
+    /// The single-key path must survive the count being added around it.
+    #[test]
+    fn bare_digits_still_jump_immediately() {
+        let mut s = state_with_agents(9);
+        s.handle_key(key('4'));
+        assert_eq!(s.selected, 3, "4 jumps to row 4 with no count");
+        assert_eq!(s.jump_buf, None, "a bare digit opens no count");
+    }
+
+    /// The full sequence a user actually types, asserted on selection rather
+    /// than on a pty: `focus_selected` hides the panel, so every keystroke
+    /// after a jump lands in the pane underneath and cannot be read back.
+    #[test]
+    fn the_documented_jump_sequences_land_on_the_right_row() {
+        for (keys, expect, why) in [
+            (vec!['G'], 25usize, "G is the last row"),
+            (vec!['g', 'g'], 0, "gg is the first row"),
+            (vec!['g', '2', '2', 'G'], 21, "g22G is the vim spelling"),
+            (vec!['4'], 3, "a bare digit still jumps"),
+        ] {
+            let mut s = state_with_agents(26);
+            s.selected = 12;
+            for c in keys.iter() {
+                s.handle_key(key(*c));
+            }
+            assert_eq!(s.selected, expect, "{}", why);
+            assert_eq!(s.jump_buf, None, "the count must be closed after {}", why);
+        }
+    }
+
+    /// Out of range must leave the cursor alone rather than clamping to an end.
+    #[test]
+    fn an_out_of_range_count_leaves_the_selection_untouched() {
+        let mut s = state_with_agents(26);
+        s.selected = 12;
+        for c in ['g', '9', '9'] {
+            s.handle_key(key(c));
+        }
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(s.selected, 12, "g99 with 26 rows must not move the cursor");
+        assert_eq!(s.jump_buf, None);
     }
 }

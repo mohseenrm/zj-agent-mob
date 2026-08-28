@@ -70,6 +70,8 @@ pub(crate) struct Agent {
     pub(crate) tasks_done: u32,
     /// False once the agent's session stops being listed by Zellij.
     pub(crate) session_alive: bool,
+    /// Fired a notification since the panel was last focused.
+    pub(crate) notified: bool,
 }
 
 impl Agent {
@@ -117,6 +119,9 @@ impl Agent {
             home,
         } = ctx;
         let marker = if selected { "\u{25b6}" } else { " " };
+        // Marks a row that notified since you last looked, so coming back from
+        // a banner does not mean re-scanning the whole list.
+        let bell = if self.notified { "!" } else { " " };
         // `unknown` covers two situations the user acts on differently: the
         // session is gone and the agent is unreachable, or the row simply aged
         // out while its session is alive, which points at missing hooks there.
@@ -128,7 +133,7 @@ impl Agent {
         // Ranges are tracked as the string is built, in CHARACTER offsets: both
         // the marker and the spinner icon are multi-byte, so byte offsets would
         // shift the colour past the icon and into the middle of the next word.
-        let mut text = format!("{} {} ", marker, i + 1);
+        let mut text = format!("{}{}{:>2} ", marker, bell, i + 1);
         let icon_range = chars(&text)..chars(&text) + chars(icon);
         text.push_str(icon);
         text.push(' ');
@@ -274,6 +279,7 @@ mod render_tests {
             tasks_total: 0,
             tasks_done: 0,
             session_alive: true,
+            notified: false,
         }
     }
 
@@ -356,7 +362,7 @@ mod render_tests {
             let text = item_text(&item);
             let marker = if selected { "\u{25b6}" } else { " " };
 
-            let icon_at = chars(marker) + 1 + (i + 1).to_string().len() + 1;
+            let icon_at = chars(marker) + 1 + 2 + 1;
             assert_eq!(
                 slice(&text, icon_at..icon_at + chars(icon)),
                 icon,
@@ -612,5 +618,51 @@ mod render_tests {
         let a = agent();
         assert!(!row(&a, 0, true, "\u{280b}", 10.0, 110, true).contains('\n'));
         assert!(!item_text(&a.detail_item(false, 110)).contains('\n'));
+    }
+
+    /// Coming back from a banner should not mean re-scanning the whole list.
+    #[test]
+    fn a_notified_row_carries_a_gutter_marker() {
+        let mut a = agent();
+        assert!(
+            !row(&a, 0, false, "\u{25cf}", 0.0, 110, true).starts_with("  1"),
+            "unmarked rows are blank there"
+        );
+        a.notified = true;
+        let marked = row(&a, 0, false, "\u{25cf}", 0.0, 110, true);
+        assert!(marked.starts_with(" ! 1"), "{:?}", marked);
+    }
+
+    /// The marker sits in its own column, so it must not shift the row's other
+    /// fields - the colour ranges are computed from those offsets.
+    #[test]
+    fn the_gutter_marker_does_not_shift_the_columns() {
+        let mut a = agent();
+        let plain = row(&a, 0, false, "\u{25cf}", 0.0, 110, true);
+        a.notified = true;
+        let marked = row(&a, 0, false, "\u{25cf}", 0.0, 110, true);
+        assert_eq!(plain.chars().count(), marked.chars().count());
+        let tail = |s: &str| s.chars().skip(2).collect::<String>();
+        assert_eq!(tail(&plain), tail(&marked), "only the gutter column differs");
+    }
+
+    /// Rows past 9 are numbered too: `G` reaches them, so the number is not a
+    /// promise only the 1-9 keys can keep.
+    #[test]
+    fn rows_past_nine_keep_their_number() {
+        let r = row(&agent(), 24, false, "\u{25cf}", 0.0, 110, true);
+        assert!(r.starts_with("  25 "), "{:?}", r);
+    }
+
+    /// Pins the exact gutter the docs show, so a layout change cannot silently
+    /// make the troubleshooting sample wrong.
+    #[test]
+    fn the_documented_sample_row_renders_as_documented() {
+        let mut a = agent();
+        a.status = Status::Discovered;
+        a.task = None;
+        a.pane_title = String::new();
+        let r = row(&a, 0, false, "\u{25cc}", 0.0, 110, false);
+        assert!(r.starts_with("   1 \u{25cc} claude  found        "), "{:?}", r);
     }
 }
