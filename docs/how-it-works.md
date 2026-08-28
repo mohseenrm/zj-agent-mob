@@ -21,6 +21,27 @@ zellij pipe --name agent-status --plugin file:...wasm \
 
 `zellij pipe --plugin` auto-launches the plugin if it isn't running, so there's no daemon and no socket.
 
+### Why a blocked agent is blocked
+
+`detail=` says what a prompt is *about*; a separate `block=` says what kind of
+answer it wants, which is what decides whether the panel can settle it:
+
+| `block=` | Comes from | Rendered as |
+|---|---|---|
+| `tool` | `PermissionRequest`, or `Notification` / `permission_prompt` | `wants: permission` |
+| `plan` | `PermissionRequest` with `tool_name=ExitPlanMode` | `wants: plan` |
+| `question` | `Notification` with no recognized type | `wants: question` |
+| `idle` | `Notification` / `idle_prompt`, `agent_needs_input` | `wants: idle` |
+
+Only the blocked statuses carry one. Any other event sends `block=` empty and the
+plugin clears the row's reason, so a `plan` label cannot outlive the prompt that
+produced it. A heartbeat arriving while the agent is *still* blocked carries no
+reason either, and there the plugin keeps the one it already has - the row is
+still blocked on the same thing.
+
+An unrecognized value is dropped rather than guessed, so an older installed hook
+sending something new degrades to no label instead of a wrong one.
+
 ## Cross-session status: the spool
 
 The pipe above reaches only the plugin in the agent's *own* session. To give a panel live status

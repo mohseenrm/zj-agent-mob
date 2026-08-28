@@ -345,6 +345,21 @@ impl State {
             // Reply to an agent that is blocked on a question. Restricted to
             // rows that are actually waiting, in this session: `write_chars` is
             // session-local, so a foreign pane id would type into a stranger.
+            // Cycles urgency -> project -> session. The selection follows the
+            // agent rather than the row index: re-sorting under a fixed index
+            // would move the cursor onto whatever landed there.
+            BareKey::Char('s') => {
+                let id = self.agents.get(self.selected).map(|a| a.id.clone());
+                self.grouping = self.grouping.next();
+                self.sort_agents();
+                if let Some(id) = id {
+                    if let Some(i) = self.agents.iter().position(|a| a.id == id) {
+                        self.selected = i;
+                    }
+                }
+                self.kill_armed = None;
+                true
+            }
             BareKey::Char('y') => self.send_reply("y\n"),
             BareKey::Char('m') => self.begin_reply(),
             BareKey::Char('n') => self.spawn_agent(),
@@ -382,6 +397,61 @@ mod tests {
             .collect();
         s.handle_status(&args);
         s
+    }
+
+    fn agents(specs: &[(&str, &str, &str)]) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for (pane, cwd, status) in specs {
+            let args: BTreeMap<String, String> = [("pane_id", *pane), ("cwd", *cwd), ("status", *status)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    #[test]
+    fn s_cycles_the_grouping_mode() {
+        let mut s = state_with_one_agent();
+        assert_eq!(s.grouping, crate::state::Grouping::Urgency);
+        s.handle_key(key('s'));
+        assert_eq!(s.grouping, crate::state::Grouping::Project);
+        s.handle_key(key('s'));
+        assert_eq!(s.grouping, crate::state::Grouping::Session);
+        s.handle_key(key('s'));
+        assert_eq!(s.grouping, crate::state::Grouping::Urgency, "s wraps back round");
+    }
+
+    /// Re-sorting moves rows, so a selection tracked by index would land on
+    /// whichever agent happened to take that slot.
+    #[test]
+    fn s_keeps_the_selection_on_the_same_agent() {
+        let mut s = agents(&[
+            ("1", "/w/aaa", "idle"),
+            ("2", "/w/zzz", "waiting"),
+            ("3", "/w/aaa", "working"),
+        ]);
+        s.selected = 2;
+        let before = s.agents[2].id.clone();
+        s.handle_key(key('s'));
+        assert_eq!(s.agents[s.selected].id, before, "the cursor must follow the agent");
+    }
+
+    #[test]
+    fn s_disarms_a_pending_kill() {
+        let mut s = state_with_one_agent();
+        s.kill_armed = Some(s.agents[0].id.clone());
+        s.handle_key(key('s'));
+        assert!(
+            s.kill_armed.is_none(),
+            "re-sorting must not leave a kill armed on a moved row"
+        );
     }
 
     #[test]

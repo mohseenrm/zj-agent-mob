@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
-use crate::agent::{Agent, AgentId};
+use crate::agent::{Agent, AgentId, Block};
 use crate::host;
 use crate::install::Install;
 use crate::status::Status;
@@ -15,6 +15,35 @@ pub(crate) struct Ask {
     pub(crate) verdict_file: String,
     pub(crate) tool_name: String,
     pub(crate) tool_arg: String,
+}
+
+/// How the list is ordered. Urgency alone scatters one project across the
+/// screen once there are more agents than rows; grouping trades that for a
+/// header per project, urgency still deciding order within each group.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Grouping {
+    #[default]
+    Urgency,
+    Project,
+    Session,
+}
+
+impl Grouping {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Grouping::Urgency => Grouping::Project,
+            Grouping::Project => Grouping::Session,
+            Grouping::Session => Grouping::Urgency,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Grouping::Urgency => "urgency",
+            Grouping::Project => "project",
+            Grouping::Session => "session",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -77,6 +106,7 @@ pub struct State {
     /// binary, so a failure is otherwise invisible: the row would vanish while
     /// the agent kept running.
     pub(crate) action_error: Option<String>,
+    pub(crate) grouping: Grouping,
 }
 
 /// A reply being composed in the panel, bound to the agent it will be sent to.
@@ -196,6 +226,22 @@ impl State {
         parts.join(" \u{b7} ")
     }
 
+    /// The same counts as `summary_line`, as `k=v` pairs a consumer can read
+    /// without parsing prose. Always every key, including zeros: a consumer
+    /// testing `waiting>0` should not have to distinguish absent from none.
+    pub(crate) fn summary_kv(&self) -> String {
+        let (failed, waiting, working, done) = self.counts();
+        format!(
+            "failed={} waiting={} working={} done={} found={} total={}",
+            failed,
+            waiting,
+            working,
+            done,
+            self.discovered_count(),
+            self.agents.len()
+        )
+    }
+
     /// Pushes the summary out to any status bar listening, when it has moved.
     pub(crate) fn publish_summary(&mut self) {
         if self.summary_path.is_empty() {
@@ -206,7 +252,7 @@ impl State {
             return;
         }
         self.last_summary = line.clone();
-        host::publish_summary(&line, &self.summary_path);
+        host::publish_summary(&line, &self.summary_path, &self.summary_kv());
     }
 
     /// Messages from before the hook carried `session=` fall back to the
@@ -370,6 +416,12 @@ impl State {
             if let Some(m) = args.get("perm_mode") {
                 agent.perm_mode = m.clone();
             }
+            // Only a blocked state has a reason to be blocked. Clearing it on
+            // everything else stops a stale `plan` label outliving its prompt.
+            agent.block = match status {
+                Status::Waiting | Status::IdleWait => args.get("block").and_then(|b| Block::parse(b)).or(agent.block),
+                _ => None,
+            };
             // The agent moved on by itself, so the parked prompt is moot: the
             // hook timed out and fell through to its own prompt.
             if changed && status != Status::Waiting {
@@ -410,6 +462,7 @@ impl State {
                 tasks_done: 0,
                 session_alive: true,
                 notified: false,
+                block: args.get("block").and_then(|b| Block::parse(b)),
             });
         }
 
@@ -800,6 +853,7 @@ impl State {
                 tasks_done: 0,
                 session_alive: true,
                 notified: false,
+                block: None,
             });
             changed = true;
         }
@@ -905,6 +959,16 @@ impl State {
                     changed = true;
                 }
             }
+            let block = match agent.status {
+                Status::Waiting | Status::IdleWait => {
+                    rec.args.get("block").and_then(|b| Block::parse(b)).or(agent.block)
+                }
+                _ => None,
+            };
+            if agent.block != block {
+                agent.block = block;
+                changed = true;
+            }
             if !rec_sid.is_empty() && agent.session_id != rec_sid {
                 agent.session_id = rec_sid.to_string();
             }
@@ -992,8 +1056,31 @@ impl State {
     }
 
     pub(crate) fn sort_agents(&mut self) {
-        self.agents
-            .sort_by(|a, b| a.status.rank().cmp(&b.status.rank()).then(a.id.cmp(&b.id)));
+        let grouping = self.grouping;
+        // The group's own rank is its most urgent member, so grouping never
+        // buries a blocked agent under a quiet project that sorts earlier.
+        let mut best: BTreeMap<String, u8> = BTreeMap::new();
+        if grouping != Grouping::Urgency {
+            for a in self.agents.iter() {
+                let k = a.group_key(grouping).to_string();
+                let r = a.status.rank();
+                best.entry(k).and_modify(|e| *e = (*e).min(r)).or_insert(r);
+            }
+        }
+        self.agents.sort_by(|a, b| match grouping {
+            Grouping::Urgency => a.status.rank().cmp(&b.status.rank()).then(a.id.cmp(&b.id)),
+            _ => {
+                let (ka, kb) = (a.group_key(grouping), b.group_key(grouping));
+                let (ra, rb) = (
+                    best.get(ka).copied().unwrap_or(u8::MAX),
+                    best.get(kb).copied().unwrap_or(u8::MAX),
+                );
+                ra.cmp(&rb)
+                    .then_with(|| ka.cmp(kb))
+                    .then(a.status.rank().cmp(&b.status.rank()))
+                    .then(a.id.cmp(&b.id))
+            }
+        });
         self.clamp_selection();
         let agents = &self.agents;
         self.notifier.retain_known(|id| agents.iter().any(|a| &a.id == id));
@@ -1262,6 +1349,130 @@ mod tests {
         s.handle_status(&args(&[("pane_id", "4"), ("status", "done")]));
         let order: Vec<&str> = s.agents.iter().map(|a| a.status.label()).collect();
         assert_eq!(order, vec!["waiting", "done", "working", "idle"]);
+    }
+
+    #[test]
+    fn a_block_reason_is_carried_from_the_hook() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting"), ("block", "plan")]));
+        assert_eq!(s.agents[0].block, Some(Block::Plan));
+    }
+
+    /// A stale `plan` outliving its prompt would send you to read a pane that
+    /// is no longer asking anything.
+    #[test]
+    fn moving_off_a_blocked_state_clears_the_reason() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting"), ("block", "tool")]));
+        assert_eq!(s.agents[0].block, Some(Block::Tool));
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        assert_eq!(s.agents[0].block, None, "working is not blocked on anything");
+    }
+
+    /// Heartbeats while still blocked carry no `block=`, and must not erase the
+    /// reason the row already holds.
+    #[test]
+    fn a_report_without_a_reason_keeps_the_one_already_known() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting"), ("block", "question")]));
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        assert_eq!(s.agents[0].block, Some(Block::Question));
+    }
+
+    #[test]
+    fn an_unrecognized_reason_is_ignored_rather_than_guessed() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting"), ("block", "wat")]));
+        assert_eq!(s.agents[0].block, None);
+    }
+
+    #[test]
+    fn idlewait_carries_its_own_reason() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "idlewait"), ("block", "idle")]));
+        assert_eq!(s.agents[0].block, Some(Block::Idle));
+    }
+
+    #[test]
+    fn grouping_cycles_and_labels() {
+        assert_eq!(Grouping::default(), Grouping::Urgency);
+        assert_eq!(Grouping::Urgency.next(), Grouping::Project);
+        assert_eq!(Grouping::Project.next(), Grouping::Session);
+        assert_eq!(Grouping::Session.next(), Grouping::Urgency);
+        assert_eq!(Grouping::Project.label(), "project");
+    }
+
+    /// Grouping must keep every project's rows adjacent, which flat urgency
+    /// order does not once two projects interleave.
+    #[test]
+    fn grouping_by_project_keeps_a_project_contiguous() {
+        let mut s = state();
+        for (pane, cwd, status) in [
+            ("1", "/w/alpha", "working"),
+            ("2", "/w/beta", "waiting"),
+            ("3", "/w/alpha", "waiting"),
+            ("4", "/w/beta", "working"),
+        ] {
+            s.handle_status(&args(&[("pane_id", pane), ("cwd", cwd), ("status", status)]));
+        }
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        let projects: Vec<&str> = s.agents.iter().map(|a| a.project()).collect();
+        let mut runs = projects.clone();
+        runs.dedup();
+        assert_eq!(
+            runs.len(),
+            2,
+            "each project must form one contiguous run, got {:?}",
+            projects
+        );
+    }
+
+    /// A group ranks by its most urgent member, so grouping cannot bury a
+    /// blocked agent under a quiet project whose name sorts earlier.
+    #[test]
+    fn a_group_ranks_by_its_most_urgent_member() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("cwd", "/w/aaa"), ("status", "idle")]));
+        s.handle_status(&args(&[("pane_id", "2"), ("cwd", "/w/zzz"), ("status", "waiting")]));
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        assert_eq!(
+            s.agents[0].project(),
+            "zzz",
+            "the blocked group must lead despite the name"
+        );
+    }
+
+    #[test]
+    fn urgency_grouping_is_the_plain_rank_order() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("cwd", "/w/zzz"), ("status", "idle")]));
+        s.handle_status(&args(&[("pane_id", "2"), ("cwd", "/w/aaa"), ("status", "waiting")]));
+        s.sort_agents();
+        let labels: Vec<&str> = s.agents.iter().map(|a| a.status.label()).collect();
+        assert_eq!(labels, vec!["waiting", "idle"]);
+    }
+
+    /// An agent that has never reported a cwd still needs a heading, or the
+    /// group header renders empty and reads as a fault.
+    #[test]
+    fn an_agent_with_no_cwd_gets_a_named_bucket() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        assert_eq!(s.agents[0].group_key(Grouping::Project), "(no cwd)");
+    }
+
+    #[test]
+    fn grouping_by_session_keys_on_the_session() {
+        let mut s = state();
+        s.handle_status(&args(&[
+            ("pane_id", "1"),
+            ("session", "other"),
+            ("cwd", "/w/x"),
+            ("status", "idle"),
+        ]));
+        assert_eq!(s.agents[0].group_key(Grouping::Session), "other");
     }
 
     #[test]
@@ -1799,6 +2010,40 @@ mod tests {
         assert_eq!(s.last_summary, "1 waiting", "a changed summary republishes");
         s.publish_summary();
         assert_eq!(s.last_summary, "1 waiting");
+    }
+
+    /// The documented contract: every key present on every publish, so a
+    /// consumer testing one count never has to tell absent from zero.
+    #[test]
+    fn the_kv_summary_always_carries_every_key() {
+        let s = state();
+        assert_eq!(s.summary_kv(), "failed=0 waiting=0 working=0 done=0 found=0 total=0");
+    }
+
+    #[test]
+    fn the_kv_summary_counts_match_the_prose_line() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        s.handle_status(&args(&[("pane_id", "2"), ("status", "idlewait")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "4"), ("status", "failed")]));
+        assert_eq!(s.summary_line(), "1 failed \u{b7} 2 waiting \u{b7} 1 working");
+        assert_eq!(
+            s.summary_kv(),
+            "failed=1 waiting=2 working=1 done=0 found=0 total=4",
+            "the two views must never disagree"
+        );
+    }
+
+    /// The prose line is empty when nothing is happening, which is what keeps a
+    /// status bar clean. The kv line still reports, since a consumer polling it
+    /// needs zeros rather than an empty read.
+    #[test]
+    fn an_idle_fleet_has_an_empty_prose_line_but_a_full_kv_line() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "idle")]));
+        assert_eq!(s.summary_line(), "");
+        assert_eq!(s.summary_kv(), "failed=0 waiting=0 working=0 done=0 found=0 total=1");
     }
 
     /// Unconfigured, the publish path must not run at all.
@@ -2808,6 +3053,12 @@ mod cross_session_tests {
         let a = &s.agents[0];
         assert_eq!(a.status, Status::Waiting, "live status without a panel in its session");
         assert_eq!(a.detail.as_deref(), Some("needs permission"));
+        // The reason survives the hook, the spool file, the scan and the merge.
+        assert_eq!(
+            a.block,
+            Some(Block::Question),
+            "no notification_type is a free-text question"
+        );
         // Carried forward by the hook: Notification's payload has neither.
         assert_eq!(a.session_id, "uuid-xyz");
         assert_eq!(a.project(), "web");

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
-use crate::state::State;
+use crate::state::{Grouping, State};
 use crate::status::Status;
 use crate::style::{chars, DIM_LEVEL};
 use crate::util::truncate;
@@ -287,6 +287,13 @@ fn viewport(groups: &[Vec<Text>], scroll: usize, selected: usize, budget: usize)
     }
 }
 
+/// A group heading, carrying its member count so a collapsed-looking group is
+/// still legible when the viewport cuts it off below.
+fn group_header(name: &str, n: usize, width: usize) -> Text {
+    let line = truncate(&format!("  {} ({})", name, n), width);
+    Text::new(line).color_range(DIM_LEVEL, ..)
+}
+
 /// The affordance that stops a hidden row from being silently hidden.
 fn more_row(n: usize, up: bool, width: usize) -> Text {
     let arrow = if up { "\u{2191}" } else { "\u{2193}" };
@@ -379,6 +386,17 @@ impl State {
             head.push(' ');
             head.push_str(label);
         }
+        // Only when grouped: the default ordering needs no announcing, and the
+        // footer has no columns left for an `s` chip.
+        let mut group_range = None;
+        if self.grouping != Grouping::Urgency {
+            let chip = format!("  [{} groups \u{b7} s]", self.grouping.label());
+            if chars(&head) + chars(&chip) <= width {
+                let start = chars(&head);
+                head.push_str(&chip);
+                group_range = Some(start..start + chars(&chip));
+            }
+        }
         let head = ranges.into_iter().fold(Text::new(head), |t, (level, is_err, r)| {
             if is_err {
                 t.error_color_range(r)
@@ -386,12 +404,30 @@ impl State {
                 t.color_range(level, r)
             }
         });
+        let head = match group_range {
+            Some(r) => head.color_range(DIM_LEVEL, r),
+            None => head,
+        };
         print_text_with_coordinates(head, 0, 0, None, None);
         let mut y = self.render_rule(1, width);
 
         // A detail line per agent needs two rows each, plus header and footer.
         let detail_lines = rows >= 4 + self.agents.len() * 2 && width >= 60;
         let show_cwd = width >= 50;
+
+        // Only the first row of a run gets a heading, so a group of six costs
+        // one header row rather than six.
+        let mut group_of: BTreeMap<usize, String> = BTreeMap::new();
+        if self.grouping != Grouping::Urgency {
+            let mut prev: Option<&str> = None;
+            for (i, a) in self.agents.iter().enumerate() {
+                let k = a.group_key(self.grouping);
+                if prev != Some(k) {
+                    group_of.insert(i, k.to_string());
+                    prev = Some(k);
+                }
+            }
+        }
 
         // One group per agent: its row plus whatever renders underneath it. The
         // viewport pages by group so a selected agent's prompt box is never cut
@@ -401,7 +437,18 @@ impl State {
             .iter()
             .enumerate()
             .map(|(i, agent)| {
-                let mut g = vec![agent.list_item(
+                let mut g = Vec::new();
+                // The heading rides on its first member's group, so the
+                // viewport keeps paging by group and never orphans a header.
+                if let Some(key) = group_of.get(&i) {
+                    let n = self
+                        .agents
+                        .iter()
+                        .filter(|a| a.group_key(self.grouping) == *key)
+                        .count();
+                    g.push(group_header(key, n, width));
+                }
+                g.push(agent.list_item(
                     i,
                     crate::agent::RowCtx {
                         selected: i == self.selected,
@@ -411,7 +458,7 @@ impl State {
                         show_cwd,
                         home: &self.session_name,
                     },
-                )];
+                ));
                 if detail_lines {
                     g.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), width));
                 }
@@ -584,7 +631,7 @@ mod reply_row_tests {
 
 #[cfg(test)]
 mod viewport_tests {
-    use crate::state::State;
+    use crate::state::{Grouping, State};
     use std::collections::BTreeMap;
 
     fn state_with(n: usize) -> State {
@@ -626,6 +673,53 @@ mod viewport_tests {
                         sel,
                         emitted
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_group_header_names_the_group_and_its_size() {
+        let h = crate::util::testing::item_text(&super::group_header("alpha", 3, 40));
+        assert!(h.contains("alpha"), "{:?}", h);
+        assert!(
+            h.contains("(3)"),
+            "the count is what survives being cut off below: {:?}",
+            h
+        );
+    }
+
+    #[test]
+    fn a_group_header_respects_the_pane_width() {
+        for cols in [10usize, 20, 40, 80] {
+            let h = crate::util::testing::item_text(&super::group_header(&"p".repeat(60), 12, cols));
+            assert!(h.chars().count() <= cols, "cols={} produced {:?}", cols, h);
+        }
+    }
+
+    /// Group headings add rows the viewport did not have to budget for before,
+    /// so the clipping contract is re-asserted under every grouping mode.
+    #[test]
+    fn grouped_lists_never_emit_more_rows_than_the_pane_has() {
+        for grouping in [Grouping::Project, Grouping::Session] {
+            for rows in [6usize, 8, 10, 14, 20, 30] {
+                for agents in [1usize, 3, 9, 20, 50] {
+                    let mut s = state_with(agents);
+                    s.grouping = grouping;
+                    s.sort_agents();
+                    for sel in [0, agents / 2, agents - 1] {
+                        s.selected = sel;
+                        let emitted = s.render_list(rows, 100);
+                        assert!(
+                            emitted <= rows,
+                            "grouping={:?} rows={} agents={} selected={} emitted {}",
+                            grouping,
+                            rows,
+                            agents,
+                            sel,
+                            emitted
+                        );
+                    }
                 }
             }
         }

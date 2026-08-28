@@ -766,6 +766,77 @@ fn a_permission_prompt_is_waiting_and_carries_its_text() {
     assert_eq!(r.field("detail"), "Bash wants to run rm -rf");
 }
 
+/// M6: `detail` says what the prompt is about; `block` says what kind of answer
+/// it wants, which is what decides whether the panel can settle it.
+#[test]
+fn a_tool_permission_request_reports_a_tool_block() {
+    let json = serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm -rf node_modules"},
+    })
+    .to_string();
+    assert_eq!(run(&json).field("block"), "tool");
+}
+
+/// A plan is not a yes/no: it has to be read, so it must not look like one.
+#[test]
+fn a_plan_approval_reports_a_plan_block() {
+    let json = serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "ExitPlanMode",
+        "tool_input": {"plan": "step one"},
+    })
+    .to_string();
+    let r = run(&json);
+    assert_eq!(r.field("block"), "plan");
+    assert_eq!(r.field("status"), "waiting");
+}
+
+#[test]
+fn a_permission_prompt_notification_reports_a_tool_block() {
+    let json = serde_json::json!({
+        "hook_event_name": "Notification",
+        "notification_type": "permission_prompt",
+        "message": "Bash wants to run rm -rf",
+    })
+    .to_string();
+    assert_eq!(run(&json).field("block"), "tool");
+}
+
+#[test]
+fn a_free_text_notification_reports_a_question_block() {
+    let json = serde_json::json!({
+        "hook_event_name": "Notification",
+        "message": "Which database should I migrate?",
+    })
+    .to_string();
+    let r = run(&json);
+    assert_eq!(r.field("block"), "question");
+    assert_eq!(r.field("status"), "waiting");
+}
+
+#[test]
+fn an_idle_prompt_reports_an_idle_block() {
+    let json = serde_json::json!({
+        "hook_event_name": "Notification",
+        "notification_type": "idle_prompt",
+        "message": "waiting for input",
+    })
+    .to_string();
+    assert_eq!(run(&json).field("block"), "idle");
+}
+
+/// Events that are not a block must not carry a reason, or a stale label
+/// outlives the prompt it described.
+#[test]
+fn unblocked_events_carry_no_block_reason() {
+    for event in ["UserPromptSubmit", "Stop", "PreCompact", "SessionStart"] {
+        let json = serde_json::json!({"hook_event_name": event}).to_string();
+        assert_eq!(run(&json).field("block"), "", "{} must not report a block", event);
+    }
+}
+
 #[test]
 fn an_idle_prompt_maps_to_idlewait() {
     let json = serde_json::json!({
