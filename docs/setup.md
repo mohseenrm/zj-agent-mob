@@ -7,6 +7,9 @@
 - [The install screen](#the-install-screen)
 - [Register the plugin with Zellij](#register-the-plugin-with-zellij)
 - [Configuration](#configuration)
+- [The fleet summary in your status bar](#the-fleet-summary-in-your-status-bar)
+  - [The format contract](#the-format-contract)
+  - [Worked examples](#worked-examples)
 
 ## Install
 
@@ -190,7 +193,98 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 | `notify` | `waiting,failed` | Which transitions raise a desktop notification. Any of `waiting`, `idlewait`, `failed`, `done`, comma-separated. `""` disables them |
 | `notify_cooldown` | `60` | Seconds before the same agent may notify again, so a flapping row cannot spam you |
 | `notify_sound` | `false` | Play a sound with the notification |
-| `summary_file` | unset | Write the one-line fleet summary here on every change, for a status bar to render. Unset means nothing is published |
+| `summary_file` | unset | Write the fleet summary here on every change, for a status bar to render. Also writes `<path>.kv` for parsing. Unset means nothing is published. See [the fleet summary](#the-fleet-summary-in-your-status-bar) |
+
+## The fleet summary in your status bar
+
+Set `summary_file` and the panel publishes the fleet's state on every change,
+for anything outside Zellij to render. This is the difference between a panel
+you open and a number that is always in front of you.
+
+Configuration goes wherever you already declare the plugin - in a keybinding:
+
+```kdl
+keybinds {
+    shared_except "locked" {
+        bind "Ctrl a" {
+            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
+                floating true
+                summary_file "/tmp/zj-agent-mob.summary"
+            }
+        }
+    }
+}
+```
+
+or in a layout:
+
+```kdl
+floating_panes {
+    pane {
+        plugin location="file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
+            summary_file "/tmp/zj-agent-mob.summary"
+        }
+    }
+}
+```
+
+Two files are written, both replaced atomically via `mv`, so a consumer polling
+them never reads a half-written count:
+
+| File | Contents | For |
+|---|---|---|
+| `$summary_file` | `2 waiting · 1 working` | Rendering directly |
+| `$summary_file.kv` | `failed=0 waiting=2 working=1 done=0 found=0 total=3` | Parsing |
+
+A `zellij pipe --name zj-agent-mob-summary` also carries the prose line, for
+consumers that are themselves Zellij plugins.
+
+### The format contract
+
+Both lines are stable, and worth relying on:
+
+- **Prose** (`$summary_file`) lists only non-zero counts, in urgency order
+  (`failed`, `waiting`, `working`, `done`), joined by ` · `. It is **empty when
+  nothing needs you**, which is what keeps a status bar quiet at rest.
+- **Machine-readable** (`$summary_file.kv`) always carries **every** key, zeros
+  included, so `waiting=0` is never ambiguous with a key that was left out.
+  `waiting` folds in `idle-wait`; `working` folds in `compact`; `found` is
+  agents seen by the scan that have never reported; `total` is every row.
+
+Neither file exists until the first publish, so read defensively.
+
+### Worked examples
+
+**Starship** - a module that stays invisible when nothing needs you:
+
+```toml
+# ~/.config/starship.toml
+[custom.agents]
+command = "cat /tmp/zj-agent-mob.summary 2>/dev/null"
+when = "test -s /tmp/zj-agent-mob.summary"
+format = "[$output]($style) "
+style = "bold yellow"
+shell = ["sh", "-c"]
+```
+
+**tmux** - the prose line, refreshed on tmux's own interval:
+
+```sh
+set -g status-right '#(cat /tmp/zj-agent-mob.summary 2>/dev/null) | %H:%M'
+```
+
+**Anything that needs a decision**, reading the `k=v` line rather than parsing
+prose. One field, no sourcing:
+
+```sh
+waiting=$(awk -v RS=' ' -F= '$1=="waiting"{print $2}' \
+  /tmp/zj-agent-mob.summary.kv 2>/dev/null)
+
+[ "${waiting:-0}" -gt 0 ] && printf 'agents blocked: %s\n' "$waiting"
+```
+
+**Zellij's own status bar** cannot shell out, so it reads the pipe rather than
+the file - see [how it works](how-it-works.md) for the pipe's shape.
 
 ### Hook script environment
 

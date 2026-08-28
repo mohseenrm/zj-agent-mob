@@ -153,6 +153,24 @@ case "$event" in
     detail='' ;;
 esac
 
+# Why the agent is blocked, when it is. `detail` says what the prompt is about;
+# this says what kind of answer it wants, which is what decides whether you can
+# settle it from the panel or have to read the pane.
+block=''
+case "$event" in
+  PermissionRequest)
+    case "$tool_name" in
+      ExitPlanMode|exit_plan_mode) block=plan ;;
+      *)                           block=tool ;;
+    esac ;;
+  Notification)
+    case "$notif_type" in
+      idle_prompt|agent_needs_input) block=idle ;;
+      permission_prompt)             block=tool ;;
+      *)                             block=question ;;
+    esac ;;
+esac
+
 task=$(sanitize "$task")
 detail=$(sanitize "$detail")
 
@@ -180,7 +198,7 @@ if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
     >> "$HOME/.cache/zj-agent-mob/hook.log"
 fi
 
-ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
+ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,agent_type=$agent_type,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
 
 spool_dir() {
   if [ -n "${ZJ_AGENT_SPOOL_DIR:-}" ]; then
@@ -245,7 +263,7 @@ if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ende
     if [ -z "$status" ]; then
       SKIP_SPOOL=1
     fi
-    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,perm_mode=$perm_mode,agent_type=$agent_type"
+    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,agent_type=$agent_type"
     # Rename is atomic within a filesystem, so a reader sees the old record or
     # the new one, never a half-written one. $$ keeps concurrent hooks apart.
     if [ "${SKIP_SPOOL:-0}" != "1" ] && printf 'ts=%s,%s\n' "$(date +%s)" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then

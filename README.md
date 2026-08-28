@@ -153,6 +153,7 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | <kbd>1</kbd>–<kbd>9</kbd> | Jump straight to agent N |
 | <kbd>g</kbd> <var>N</var> <kbd>Enter</kbd> | Jump to any row by number, including past 9. <kbd>g</kbd> opens a count, <kbd>Enter</kbd> or <kbd>G</kbd> closes it: `g25`<kbd>Enter</kbd>, or `g25G` for the vim spelling |
 | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd> | First row / last row |
+| <kbd>s</kbd> | Cycle the ordering: urgency (default) -> grouped by project -> grouped by session |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
 | <kbd>y</kbd> | Answer a blocked agent with `y` (only shown while it is waiting) |
@@ -189,6 +190,43 @@ Targets are independent, so running only one agent's hooks is a supported state:
 | `gone` | Its Zellij session is gone, so its state is unknowable | - |
 
 Rows sort in that order, so whatever needs you most is at the top. A `found` row is normal rather than broken: the agent was already running when hooks were installed, and it fills in the moment it next does anything.
+
+### Ordering and grouping
+
+By default rows sort purely by urgency, which is right until the same project is
+scattered across the screen. <kbd>s</kbd> cycles to grouped-by-project, then
+grouped-by-session, then back. Within a group urgency still decides order, and
+each group sorts by its **most urgent member**, so grouping can never bury a
+blocked agent under a quiet project:
+
+```
+zj-agent-mob   1 waiting · 2 working   [project groups · s]
+────────────────────────────────────────────────────────
+  api (2)
+▶ 1 ● claude  waiting    12s  api        Fix the failing auth test
+      └ wants: permission · needs approval: git push --force · pane:6
+  2 ⠙ claude  working     41s  api        Port the hook suite to Rust
+  web (1)
+  3 ⠙ codex   working   2m10s  web        Update the checkout flow
+```
+
+The active mode shows in the header; the default needs no announcing, so nothing
+appears until you press <kbd>s</kbd>.
+
+### Why an agent is blocked
+
+A `waiting` row also says what kind of answer it wants, because they need
+different things from you:
+
+| `wants:` | Means | You can |
+|---|---|---|
+| `permission` | A tool-permission prompt | Answer with <kbd>a</kbd> / <kbd>r</kbd> (with `ZJ_AGENT_APPROVE=1`) |
+| `plan` | A plan waiting to be accepted | Read it - <kbd>Enter</kbd> to the pane |
+| `question` | A free-text question | Reply with <kbd>m</kbd>, or jump to the pane |
+| `idle` | Nobody has typed in a while | Nothing is blocked on a decision |
+
+This is what lets you triage the list without visiting a pane: a `permission` is
+often answerable from the panel, a `plan` never is.
 
 ### Answering permission prompts from the panel
 
@@ -238,6 +276,12 @@ so you know whether anyone needs you without opening anything:
 It is written on every change and also piped as `zj-agent-mob-summary`, so
 [zjstatus](https://github.com/dj95/zjstatus) can pick it up with its `pipe` widget, and anything
 else (a starship prompt, a shell script) can read the file.
+
+A second file, `<path>.kv`, carries the same counts as
+`failed=0 waiting=2 working=1 done=0 found=0 total=3` for consumers that would
+rather not parse prose. Both are written atomically, and both formats are a
+stated contract - see [the fleet summary](docs/setup.md#the-fleet-summary-in-your-status-bar)
+for worked starship, tmux and shell examples.
 
 ## Known limitations
 

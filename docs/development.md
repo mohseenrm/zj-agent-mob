@@ -16,14 +16,26 @@ rustup target add wasm32-wasip1
 cargo test
 ```
 
-The full check set, matching what CI runs:
+The full check set is one command, running the same steps CI does in the same
+order:
+
+```sh
+./scripts/check.sh          # everything, ~40s
+./scripts/check.sh fast     # skips the wasm build, exports and installer e2e
+./scripts/check.sh -l       # list the steps without running them
+```
+
+It does not stop at the first failure - a `cargo fmt` diff should not hide a
+failing test - and prints which steps failed at the end.
+
+The individual commands, if you want one on its own:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release --target wasm32-wasip1
-shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh tests/e2e-install.sh
+shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh tests/e2e-install.sh
 ./tests/e2e-install.sh
 ```
 
@@ -126,21 +138,21 @@ You want `_start`, `load`, `update`, `render`, `pipe`, and `plugin_version`. CI 
 | File | Lines | Tests | Role |
 |---|---|---|---|
 | `main.rs` | 16 | | `register_plugin!` + WASI entry point |
-| `lib.rs` | 55 | | Module wiring and shared constants |
-| `plugin.rs` | 477 | 11 | Zellij lifecycle: permissions, subscriptions, `render`, the list viewport, the permission prompt box, the reply editor |
-| `state.rs` | 630 | 100 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership, the fleet summary |
-| `install.rs` | 377 | 22 | Install screen: state, toggles, installer output parsing |
-| `keys.rs` | 325 | 31 | Keyboard: selection, jump-to-pane (and cross-session switch), vim-style `g`<var>N</var> count goto, two-step kill, approve/reject, quick reply |
-| `agent.rs` | 240 | 29 | One agent, its `(session, pane)` identity, and how its row is built |
-| `notify.rs` | 185 | 18 | Desktop notifications: triggers, per-agent cooldown, burst coalescing, message text |
-| `status.rs` | 98 | | The agent states and their presentation |
-| `ribbon.rs` | 89 | 7 | Ribbon line serialization |
-| `discover.rs` | 196 | 22 | Process-environment scan across every session, reading the cross-session status spool, and the panel beacon |
-| `host.rs` | 134 | | Host-call shim |
+| `lib.rs` | 63 | | Module wiring and shared constants |
+| `plugin.rs` | 598 | 16 | Zellij lifecycle: permissions, subscriptions, `render`, the list viewport, group headings, the permission prompt box, the reply editor |
+| `state.rs` | 1117 | 132 | State machine: pipe handling, counter deltas, parked prompts, pane reconciliation, scan and spool merge, cross-session identity and row ownership, grouping, the fleet summary |
+| `install.rs` | 378 | 22 | Install screen: state, toggles, installer output parsing |
+| `keys.rs` | 376 | 40 | Keyboard: selection, jump-to-pane (and cross-session switch), vim-style `g`<var>N</var> count goto, grouping toggle, two-step kill, approve/reject, quick reply |
+| `agent.rs` | 321 | 35 | One agent, its `(session, pane)` identity, why it is blocked, and how its row is built |
+| `notify.rs` | 206 | 21 | Desktop notifications: triggers, per-agent cooldown, burst coalescing, message text |
+| `status.rs` | 109 | | The agent states and their presentation |
+| `ribbon.rs` | 90 | 7 | Ribbon line serialization |
+| `discover.rs` | 204 | 22 | Process-environment scan across every session, reading the cross-session status spool, and the panel beacon |
+| `host.rs` | 139 | | Host-call shim |
 | `util.rs` | 38 | 2 | `fmt_elapsed`, `truncate` |
 | `style.rs` | 23 | | ANSI constants |
 
-Line counts exclude tests. Tests live beside the code they cover, 272 in total, none needing a running Zellij, plus 178 end-to-end cases across `tests/hook_e2e.rs` (80) and `tests/e2e-install.sh` (98).
+Line counts exclude tests. Tests live beside the code they cover, 297 in total, none needing a running Zellij, plus 184 end-to-end cases across `tests/hook_e2e.rs` (86) and `tests/e2e-install.sh` (98).
 
 Ten of `discover.rs`'s tests execute the real scan script through `sh` against a stubbed `ps` and a real staged spool directory, rather than asserting on the script's text. The awk program is the part that can silently return nothing - which is indistinguishable from "no agents running" - so it is worth running rather than pattern-matching.
 

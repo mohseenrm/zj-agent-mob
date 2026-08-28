@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh \
-            tests/e2e-install.sh
+            scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh
 
       # The hook end-to-end tests live in tests/hook_e2e.rs and run under
       # `cargo test` in the rust job above.

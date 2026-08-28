@@ -21,6 +21,8 @@
 - [The panel is cramped or columns are missing](#the-panel-is-cramped-or-columns-are-missing)
 - [The list says `↓ N more` and I cannot see every agent](#the-list-says--n-more-and-i-cannot-see-every-agent)
 - [A row has a `!` next to it](#a-row-has-a--next-to-it)
+- [Rows are grouped and I want the flat list back](#rows-are-grouped-and-i-want-the-flat-list-back)
+- [A row says `wants: plan` / `wants: question` and <kbd>a</kbd> does nothing](#a-row-says-wants-plan--wants-question-and-a-does-nothing)
 
 ## Changes to the plugin seem to have no effect
 
@@ -340,3 +342,35 @@ it points at the Zellij session rather than the plugin.
 
 No markers ever appearing is the normal state when notifications are off. See
 [no desktop notifications](#no-desktop-notifications).
+
+## Rows are grouped and I want the flat list back
+
+<kbd>s</kbd> cycles the ordering: urgency (the default) -> grouped by project ->
+grouped by session -> back to urgency. Press it until the header chip disappears;
+the chip is only shown while grouping is on, so no chip means the flat
+urgency-ordered list.
+
+Grouping never reorders by name alone: each group takes the rank of its most
+urgent member, so a blocked agent stays at the top even if its project sorts
+last alphabetically. If a group looks out of order, it is being ranked by a row
+you may have to scroll to see.
+
+Group headings cost one row each, which is one fewer row for agents. On a short
+pane that can be the difference that drops the per-agent detail line - see
+[the panel is cramped](#the-panel-is-cramped-or-columns-are-missing).
+
+## A row says `wants: plan` / `wants: question` and <kbd>a</kbd> does nothing
+
+Correct, and the label is telling you why. Only `wants: permission` is a yes/no
+the panel can answer:
+
+| `wants:` | <kbd>a</kbd> / <kbd>r</kbd> | What to do instead |
+|---|---|---|
+| `permission` | Works, with `ZJ_AGENT_APPROVE=1` | - |
+| `plan` | No | <kbd>Enter</kbd> to the pane and read it |
+| `question` | No | <kbd>m</kbd> to type a reply, or jump to the pane |
+| `idle` | No | Nothing is blocked on a decision |
+
+A `waiting` row with no `wants:` at all came from a hook that predates the field,
+or from a spool record written by an older installed hook. Restart the agent
+after upgrading - hooks are read at session start.

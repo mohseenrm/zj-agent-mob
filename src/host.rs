@@ -85,7 +85,7 @@ pub(crate) fn session_action(session: &str, args: &[&str], kind: &str) {
 /// with no `--plugin` reaches every listening plugin, and the spool file serves
 /// consumers that are not plugins at all.
 #[cfg(target_family = "wasm")]
-pub(crate) fn publish_summary(summary: &str, path: &str) {
+pub(crate) fn publish_summary(summary: &str, path: &str, kv: &str) {
     let mut ctx = std::collections::BTreeMap::new();
     ctx.insert("kind".to_string(), "summary".to_string());
     run_command(
@@ -94,11 +94,16 @@ pub(crate) fn publish_summary(summary: &str, path: &str) {
             "-c",
             // The summary reaches a file and a pipe, so it is bound as a
             // positional rather than spliced into the command string.
+            // The prose line and the `k=v` line are written as two files, both
+            // atomically: a consumer reading mid-write would otherwise see a
+            // truncated count and render it as fact.
             "printf '%s' \"$1\" > \"$2.tmp\" 2>/dev/null && mv -f \"$2.tmp\" \"$2\" 2>/dev/null; \
+             printf '%s' \"$3\" > \"$2.kv.tmp\" 2>/dev/null && mv -f \"$2.kv.tmp\" \"$2.kv\" 2>/dev/null; \
              command -v zellij >/dev/null 2>&1 && zellij pipe --name zj-agent-mob-summary -- \"$1\" >/dev/null 2>&1 || true",
             "sh",
             summary,
             path,
+            kv,
         ],
         ctx,
     );
@@ -120,7 +125,7 @@ mod stub {
     pub(crate) fn write_verdict(_path: &str, _verdict: &str) {}
     pub(crate) fn notify(_notifier: &str, _title: &str, _body: &str, _sound: bool) {}
     pub(crate) fn session_action(_session: &str, _args: &[&str], _kind: &str) {}
-    pub(crate) fn publish_summary(_summary: &str, _path: &str) {}
+    pub(crate) fn publish_summary(_summary: &str, _path: &str, _kv: &str) {}
     pub(crate) fn write_chars_to_pane_id(_chars: &str, _id: PaneId) {}
     pub(crate) fn open_command_pane_floating(
         _cmd: CommandToRun,

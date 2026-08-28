@@ -72,6 +72,45 @@ pub(crate) struct Agent {
     pub(crate) session_alive: bool,
     /// Fired a notification since the panel was last focused.
     pub(crate) notified: bool,
+    /// What kind of answer a blocked agent is waiting for, when it is blocked.
+    pub(crate) block: Option<Block>,
+}
+
+/// Why an agent is blocked. `detail` already says what the prompt is *about*;
+/// this says what kind of answer it wants, which is what decides whether the
+/// panel can settle it or you have to read the pane.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Block {
+    /// A tool-permission prompt: approvable from the panel.
+    Tool,
+    /// A plan waiting to be accepted. Needs reading, so the panel cannot
+    /// meaningfully approve it for you.
+    Plan,
+    /// A free-text question. Answerable, but only with real words.
+    Question,
+    /// Nobody has typed anything in a while. Not blocked on a decision.
+    Idle,
+}
+
+impl Block {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tool" => Some(Block::Tool),
+            "plan" => Some(Block::Plan),
+            "question" => Some(Block::Question),
+            "idle" => Some(Block::Idle),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Block::Tool => "permission",
+            Block::Plan => "plan",
+            Block::Question => "question",
+            Block::Idle => "idle",
+        }
+    }
 }
 
 impl Agent {
@@ -212,6 +251,24 @@ impl Agent {
         } else if let Some(d) = self.detail.as_deref().filter(|d| !d.is_empty()) {
             bits.push(d.to_string());
         }
+        // What kind of answer the prompt wants, which decides whether `a`/`r`
+        // can settle it here or you have to read the pane. Suppressed when the
+        // detail already opens with the word, so it is not said twice.
+        if let Some(b) = self.block {
+            // The hook's own detail wording, not just the label: a tool prompt
+            // arrives as "needs approval: ..." and "permission" never appears.
+            // Matched against the hook's own prefix, not any substring: a plan
+            // approval reads "needs approval: ExitPlanMode", where a loose
+            // search for "plan" hits the tool name and hides the one label that
+            // distinguishes it from an ordinary permission.
+            let already = |d: &str| match b {
+                Block::Tool => d.starts_with("needs approval:"),
+                Block::Plan | Block::Question | Block::Idle => false,
+            };
+            if !self.detail.as_deref().is_some_and(already) {
+                bits.insert(0, format!("wants: {}", b.label()));
+            }
+        }
         if self.subagents > 0 {
             bits.push(match self.subagent_types.is_empty() {
                 true => format!("{} subagents", self.subagents),
@@ -247,6 +304,19 @@ impl Agent {
     pub(crate) fn project(&self) -> &str {
         self.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.cwd)
     }
+
+    /// The heading a row sorts under. An agent that has never reported a `cwd`
+    /// has no project to group by, so it gets one bucket rather than an empty
+    /// heading that reads as a rendering fault.
+    pub(crate) fn group_key(&self, grouping: crate::state::Grouping) -> &str {
+        match grouping {
+            crate::state::Grouping::Session => self.session(),
+            _ => match self.project() {
+                "" => "(no cwd)",
+                p => p,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +350,7 @@ mod render_tests {
             tasks_done: 0,
             session_alive: true,
             notified: false,
+            block: None,
         }
     }
 
@@ -479,6 +550,64 @@ mod render_tests {
     }
 
     /// The row must say why it is bare rather than looking like a broken read.
+    #[test]
+    fn block_kinds_parse_and_label() {
+        assert_eq!(Block::parse("tool"), Some(Block::Tool));
+        assert_eq!(Block::parse("plan"), Some(Block::Plan));
+        assert_eq!(Block::parse("question"), Some(Block::Question));
+        assert_eq!(Block::parse("idle"), Some(Block::Idle));
+        assert_eq!(Block::parse("nonsense"), None);
+        assert_eq!(Block::Tool.label(), "permission");
+    }
+
+    #[test]
+    fn the_detail_line_says_what_the_prompt_wants() {
+        let mut a = agent();
+        a.detail = Some("Bash rm -rf node_modules".into());
+        a.block = Some(Block::Plan);
+        let d = item_text(&a.detail_item(false, 110));
+        assert!(d.contains("wants: plan"), "{:?}", d);
+    }
+
+    /// The detail text often already names the kind; saying it twice wastes the
+    /// one line there is.
+    #[test]
+    fn the_wants_label_is_not_repeated_when_the_detail_already_says_it() {
+        let mut a = agent();
+        a.detail = Some("needs approval: git push".into());
+        a.block = Some(Block::Tool);
+        let d = item_text(&a.detail_item(false, 110));
+        assert_eq!(
+            d.matches("permission").count(),
+            0,
+            "detail said approval already: {:?}",
+            d
+        );
+    }
+
+    /// The regression: a plan approval reads "needs approval: ExitPlanMode", and
+    /// a substring search for "plan" hits the tool name and suppressed the one
+    /// label that tells a plan apart from an ordinary permission.
+    #[test]
+    fn a_plan_approval_still_says_it_wants_a_plan() {
+        let mut a = agent();
+        a.detail = Some("needs approval: ExitPlanMode".into());
+        a.block = Some(Block::Plan);
+        let d = item_text(&a.detail_item(false, 110));
+        assert!(d.contains("wants: plan"), "{:?}", d);
+    }
+
+    #[test]
+    fn the_detail_line_with_a_block_still_respects_cols() {
+        for cols in [30usize, 40, 60, 80, 110] {
+            let mut a = agent();
+            a.block = Some(Block::Question);
+            a.detail = Some("x".repeat(200));
+            let d = item_text(&a.detail_item(false, cols));
+            assert!(d.chars().count() <= cols, "cols={} produced {:?}", cols, d);
+        }
+    }
+
     #[test]
     fn discovered_detail_line_says_no_report_yet() {
         let mut a = agent();
