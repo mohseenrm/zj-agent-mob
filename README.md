@@ -49,7 +49,7 @@ Three steps: install, bind a key, restart your agents.
 No clone and no Rust toolchain required:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.7.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.8.0/init.sh | sh
 ```
 
 This downloads the plugin and hook script for that release, wires up whichever of Claude Code and Codex you have, and leaves an installer at `~/.config/zj-agent-mob/install.sh` so the in-panel install screen works from then on.
@@ -57,7 +57,7 @@ This downloads the plugin and hook script for that release, wires up whichever o
 Prefer to read before running? Same thing in two steps:
 
 ```sh
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.7.0/init.sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.8.0/init.sh
 less init.sh && sh init.sh
 ```
 
@@ -167,7 +167,7 @@ running only one agent's hooks is supported.
 | <kbd>m</kbd> | Type a one-line reply to a blocked agent; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> cancels |
 | <kbd>d</kbd> | Dismiss a `done` badge |
 | <kbd>D</kbd> | Dismiss every `done` badge at once |
-| <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory |
+| <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory (advertised in the empty state rather than the footer) |
 | <kbd>i</kbd> | Open the install screen |
 | <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel |
 
