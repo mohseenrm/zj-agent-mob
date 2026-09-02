@@ -100,6 +100,9 @@ pub struct State {
     /// Digits typed after `G`, awaiting Enter or a non-digit. Vim-style, so a
     /// row past 9 is still reachable without stealing a letter command.
     pub(crate) jump_buf: Option<String>,
+    /// The `/` prompt, while it is open. `Some` narrows the list to matches and
+    /// turns every printable key into query text.
+    pub(crate) find: Option<Find>,
     /// First visible row, kept so the selection stays on screen.
     pub(crate) scroll: usize,
     /// The last cross-session action that failed. Those run through the `zellij`
@@ -115,6 +118,15 @@ pub struct State {
 pub(crate) struct Reply {
     pub(crate) id: AgentId,
     pub(crate) text: String,
+}
+
+/// A fuzzy search being typed at the `/` prompt. The cursor is an id, not an
+/// index: pipes arrive and re-sort the list mid-typing, and an index would then
+/// point Enter at a stranger. `None` means "the best match".
+#[derive(Default)]
+pub(crate) struct Find {
+    pub(crate) query: String,
+    pub(crate) cursor: Option<AgentId>,
 }
 
 impl State {
@@ -1104,6 +1116,59 @@ impl State {
             }
         }
         changed
+    }
+
+    /// Indices into `agents` that match the open find query, best score first,
+    /// ties in list order. With no prompt open, the whole list in order.
+    /// Recomputed on demand rather than cached: pipes mutate `agents` freely
+    /// while the prompt is open, and a stale index list would dangle.
+    pub(crate) fn find_matches(&self) -> Vec<usize> {
+        let Some(f) = self.find.as_ref() else {
+            return (0..self.agents.len()).collect();
+        };
+        let mut scored: Vec<(u32, usize)> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| self.find_score(&f.query, a).map(|s| (s, i)))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// The best score across an agent's fields, weighted by how likely each is
+    /// to be what the user remembers: the task and the worktree name first, the
+    /// full path and session next, tool and status as a last resort.
+    fn find_score(&self, query: &str, a: &Agent) -> Option<u32> {
+        // The name the user knows the session by, not the sanitized file key.
+        let session = self.real_session(a.session());
+        let fields: [(&str, u32); 6] = [
+            (a.display_task(), 4),
+            (a.project(), 4),
+            (&a.cwd, 2),
+            (&session, 2),
+            (&a.tool, 1),
+            (a.status.label(), 1),
+        ];
+        fields
+            .into_iter()
+            .filter_map(|(s, w)| crate::find::score(query, s).map(|sc| sc * w))
+            .max()
+    }
+
+    /// Where the find cursor sits within `matches`. An agent that vanished or
+    /// stopped matching mid-search degrades to the best match rather than to a
+    /// wrong-target jump.
+    pub(crate) fn find_cursor_pos(&self, matches: &[usize]) -> Option<usize> {
+        let f = self.find.as_ref()?;
+        if matches.is_empty() {
+            return None;
+        }
+        let held = f
+            .cursor
+            .as_ref()
+            .and_then(|id| matches.iter().position(|&i| self.agents[i].id == *id));
+        Some(held.unwrap_or(0))
     }
 
     pub(crate) fn clamp_selection(&mut self) {

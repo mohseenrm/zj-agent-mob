@@ -16,6 +16,8 @@ by urgency, so whatever needs you most sits at the top.
 
 - **Every agent at once**, across sessions, with live status and the task each is on.
 - **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
+- **Fuzzy find** with <kbd>/</kbd>: a few characters of a task, worktree, or
+  session narrows the list to it.
 - **Told when you are away**: a desktop notification the moment an agent blocks or fails.
 - **Answer in place**: <kbd>a</kbd> / <kbd>r</kbd> for permission prompts (opt-in),
   <kbd>y</kbd> / <kbd>m</kbd> to reply.
@@ -160,6 +162,7 @@ running only one agent's hooks is supported.
 | <kbd>1</kbd>–<kbd>9</kbd> | Jump straight to agent N |
 | <kbd>g</kbd> <var>N</var> <kbd>Enter</kbd> | Jump to any row by number, including past 9. <kbd>g</kbd> opens a count, <kbd>Enter</kbd> or <kbd>G</kbd> closes it: `g25`<kbd>Enter</kbd>, or `g25G` for the vim spelling |
 | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd> | First row / last row |
+| <kbd>/</kbd> | Fuzzy find: type to narrow the list (task, worktree, path, session, tool, status), <kbd>Ctrl</kbd>+<kbd>j</kbd>/<kbd>k</kbd> or <kbd>↓</kbd>/<kbd>↑</kbd> to pick a match, <kbd>Enter</kbd> jumps to it, <kbd>Esc</kbd> cancels. Smartcase, like vim |
 | <kbd>s</kbd> | Cycle the ordering: urgency (default) -> grouped by project -> grouped by session |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
