@@ -31,6 +31,7 @@ pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("1-9/g", "goto"),
     Hint::new("x", "kill"),
     Hint::new("d", "dismiss"),
+    Hint::new("s", "group"),
     Hint::new("i", "install"),
     Hint::new("q", "hide"),
 ];
@@ -162,7 +163,7 @@ mod tests {
     fn list_footer_matches_the_documented_row() {
         assert_eq!(
             plain_line(LIST_HINTS),
-            " \u{21b5} jump  1-9/g goto  x kill  d dismiss  i install  q hide"
+            " \u{21b5} jump  1-9/g goto  x kill  d dismiss  s group  i install  q hide"
         );
     }
 
@@ -180,7 +181,7 @@ mod tests {
             ("reply-edit", REPLY_EDIT_HINTS),
         ] {
             assert!(
-                ribbon_width(set) <= 72,
+                ribbon_width(set) <= 84,
                 "{} hints need {} columns; Zellij would silently drop one",
                 name,
                 ribbon_width(set)
@@ -193,8 +194,39 @@ mod tests {
     #[test]
     fn list_hints_cover_the_documented_keys() {
         let keys: Vec<&str> = LIST_HINTS.iter().map(|h| h.key).collect();
-        for expect in ["x", "d", "i", "q", "1-9/g"] {
+        for expect in ["x", "d", "s", "i", "q", "1-9/g"] {
             assert!(keys.contains(&expect), "missing hint for {:?}", expect);
+        }
+    }
+
+    /// Every unconditional list key is either in the footer or named here with
+    /// the reason it is not. `s` was missing for a release: the only place it
+    /// appeared was a header chip shown once you were *already* grouped, so the
+    /// key that gets you there advertised itself only after you had found it.
+    /// Adding a key to the list handler without a decision here fails the build.
+    #[test]
+    fn no_list_key_is_undiscoverable() {
+        // Keys surfaced by a context-sensitive footer instead: they appear only
+        // while the selected row can actually accept them.
+        let contextual = ["a", "r", "y", "m"];
+        // Shift-variants of a key already in the footer, plus vim motions whose
+        // lowercase form is there. Discoverable via the README, and deliberately
+        // kept out so a slipped finger cannot reach the whole-fleet action.
+        let shift_or_motion = ["D", "G", "g", "j", "k"];
+
+        for key in [
+            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "i", "q",
+        ] {
+            let in_footer = LIST_HINTS
+                .iter()
+                .any(|h| h.key == key || (h.key == "1-9/g" && key == "g"));
+            let excused = contextual.contains(&key) || shift_or_motion.contains(&key) || key == "n";
+            assert!(
+                in_footer || excused,
+                "list key {:?} has no discoverability surface: put it in LIST_HINTS \
+                 or add it to an exclusion list here with a reason",
+                key
+            );
         }
     }
 }

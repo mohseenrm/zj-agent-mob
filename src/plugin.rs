@@ -341,7 +341,7 @@ impl State {
         let y = self.render_header(subtitle, width);
         let rows = vec![
             Text::new("  Start claude or codex in a pane; hooks report status here.").color_range(DIM_LEVEL, ..),
-            Text::new("  Press i to check and install the hooks.").color_range(DIM_LEVEL, ..),
+            Text::new("  Press n to start one here, or i to check and install the hooks.").color_range(DIM_LEVEL, ..),
         ];
         self.render_rows(rows, y);
     }
@@ -386,11 +386,11 @@ impl State {
             head.push(' ');
             head.push_str(label);
         }
-        // Only when grouped: the default ordering needs no announcing, and the
-        // footer has no columns left for an `s` chip.
+        // Only when grouped: the default ordering needs no announcing. `s` is
+        // in the footer either way, so this chip only names the current mode.
         let mut group_range = None;
         if self.grouping != Grouping::Urgency {
-            let chip = format!("  [{} groups \u{b7} s]", self.grouping.label());
+            let chip = format!("  [{} groups]", self.grouping.label());
             if chars(&head) + chars(&chip) <= width {
                 let start = chars(&head);
                 head.push_str(&chip);
