@@ -68,7 +68,9 @@ impl ZellijPlugin for State {
                 self.notifier.focused = visible;
                 match visible {
                     true => self.clear_notified(),
-                    false => false,
+                    // A search left open would greet the next open by silently
+                    // swallowing keys into a prompt nobody remembers typing.
+                    false => self.find.take().is_some(),
                 }
             }
             Event::Timer(_) => self.on_tick(),
@@ -238,6 +240,19 @@ pub(crate) fn reply_row(text: &str, cols: usize) -> Text {
     let line = format!("{}{}{}\u{2588}", INDENT, PROMPT, shown);
     let at = chars(INDENT)..chars(INDENT) + chars(PROMPT);
     Text::new(line).color_range(2, at)
+}
+
+/// The find prompt, footer-resident like a pending `g` count: the query, a
+/// block cursor, and the keys that end the search.
+pub(crate) fn find_prompt_row(query: &str, cols: usize) -> Text {
+    let line = truncate(
+        &format!("  /{}\u{2588}   \u{21b5} jump   esc cancel   ^j/^k move", query),
+        cols,
+    );
+    // The highlight covers the slash, the query and the cursor, clamped so a
+    // narrow pane cannot leave the range pointing past the truncated line.
+    let end = (chars("  /") + chars(query) + 1).min(chars(&line)).max(2);
+    Text::new(line).color_range(2, 2..end)
 }
 
 /// Which agent groups fit in `budget` rows, scrolled so `selected` is whole.
@@ -411,14 +426,27 @@ impl State {
         print_text_with_coordinates(head, 0, 0, None, None);
         let mut y = self.render_rule(1, width);
 
+        // An open find prompt narrows the list to its matches, in score order.
+        // With no prompt this is the identity, so one code path renders both.
+        let finding = self.find.is_some();
+        let visible = self.find_matches();
+        // While finding the marker follows the find cursor, not the selection:
+        // the selection is what Esc goes back to and must not move under a
+        // search that may be abandoned.
+        let marked = match finding {
+            true => self.find_cursor_pos(&visible).map(|p| visible[p]),
+            false => Some(self.selected),
+        };
+
         // A detail line per agent needs two rows each, plus header and footer.
-        let detail_lines = rows >= 4 + self.agents.len() * 2 && width >= 60;
+        let detail_lines = rows >= 4 + visible.len() * 2 && width >= 60;
         let show_cwd = width >= 50;
 
         // Only the first row of a run gets a heading, so a group of six costs
-        // one header row rather than six.
+        // one header row rather than six. Suppressed while finding: match order
+        // is score order, and a heading over a re-sorted subset would lie.
         let mut group_of: BTreeMap<usize, String> = BTreeMap::new();
-        if self.grouping != Grouping::Urgency {
+        if self.grouping != Grouping::Urgency && !finding {
             let mut prev: Option<&str> = None;
             for (i, a) in self.agents.iter().enumerate() {
                 let k = a.group_key(self.grouping);
@@ -432,11 +460,10 @@ impl State {
         // One group per agent: its row plus whatever renders underneath it. The
         // viewport pages by group so a selected agent's prompt box is never cut
         // in half.
-        let groups: Vec<Vec<Text>> = self
-            .agents
+        let groups: Vec<Vec<Text>> = visible
             .iter()
-            .enumerate()
-            .map(|(i, agent)| {
+            .map(|&i| {
+                let agent = &self.agents[i];
                 let mut g = Vec::new();
                 // The heading rides on its first member's group, so the
                 // viewport keeps paging by group and never orphans a header.
@@ -448,10 +475,12 @@ impl State {
                         .count();
                     g.push(group_header(key, n, width));
                 }
+                // Rows keep their real list position, so the number shown is
+                // the one `1`-`9` or `g` would take once the prompt closes.
                 g.push(agent.list_item(
                     i,
                     crate::agent::RowCtx {
-                        selected: i == self.selected,
+                        selected: Some(i) == marked,
                         icon: self.icon_for(agent),
                         now: self.now,
                         cols: width,
@@ -462,8 +491,10 @@ impl State {
                 if detail_lines {
                     g.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), width));
                 }
-                // The prompt belongs to one agent, so it renders under that row.
-                if i == self.selected {
+                // The prompt belongs to one agent, so it renders under that
+                // row. Not while finding: ask and reply act on the selection,
+                // which the find cursor is not.
+                if !finding && i == self.selected {
                     if let Some(ask) = self.ask_for(&agent.id) {
                         g.extend(ask_rows(ask, width));
                     }
@@ -479,10 +510,14 @@ impl State {
         // the hints, and the error note when there is one.
         let chrome = 4 + usize::from(self.action_error.is_some());
         let budget = rows.saturating_sub(chrome);
-        let view = viewport(&groups, self.scroll, self.selected, budget);
+        let keep_visible = marked.and_then(|m| visible.iter().position(|&i| i == m)).unwrap_or(0);
+        let view = viewport(&groups, self.scroll, keep_visible, budget);
         self.scroll = view.first;
 
         let mut items = Vec::new();
+        if finding && visible.is_empty() {
+            items.push(Text::new(truncate("  no matches", width)).color_range(DIM_LEVEL, ..));
+        }
         if view.hidden_above > 0 && view.count > 0 {
             items.push(more_row(view.hidden_above, true, width));
         }
@@ -503,6 +538,12 @@ impl State {
             .agents
             .get(self.selected)
             .is_some_and(|a| self.ask_for(&a.id).is_some());
+        // The find query lives in the footer the way a `g` count does: what has
+        // been typed, a block cursor, and the keys that end the search.
+        if let Some(f) = self.find.as_ref() {
+            print_text_with_coordinates(find_prompt_row(&f.query, width), 0, y, None, None);
+            return y + 1;
+        }
         // A pending count replaces the footer with what has been typed so far:
         // otherwise the digits vanish into a buffer with nothing on screen.
         // Echoed as vim would show it, count first.
@@ -866,7 +907,7 @@ mod viewport_tests {
     }
 
     /// A pending count has to be visible: the digits go into a buffer, and a
-    /// footer that still reads "1-9/g goto" hides that anything is happening.
+    /// footer that still reads "g goto" hides that anything is happening.
     #[test]
     fn a_pending_count_replaces_the_footer_and_still_fits() {
         let mut s = state_with(12);
@@ -874,5 +915,98 @@ mod viewport_tests {
         for rows in [6usize, 10, 20] {
             assert!(s.render_list(rows, 100) <= rows, "rows={}", rows);
         }
+    }
+}
+
+#[cfg(test)]
+mod find_render_tests {
+    use crate::state::{Find, State};
+    use crate::util::testing::item_text;
+    use std::collections::BTreeMap;
+
+    fn state_with(n: usize) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for i in 0..n {
+            let args: BTreeMap<String, String> = [
+                ("pane_id", i.to_string()),
+                ("status", "working".to_string()),
+                ("task", format!("task {}", i)),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    fn finding(n: usize, query: &str) -> State {
+        let mut s = state_with(n);
+        s.find = Some(Find {
+            query: query.into(),
+            cursor: None,
+        });
+        s
+    }
+
+    /// The clipping contract, re-asserted with the prompt open: a filtered
+    /// list, a "no matches" row, or a full list under an empty query must all
+    /// stay inside the pane.
+    #[test]
+    fn a_filtered_list_never_emits_more_rows_than_the_pane_has() {
+        for query in ["", "task 1", "zzz-no-match"] {
+            for rows in [6usize, 8, 10, 14, 20, 30] {
+                for agents in [1usize, 3, 9, 20, 50] {
+                    let mut s = finding(agents, query);
+                    let emitted = s.render_list(rows, 100);
+                    assert!(
+                        emitted <= rows,
+                        "query={:?} rows={} agents={} emitted {}",
+                        query,
+                        rows,
+                        agents,
+                        emitted
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_find_prompt_shows_the_query_and_fits_the_pane() {
+        for cols in [10usize, 20, 40, 60, 100] {
+            let row = item_text(&super::find_prompt_row("alpha", cols));
+            assert!(row.chars().count() <= cols, "cols={} produced {:?}", cols, row);
+        }
+        let row = item_text(&super::find_prompt_row("alpha", 60));
+        assert!(row.contains("/alpha\u{2588}"), "{:?}", row);
+        assert!(row.contains("esc"), "{:?}", row);
+    }
+
+    /// The numbers on screen must be the ones `1`-`9` and `g` act on after the
+    /// prompt closes, so a filtered row keeps its real list position.
+    #[test]
+    fn filtered_rows_keep_their_real_numbers() {
+        let s = finding(5, "task 3");
+        let matches = s.find_matches();
+        assert_eq!(matches.len(), 1);
+        let real = matches[0];
+        let row = item_text(&s.agents[real].list_item(
+            real,
+            crate::agent::RowCtx {
+                selected: true,
+                icon: "\u{25cf}",
+                now: 0.0,
+                cols: 100,
+                show_cwd: false,
+                home: "mob",
+            },
+        ));
+        assert!(row.contains(&format!("{} ", real + 1)), "{:?}", row);
     }
 }
