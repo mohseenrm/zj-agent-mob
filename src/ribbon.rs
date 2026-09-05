@@ -26,12 +26,16 @@ impl Hint {
     }
 }
 
+/// Exactly at the 84-column ribbon budget. `/ find` was paid for by tightening
+/// three labels: the digit fast path lost its slot because every row prints its
+/// own number, so `g` is the only goto spelling that needs advertising.
 pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("\u{21b5}", "jump"),
-    Hint::new("1-9/g", "goto"),
+    Hint::new("g", "goto"),
+    Hint::new("/", "find"),
     Hint::new("x", "kill"),
-    Hint::new("d", "dismiss"),
-    Hint::new("s", "group"),
+    Hint::new("d", "clear"),
+    Hint::new("s", "sort"),
     Hint::new("i", "install"),
     Hint::new("q", "hide"),
 ];
@@ -169,7 +173,7 @@ mod tests {
     fn list_footer_matches_the_documented_row() {
         assert_eq!(
             plain_line(LIST_HINTS),
-            " \u{21b5} jump  1-9/g goto  x kill  d dismiss  s group  i install  q hide"
+            " \u{21b5} jump  g goto  / find  x kill  d clear  s sort  i install  q hide"
         );
     }
 
@@ -201,7 +205,7 @@ mod tests {
     #[test]
     fn list_hints_cover_the_documented_keys() {
         let keys: Vec<&str> = LIST_HINTS.iter().map(|h| h.key).collect();
-        for expect in ["x", "d", "s", "i", "q", "1-9/g"] {
+        for expect in ["x", "d", "s", "i", "q", "g", "/"] {
             assert!(keys.contains(&expect), "missing hint for {:?}", expect);
         }
     }
@@ -219,14 +223,14 @@ mod tests {
         // Shift-variants of a key already in the footer, plus vim motions whose
         // lowercase form is there. Discoverable via the README, and deliberately
         // kept out so a slipped finger cannot reach the whole-fleet action.
+        // The digit fast path is excused because every row prints its own
+        // number, which advertises it better than a footer chip could.
         let shift_or_motion = ["D", "G", "g", "j", "k"];
 
         for key in [
-            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "i", "q",
+            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "i", "q", "/",
         ] {
-            let in_footer = LIST_HINTS
-                .iter()
-                .any(|h| h.key == key || (h.key == "1-9/g" && key == "g"));
+            let in_footer = LIST_HINTS.iter().any(|h| h.key == key);
             let excused = contextual.contains(&key) || shift_or_motion.contains(&key) || key == "n";
             assert!(
                 in_footer || excused,

@@ -4,7 +4,7 @@ use zellij_tile::prelude::*;
 
 use crate::host;
 use crate::install::{SetupAction, Target};
-use crate::state::State;
+use crate::state::{Find, State};
 use crate::status::Status;
 use crate::util::wrap;
 
@@ -213,6 +213,92 @@ impl State {
         }
     }
 
+    /// The `/` prompt. Printable keys are query text, so none of the list
+    /// shortcuts below are reachable while it is open: a stray `x` mid-search
+    /// must never arm a kill. Movement is on Ctrl (and the arrows), fzf-style,
+    /// because plain `j`/`k` are query characters here.
+    fn handle_find_key(&mut self, key: KeyWithModifier) -> bool {
+        if key.key_modifiers.contains(&KeyModifier::Ctrl) {
+            match key.bare_key {
+                BareKey::Char('j') | BareKey::Char('n') => self.find_move(1),
+                BareKey::Char('k') | BareKey::Char('p') => self.find_move(-1),
+                _ => {}
+            }
+            return true;
+        }
+        match key.bare_key {
+            BareKey::Esc => {
+                self.find = None;
+                true
+            }
+            // The target id is resolved from the cursor before the prompt
+            // closes, then re-looked-up to focus: a pipe between the last
+            // keystroke and Enter may have re-sorted the list, and an index
+            // held across that would jump into a stranger.
+            BareKey::Enter => {
+                let matches = self.find_matches();
+                let target = self
+                    .find_cursor_pos(&matches)
+                    .map(|p| self.agents[matches[p]].id.clone());
+                self.find = None;
+                if let Some(id) = target {
+                    if let Some(i) = self.agents.iter().position(|a| a.id == id) {
+                        self.selected = i;
+                        self.focus_selected();
+                    }
+                }
+                true
+            }
+            BareKey::Down => {
+                self.find_move(1);
+                true
+            }
+            BareKey::Up => {
+                self.find_move(-1);
+                true
+            }
+            // On an already-empty query, closes the prompt, as vim's search
+            // line does.
+            BareKey::Backspace => {
+                match &mut self.find {
+                    Some(f) if !f.query.is_empty() => {
+                        f.query.pop();
+                        f.cursor = None;
+                    }
+                    _ => self.find = None,
+                }
+                true
+            }
+            BareKey::Char(c) => {
+                if let Some(f) = &mut self.find {
+                    // A query is a few remembered characters; a cap far past
+                    // any useful length just bounds the per-keystroke rescore.
+                    if f.query.chars().count() < 64 {
+                        f.query.push(c);
+                        // Whatever was highlighted no longer reflects the new
+                        // narrowing; the best match does.
+                        f.cursor = None;
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Moves the find cursor within the current matches, wrapping.
+    fn find_move(&mut self, delta: isize) {
+        let matches = self.find_matches();
+        let Some(pos) = self.find_cursor_pos(&matches) else {
+            return;
+        };
+        let next = wrap(pos, delta, matches.len());
+        let id = self.agents[matches[next]].id.clone();
+        if let Some(f) = &mut self.find {
+            f.cursor = Some(id);
+        }
+    }
+
     /// The count started by `g`. Vim puts the count before the motion (`25G`),
     /// but a bare `1`-`9` already jumps on its own here, so the digits cannot
     /// lead: pressing `2` has focused the pane and hidden the panel before a
@@ -279,6 +365,9 @@ impl State {
         if self.reply.is_some() {
             return self.handle_reply_key(key);
         }
+        if self.find.is_some() {
+            return self.handle_find_key(key);
+        }
         if self.followup.is_some() {
             return self.handle_followup_key(key);
         }
@@ -312,6 +401,15 @@ impl State {
             BareKey::Char('g') => {
                 self.jump_buf = Some(String::new());
                 self.kill_armed = None;
+                true
+            }
+            // Vim's search prompt, fzf's narrowing: typing filters the list.
+            // Inert on an empty list, which the empty screen renders anyway.
+            BareKey::Char('/') => {
+                if !self.agents.is_empty() {
+                    self.find = Some(Find::default());
+                    self.kill_armed = None;
+                }
                 true
             }
             // Vim's "last line". No count can reach it without knowing how many
@@ -1079,5 +1177,215 @@ mod tests {
         s.handle_key(KeyWithModifier::new(BareKey::Enter));
         assert_eq!(s.selected, 12, "g99 with 26 rows must not move the cursor");
         assert_eq!(s.jump_buf, None);
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn key(c: char) -> KeyWithModifier {
+        KeyWithModifier::new(BareKey::Char(c))
+    }
+
+    fn ctrl(c: char) -> KeyWithModifier {
+        KeyWithModifier::new(BareKey::Char(c)).with_ctrl_modifier()
+    }
+
+    /// Agents in session "mob", each with a cwd and a task to match against.
+    fn fleet(specs: &[(&str, &str, &str)]) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for (pane, cwd, task) in specs {
+            let args: BTreeMap<String, String> = [
+                ("pane_id", *pane),
+                ("cwd", *cwd),
+                ("task", *task),
+                ("status", "working"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    fn type_query(s: &mut State, q: &str) {
+        for c in q.chars() {
+            s.handle_key(key(c));
+        }
+    }
+
+    #[test]
+    fn slash_opens_the_find_prompt_and_swallows_list_keys() {
+        let mut s = fleet(&[("1", "/w/alpha", "one"), ("2", "/w/beta", "two")]);
+        assert!(s.handle_key(key('/')));
+        assert!(s.find.is_some());
+        // `x` mid-search is a query character, never an armed kill.
+        s.handle_key(key('x'));
+        assert_eq!(s.kill_armed, None);
+        assert_eq!(s.find.as_ref().unwrap().query, "x");
+        s.handle_key(key('q'));
+        assert!(!s.hidden, "q must not hide the panel while searching");
+    }
+
+    #[test]
+    fn typing_narrows_to_the_matching_agents() {
+        let mut s = fleet(&[
+            ("1", "/w/feat-auth", "refactor tokens"),
+            ("2", "/w/feat-parser", "grammar"),
+            ("3", "/w/docs", "auth writeup"),
+        ]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "auth");
+        let matched: Vec<u32> = s.find_matches().into_iter().map(|i| s.agents[i].pane_id()).collect();
+        assert_eq!(matched.len(), 2, "{:?}", matched);
+        assert!(matched.contains(&1) && matched.contains(&3), "{:?}", matched);
+    }
+
+    #[test]
+    fn the_worktree_name_is_matchable() {
+        let mut s = fleet(&[
+            ("1", "/repos/zj/.worktrees/fuzzy-find", "typing"),
+            ("2", "/repos/zj", "main checkout"),
+        ]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "fuzz");
+        let m = s.find_matches();
+        assert_eq!(m.len(), 1);
+        assert_eq!(s.agents[m[0]].pane_id(), 1);
+    }
+
+    #[test]
+    fn enter_focuses_the_match_under_the_cursor() {
+        let mut s = fleet(&[("1", "/w/alpha", "one"), ("2", "/w/beta", "two")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "beta");
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert!(s.find.is_none());
+        assert_eq!(s.agents[s.selected].pane_id(), 2);
+        assert!(s.hidden, "Enter jumps to the pane and hides the panel");
+    }
+
+    #[test]
+    fn a_resort_between_keystrokes_cannot_redirect_the_jump() {
+        let mut s = fleet(&[("1", "/w/alpha-a", "task a"), ("2", "/w/alpha-b", "task b")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "alpha");
+        // Pin the cursor on the second match.
+        s.handle_key(ctrl('j'));
+        let pinned = {
+            let m = s.find_matches();
+            s.agents[m[s.find_cursor_pos(&m).unwrap()]].id.clone()
+        };
+        // A pipe promotes the other agent to blocked, which re-sorts it first.
+        let args: BTreeMap<String, String> = [("pane_id", "1"), ("status", "waiting")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.handle_status(&args);
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(s.agents[s.selected].id, pinned);
+    }
+
+    #[test]
+    fn esc_restores_the_full_list_and_the_prior_selection() {
+        let mut s = fleet(&[("1", "/w/alpha", "one"), ("2", "/w/beta", "two")]);
+        s.selected = 1;
+        s.handle_key(key('/'));
+        type_query(&mut s, "alpha");
+        s.handle_key(KeyWithModifier::new(BareKey::Esc));
+        assert!(s.find.is_none());
+        assert_eq!(s.selected, 1);
+        assert_eq!(s.find_matches().len(), 2, "no prompt means the whole list");
+    }
+
+    #[test]
+    fn backspace_edits_the_query_and_closes_on_empty() {
+        let mut s = fleet(&[("1", "/w/alpha", "one")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "ab");
+        s.handle_key(KeyWithModifier::new(BareKey::Backspace));
+        assert_eq!(s.find.as_ref().unwrap().query, "a");
+        s.handle_key(KeyWithModifier::new(BareKey::Backspace));
+        assert_eq!(s.find.as_ref().unwrap().query, "");
+        s.handle_key(KeyWithModifier::new(BareKey::Backspace));
+        assert!(s.find.is_none(), "backspace on an empty query closes the prompt");
+    }
+
+    #[test]
+    fn a_query_matching_nothing_makes_enter_inert() {
+        let mut s = fleet(&[("1", "/w/alpha", "one")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "zzz");
+        assert!(s.find_matches().is_empty());
+        s.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert!(s.find.is_none());
+        assert!(!s.hidden, "nothing was focused");
+    }
+
+    #[test]
+    fn the_cursor_falls_back_to_the_best_match_when_its_agent_leaves() {
+        let mut s = fleet(&[("1", "/w/alpha-a", "task a"), ("2", "/w/alpha-b", "task b")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "alpha");
+        s.handle_key(ctrl('j'));
+        let m = s.find_matches();
+        let pinned = s.agents[m[s.find_cursor_pos(&m).unwrap()]].id.clone();
+        s.agents.retain(|a| a.id != pinned);
+        let m = s.find_matches();
+        assert_eq!(s.find_cursor_pos(&m), Some(0));
+    }
+
+    #[test]
+    fn ctrl_j_and_k_move_within_matches_and_wrap() {
+        let mut s = fleet(&[("1", "/w/alpha-a", "task a"), ("2", "/w/alpha-b", "task b")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "alpha");
+        let at = |s: &State| {
+            let m = s.find_matches();
+            s.agents[m[s.find_cursor_pos(&m).unwrap()]].pane_id()
+        };
+        let first = at(&s);
+        s.handle_key(ctrl('j'));
+        let second = at(&s);
+        assert_ne!(first, second);
+        s.handle_key(ctrl('j'));
+        assert_eq!(at(&s), first, "moving past the end wraps");
+        s.handle_key(ctrl('k'));
+        assert_eq!(at(&s), second);
+        // A ctrl-modified letter is movement, never query text.
+        assert_eq!(s.find.as_ref().unwrap().query, "alpha");
+    }
+
+    #[test]
+    fn slash_on_an_empty_list_is_inert() {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            ..Default::default()
+        };
+        s.handle_key(key('/'));
+        assert!(s.find.is_none());
+    }
+
+    #[test]
+    fn typing_resets_the_cursor_to_the_best_match() {
+        let mut s = fleet(&[("1", "/w/alpha-a", "task a"), ("2", "/w/alpha-b", "task b")]);
+        s.handle_key(key('/'));
+        type_query(&mut s, "alpha");
+        s.handle_key(ctrl('j'));
+        assert!(s.find.as_ref().unwrap().cursor.is_some());
+        s.handle_key(key('-'));
+        assert!(
+            s.find.as_ref().unwrap().cursor.is_none(),
+            "a narrower query invalidates the pinned row"
+        );
     }
 }

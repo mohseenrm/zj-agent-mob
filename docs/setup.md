@@ -20,13 +20,13 @@ Two options: let `init.sh` download a release for you, or build the wasm yoursel
 Each release ships three assets: `init.sh`, `zj-agent-mob-hook.sh`, and `zj-agent-mob.wasm`. The installer fetches the two it needs from the same tag it was downloaded from, so one command is the whole install:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.8.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.9.0/init.sh | sh
 ```
 
 No clone, no Rust toolchain, no manual `target/` directory. To inspect the script first:
 
 ```sh
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.8.0/init.sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.9.0/init.sh
 less init.sh && sh init.sh
 ```
 

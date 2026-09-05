@@ -2,6 +2,7 @@
 
 mod agent;
 mod discover;
+mod find;
 mod host;
 mod install;
 mod keys;
