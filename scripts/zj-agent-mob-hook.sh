@@ -475,9 +475,14 @@ if [ "$event" = UserPromptSubmit ] && [ "${ZJ_AGENT_CONTEXT:-1}" != "0" ] && [ -
   peers=$(peer_records "$SESSION.$ZELLIJ_PANE_ID" "$cwd")
   if [ -n "$peers" ]; then
     count=$(printf '%s\n' "$peers" | grep -c . 2>/dev/null || echo 0)
-    printf '%s\n' "$peers" | head -3 | jq -Rs --arg n "$count" \
+    shown=$count
+    [ "$shown" -gt 3 ] 2>/dev/null && shown=3
+    more=$((count - shown))
+    tail_note=''
+    [ "$more" -gt 0 ] && tail_note=" (and $more more)"
+    printf '%s\n' "$peers" | head -3 | jq -Rs --arg n "$count" --arg t "$tail_note" \
       '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",
-        additionalContext:("zj-agent-mob: " + $n + " other agent(s) are working in this same directory right now:\n" + . + "Coordinate before wide-reaching changes (rebases, file moves, dependency bumps).")}}' \
+        additionalContext:("zj-agent-mob: " + $n + " other agent(s) are working in this same directory right now:\n" + . + "Coordinate before wide-reaching changes (rebases, file moves, dependency bumps)." + $t)}}' \
       2>/dev/null || true
   fi
 fi

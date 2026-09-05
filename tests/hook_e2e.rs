@@ -2125,6 +2125,42 @@ fn the_fleet_note_separates_the_peer_list_from_the_advice() {
     );
 }
 
+/// The list is capped at three, so a bigger fleet must say what it left out
+/// rather than claiming a count it did not print.
+#[test]
+fn a_capped_peer_list_says_how_many_it_left_out() {
+    let h = Hook::new();
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("create spool");
+    for pane in 1..=5 {
+        fs::write(
+            spool.join(format!("peer{}.{}", pane, pane)),
+            format!(
+                "ts=1,pane_id={},session=peer{},tool=claude,status=working,session_id=s{},cwd=/repo,task=work {},detail=,block=,perm_mode=,model=,agent_type=\n",
+                pane, pane, pane, pane
+            ),
+        )
+        .expect("write peer record");
+    }
+
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/repo",
+    })
+    .to_string();
+    let r = h.run(&json);
+    assert!(
+        r.stdout.contains("5 other agent(s)"),
+        "the count should be the real total: {:?}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("and 2 more"),
+        "a capped list must say what it left out: {:?}",
+        r.stdout
+    );
+}
+
 /// A peer working somewhere else is not this turn's problem.
 #[test]
 fn a_peer_in_another_directory_is_not_announced() {
