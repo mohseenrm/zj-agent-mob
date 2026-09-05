@@ -179,7 +179,8 @@ on tool events. Strictly informational, capped to one line, opt-in
 **Built** default-on, opt out with `ZJ_AGENT_CONTEXT=0`. Capped at three peers
 rather than one line, and restricted to peers in an *active* state - a finished
 agent is not competition for the working tree. An agent is never told about
-itself.
+itself, and a fleet larger than the cap says how many it left out rather than
+naming a count it never printed.
 
 ### H6. Show the model per row (S)
 
@@ -274,8 +275,15 @@ the advice line (`rebasing the branchCoordinate before ...`). The tests asserted
 the note *contained* each part, which was true of the broken output too. A
 regression test now asserts the separator specifically.
 
-The general lesson: assertions built from `contains` pass on concatenated
-output. Where the shape of the text matters, assert the shape.
+A second run, against the merged code, found the same class of defect again:
+the note printed the real peer total but capped the list at three, so a fleet
+of five read as four names it never showed. The tests asserted each part was
+present, which the inconsistent version also satisfied.
+
+The general lesson: assertions built from `contains` pass on concatenated and
+on internally inconsistent output alike. Where the shape or the arithmetic of
+the text matters, assert that specifically - and read the real thing at least
+once.
 
 ### An unrelated render bug, fixed alongside
 

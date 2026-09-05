@@ -235,7 +235,8 @@ pane 4 (working): refactor the parser
 Coordinate before wide-reaching changes (rebases, file moves, dependency bumps).
 ```
 
-Capped at three peers, informational only, and never a veto: `additionalContext`
+Capped at three peers - a bigger fleet says how many it left out rather than
+naming a count it never printed - informational only, and never a veto: `additionalContext`
 adds to what the agent knows and cannot block the prompt. It costs the agent
 tokens, so `ZJ_AGENT_CONTEXT=0` switches it off. An agent is never told about
 itself, and only `working` / `waiting` / `idle-wait` / `compact` records count -
