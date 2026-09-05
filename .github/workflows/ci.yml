@@ -47,6 +47,18 @@ jobs:
 
       - run: ./scripts/check.sh exports
 
+      # The only step that loads the built wasm into a real zellij. It needs the
+      # wasm from the step above, so it runs in this job rather than alongside
+      # shellcheck. The script skips itself if zellij is missing, so a failure
+      # to install it degrades to the previous coverage rather than a red build.
+      - name: Install zellij
+        run: |
+          curl -fsSL https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /usr/local/bin
+          zellij --version
+
+      - run: ./scripts/check.sh panel
+
   shell:
     name: shellcheck
     runs-on: ubuntu-latest

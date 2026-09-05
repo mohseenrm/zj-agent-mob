@@ -165,7 +165,7 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                     continue;
                 }
                 // Panel beacons share the directory but are not agent records.
-                if name.starts_with("panel.") {
+                if name.starts_with("panel.") || name.starts_with("inflight.") {
                     continue;
                 }
                 // First line wins: a file with more is malformed, and later
@@ -271,6 +271,15 @@ mod tests {
 
     /// The rename into place is what publishes a record; a `.tmp` is by
     /// definition still being written.
+    /// An in-flight tool stamp shares the directory but is not an agent record.
+    /// It parses to nothing today, so this pins the intent rather than the
+    /// accident of a malformed line being dropped downstream.
+    #[test]
+    fn an_inflight_stamp_is_never_read_as_an_agent() {
+        let scan = scan_of(&rec("inflight.mob.3", "1788584481 call-1"));
+        assert!(scan.spooled.is_empty(), "a tool stamp must not become a row");
+    }
+
     #[test]
     fn a_tmp_file_is_never_read() {
         let s = scan_of(&rec(

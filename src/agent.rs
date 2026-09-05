@@ -17,6 +17,12 @@ pub(crate) struct AgentId {
 /// Mirrors the hook's `LC_ALL=C tr -c 'a-zA-Z0-9._-' '_'`. Folds bytes, not
 /// chars, because `tr` does: "café" -> "caf__", and a char-wise fold would look
 /// for a spool file the hook never wrote.
+///
+/// The fold is lossy, so distinct sessions can land on one key: "my session"
+/// and "my_session" both give `my_session`, and one spool file would then hold
+/// two agents, each write erasing the other. A name the fold altered therefore
+/// carries a suffix of its own bytes in hex, which the hook appends the same
+/// way. Names the fold leaves alone keep their plain key.
 pub(crate) fn sanitize_session(name: &str) -> String {
     let bytes: Vec<u8> = name
         .bytes()
@@ -25,7 +31,36 @@ pub(crate) fn sanitize_session(name: &str) -> String {
             false => b'_',
         })
         .collect();
-    String::from_utf8(bytes).unwrap_or_default()
+    let folded = String::from_utf8(bytes).unwrap_or_default();
+    if name.is_empty() || folded == name {
+        return folded;
+    }
+    let mut hex = String::new();
+    for b in name.bytes().take(8) {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    format!("{}-{}", folded, hex)
+}
+
+/// The family and size out of a model id, which is the part that distinguishes
+/// two agents in a fleet: `claude-sonnet-4-5-20250929` is `sonnet-4-5`. An id
+/// that does not parse is truncated rather than dropped, since an unrecognized
+/// model is exactly when the full name is worth seeing.
+pub(crate) fn short_model(id: &str) -> String {
+    let families = ["opus", "sonnet", "haiku", "fable", "mythos", "gpt", "o1", "o3"];
+    let parts: Vec<&str> = id.split('-').collect();
+    if let Some(at) = parts
+        .iter()
+        .position(|p| families.contains(&p.to_ascii_lowercase().as_str()))
+    {
+        let tail: Vec<&str> = parts[at..]
+            .iter()
+            .take_while(|p| p.len() < 8 || !p.chars().all(|c| c.is_ascii_digit()))
+            .copied()
+            .collect();
+        return tail.join("-");
+    }
+    truncate(id, 16)
 }
 
 /// Everything a row needs that is not the agent itself. `home` is the panel's
@@ -63,6 +98,8 @@ pub(crate) struct Agent {
     pub(crate) alive: bool,
     /// Non-default permission modes only; `default` is left empty.
     pub(crate) perm_mode: String,
+    /// The model the agent is running, when the hook reported one.
+    pub(crate) model: String,
     /// Subagents currently running, and the distinct types seen this turn.
     pub(crate) subagents: u32,
     pub(crate) subagent_types: Vec<String>,
@@ -72,6 +109,8 @@ pub(crate) struct Agent {
     pub(crate) session_alive: bool,
     /// Fired a notification since the panel was last focused.
     pub(crate) notified: bool,
+    /// A follow-up is queued for delivery when this turn ends.
+    pub(crate) followup_queued: bool,
     /// What kind of answer a blocked agent is waiting for, when it is blocked.
     pub(crate) block: Option<Block>,
 }
@@ -281,6 +320,9 @@ impl Agent {
         } else if self.turns > 0 {
             bits.push(format!("{} turns", self.turns));
         }
+        if !self.model.is_empty() {
+            bits.push(short_model(&self.model));
+        }
         if let Some(t) = self.tab {
             bits.push(format!("tab:{}", t + 1));
         }
@@ -324,7 +366,7 @@ mod render_tests {
     use super::*;
     use crate::util::testing::{is_selected, item_text};
 
-    fn agent() -> Agent {
+    pub(super) fn agent() -> Agent {
         Agent {
             id: AgentId {
                 session: "mob".into(),
@@ -335,6 +377,8 @@ mod render_tests {
             status: Status::Working,
             cwd: "/Users/x/Projects/api".into(),
             task: Some("Add retry to webhook client".into()),
+            model: String::new(),
+            followup_queued: false,
             detail: Some("Edit src/webhook.rs".into()),
             turns: 4,
             status_since: 0.0,
@@ -793,5 +837,42 @@ mod render_tests {
         a.pane_title = String::new();
         let r = row(&a, 0, false, "\u{25cc}", 0.0, 110, false);
         assert!(r.starts_with("   1 \u{25cc} claude  found        "), "{:?}", r);
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::short_model;
+
+    #[test]
+    fn a_model_id_reduces_to_family_and_size() {
+        assert_eq!(short_model("claude-sonnet-4-5-20250929"), "sonnet-4-5");
+        assert_eq!(short_model("claude-opus-5"), "opus-5");
+        assert_eq!(short_model("claude-haiku-4-5-20251001"), "haiku-4-5");
+        assert_eq!(short_model("gpt-5-codex"), "gpt-5-codex");
+    }
+
+    /// An id that does not parse is exactly when the full name is worth seeing,
+    /// so it is truncated rather than dropped.
+    #[test]
+    fn an_unrecognized_id_survives_rather_than_vanishing() {
+        assert_eq!(short_model("some-new-thing"), "some-new-thing");
+        assert!(!short_model(&"x".repeat(40)).is_empty());
+        assert!(short_model(&"x".repeat(40)).chars().count() <= 16);
+    }
+
+    #[test]
+    fn the_model_appears_on_the_detail_line() {
+        let mut a = super::render_tests::agent();
+        a.model = "claude-sonnet-4-5-20250929".into();
+        let line = crate::util::testing::item_text(&a.detail_item(false, 200));
+        assert!(line.contains("sonnet-4-5"), "{:?}", line);
+    }
+
+    #[test]
+    fn no_model_adds_nothing_to_the_line() {
+        let a = super::render_tests::agent();
+        let line = crate::util::testing::item_text(&a.detail_item(false, 200));
+        assert!(!line.contains("sonnet"), "{:?}", line);
     }
 }

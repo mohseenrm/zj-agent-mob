@@ -17,7 +17,7 @@ by urgency, so whatever needs you most sits at the top.
 - **Every agent at once**, across sessions, with live status and the task each is on.
 - **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
 - **Told when you are away**: a desktop notification the moment an agent blocks or fails.
-- **Answer in place**: <kbd>a</kbd> / <kbd>r</kbd> for permission prompts (opt-in),
+- **Answer in place**: <kbd>a</kbd> / <kbd>r</kbd> for permission prompts, <kbd>A</kbd> to always allow a tool,
   <kbd>y</kbd> / <kbd>m</kbd> to reply.
 - **Kill a runaway** with <kbd>x</kbd>, two-step so you never do it by accident.
 - **No daemon and no socket.** Hooks pipe straight to the plugin and drop a
@@ -162,7 +162,9 @@ running only one agent's hooks is supported.
 | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd> | First row / last row |
 | <kbd>s</kbd> | Cycle the ordering: urgency (default) -> grouped by project -> grouped by session |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
-| <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt (opt-in, see below) |
+| <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt |
+| <kbd>A</kbd> | Approve, and stop that tool asking again |
+| <kbd>f</kbd> | Queue a follow-up, delivered when the turn ends |
 | <kbd>y</kbd> | Answer a blocked agent with `y` (only shown while it is waiting) |
 | <kbd>m</kbd> | Type a one-line reply to a blocked agent; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> cancels |
 | <kbd>d</kbd> | Dismiss a `done` badge |
@@ -223,14 +225,14 @@ visiting a pane. Only a `permission` is a yes/no the panel can answer:
 
 | `wants:` | You can |
 |---|---|
-| `permission` | Answer with <kbd>a</kbd> / <kbd>r</kbd> (needs `ZJ_AGENT_APPROVE=1`) |
+| `permission` | Answer with <kbd>a</kbd> / <kbd>r</kbd>, or <kbd>A</kbd> to always allow that tool |
 | `plan` | Read it - <kbd>Enter</kbd> to the pane |
 | `question` | Reply with <kbd>m</kbd>, or jump to the pane |
 | `idle` | Nothing is blocked on a decision |
 
 ### Answering permission prompts from the panel
 
-Off by default. With `ZJ_AGENT_APPROVE=1` set in the agent's environment, a permission prompt
+On by default; `ZJ_AGENT_APPROVE=0` in the agent's environment opts out. A permission prompt
 parks in the panel and <kbd>a</kbd> / <kbd>r</kbd> approve or reject it without leaving the panel:
 
 ```
@@ -239,14 +241,38 @@ parks in the panel and <kbd>a</kbd> / <kbd>r</kbd> approve or reject it without 
         ┌──────────────────────────────────────────┐
         │ Bash                                     │
         │ rm -rf node_modules                      │
-        │ a approve    r reject    ↵ jump to pane  │
+        │ a approve  r reject  A always  ↵ pane   │
         └──────────────────────────────────────────┘
 ```
 
-This is the one hook that blocks the agent's turn, which is why it is opt-in. It waits
-`ZJ_AGENT_APPROVE_TIMEOUT` seconds (default 30) and then falls through to the agent's own prompt,
-so the worst case is the normal interactive experience. Reject is <kbd>r</kbd>, not <kbd>d</kbd>,
-so a mis-keyed dismiss can never answer a prompt.
+It waits `ZJ_AGENT_APPROVE_TIMEOUT` seconds (default 30) and then falls through to the agent's own
+prompt, so the worst case is the normal interactive experience. Reject is <kbd>r</kbd>, not
+<kbd>d</kbd>, so a mis-keyed dismiss can never answer a prompt.
+
+<kbd>A</kbd> approves *and* stops that tool asking again, by appending a line to
+`~/.config/zj-agent-mob/approve.rules`:
+
+```
+allow Read
+allow Bash git
+```
+
+A matching rule is answered immediately, with no prompt and no wait, so a fleet only interrupts
+you for something new. Allow-only: a wrong auto-deny wedges a turn, where a wrong auto-allow is
+still bounded by whatever the agent's own sandbox permits.
+
+### Queueing the next instruction
+
+<kbd>f</kbd> composes a follow-up for the selected agent. It is delivered when the current turn
+ends, so the agent picks it up and keeps going instead of stopping:
+
+```
+▶ 1 ⠙ claude  working   1m4s  api        Add retry to webhook client
+      └ follow-up: now run the tests · 3 turns · pane:5
+```
+
+Unlike a reply this needs no prompt to be open - a working agent is exactly what it is for - and
+it reaches agents in other sessions. `ZJ_AGENT_FOLLOWUP=0` opts out.
 
 ### Desktop notifications
 

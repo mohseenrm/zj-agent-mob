@@ -932,13 +932,24 @@ fn permission_request() -> String {
     .to_string()
 }
 
-/// The default must stay non-blocking: an unconfigured install can never have a
-/// hook that waits on a panel the user may not even have open.
+/// Approving from the panel is the default. The blocking that implies is
+/// bounded by the timeout, which falls through to the agent's own prompt, so a
+/// user with no panel open sees the ordinary interactive experience.
 #[test]
-fn approval_is_off_by_default() {
-    let r = run(&permission_request());
+fn approval_is_on_by_default() {
+    let h = Hook::new();
+    let r = h.env("ZJ_AGENT_APPROVE_TIMEOUT", "1").run(&permission_request());
     assert_eq!(r.field("status"), "waiting");
-    assert!(r.ask_pipe().is_none(), "sent agent-ask without ZJ_AGENT_APPROVE=1");
+    assert!(r.ask_pipe().is_some(), "no agent-ask pipe with the default settings");
+}
+
+/// Opting out must still be possible, and must cost nothing on the turn.
+#[test]
+fn approval_can_be_switched_off() {
+    let h = Hook::new();
+    let r = h.env("ZJ_AGENT_APPROVE", "0").run(&permission_request());
+    assert_eq!(r.field("status"), "waiting");
+    assert!(r.ask_pipe().is_none(), "sent agent-ask with ZJ_AGENT_APPROVE=0");
 }
 
 /// With the flag on, the hook parks a prompt and waits for a verdict.
@@ -1047,11 +1058,17 @@ fn the_report_names_its_session() {
 /// that would split either is folded first. src/agent.rs mirrors this exactly.
 #[test]
 fn a_session_name_is_folded_to_safe_characters() {
-    let cases = [("my session", "my_session"), ("a,b=c", "a_b_c"), ("../evil", ".._evil")];
-    for (given, want) in cases {
+    for given in ["my session", "a,b=c", "../evil", "mob"] {
         let r = Hook::new().env("ZELLIJ_SESSION_NAME", given).run(&ev("Stop"));
-        assert_eq!(r.field("session"), want, "input {given:?}");
-        assert!(!r.field("session").contains('/'), "a slash could traverse paths");
+        let key = r.field("session");
+        assert_eq!(
+            key,
+            zj_agent_mob::sanitize_session_for_test(given),
+            "the plugin would look for a different key than the hook wrote, for {given:?}"
+        );
+        assert!(!key.contains('/'), "a slash could traverse paths: {key:?}");
+        assert!(!key.contains(','), "a comma would split the args: {key:?}");
+        assert!(!key.contains('='), "an equals would split a pair: {key:?}");
     }
 }
 
@@ -1190,12 +1207,24 @@ fn a_status_event_writes_a_spool_record() {
 /// rather than restated, so a copy cannot keep passing after the hook changes.
 fn shell_fold(name: &str, ambient_locale: &str) -> String {
     let script = fs::read_to_string(hook_path()).expect("read hook");
-    let line = script
-        .lines()
-        .find(|l| l.trim_start().starts_with("SESSION="))
-        .expect("the hook still has a SESSION= line");
+    // The whole derivation, not just the `SESSION=` line: a name the fold
+    // alters also picks up a hex suffix from the block that follows it, and
+    // lifting only the first line would compare against half the key.
+    let lines: Vec<&str> = script.lines().collect();
+    // From the helper the derivation calls through to the `fi` that closes it,
+    // so the lifted block is the whole key derivation however it is spelled.
+    let start = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("session_hex()"))
+        .expect("the hook still derives the key through session_hex");
+    let end = lines[start..]
+        .iter()
+        .position(|l| l.trim_start().starts_with("SESSION=\"$SESSION-"))
+        .map(|n| start + n + 2)
+        .expect("the hook still appends the suffix");
+    let block = lines[start..end].join("\n");
     let prog =
-        format!("export LC_ALL=\"$2\" LANG=\"$2\"; ZELLIJ_SESSION_NAME=\"$1\"; {line}; printf '%s' \"$SESSION\"");
+        format!("export LC_ALL=\"$2\" LANG=\"$2\"; ZELLIJ_SESSION_NAME=\"$1\"; {block}; printf '%s' \"$SESSION\"");
     let out = Command::new("sh")
         .arg("-c")
         .arg(&prog)
@@ -1291,12 +1320,95 @@ fn the_rust_and_shell_folds_agree() {
         "日本語",
         "emoji-🎉",
         "",
+        // Names that fold onto one key, which is what the hex suffix separates.
+        "my_session",
+        "my.session",
+        "my-session",
+        "a b",
+        "a_b",
     ];
     for name in names {
         assert_eq!(
             zj_agent_mob::sanitize_session_for_test(name),
             shell_fold(name, "C"),
             "the folds disagree for {name:?}"
+        );
+    }
+}
+
+/// Sanitizing is lossy, so distinct sessions could land on one spool file and
+/// silently overwrite each other's status. Every distinct name must key
+/// distinctly, on both sides of the seam.
+#[test]
+fn names_that_fold_alike_still_get_distinct_keys() {
+    let colliding = [
+        ("my session", "my_session"),
+        ("a b", "a_b"),
+        ("x-y", "x_y"),
+        ("p.q", "p q"),
+    ];
+    for (a, b) in colliding {
+        let (ka, kb) = (
+            zj_agent_mob::sanitize_session_for_test(a),
+            zj_agent_mob::sanitize_session_for_test(b),
+        );
+        assert_ne!(ka, kb, "{a:?} and {b:?} share the key {ka:?}");
+        assert_eq!(ka, shell_fold(a, "C"), "the folds disagree for {a:?}");
+        assert_eq!(kb, shell_fold(b, "C"), "the folds disagree for {b:?}");
+    }
+}
+
+/// The suffix must not depend on `od` being installed: a key that quietly lost
+/// it would collide again AND disagree with the plugin, which is worse than the
+/// slower fallback.
+#[test]
+fn the_key_is_the_same_without_od() {
+    let name = "my session";
+    let want = zj_agent_mob::sanitize_session_for_test(name);
+
+    let script = fs::read_to_string(hook_path()).expect("read hook");
+    let lines: Vec<&str> = script.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("session_hex()"))
+        .expect("session_hex");
+    let end = lines[start..]
+        .iter()
+        .position(|l| l.trim_start().starts_with("SESSION=\"$SESSION-"))
+        .map(|n| start + n + 2)
+        .expect("the suffix");
+    let block = lines[start..end].join("\n");
+
+    // `command -v od` is what the hook branches on, so a shell function of that
+    // name shadowing it is what takes the fallback path.
+    let prog = format!(
+        "command() {{ if [ \"$2\" = od ]; then return 1; fi; builtin command \"$@\" 2>/dev/null || /usr/bin/command \"$@\"; }}\n\
+         ZELLIJ_SESSION_NAME=\"$1\"; {block}; printf '%s' \"$SESSION\""
+    );
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&prog)
+        .arg("sh")
+        .arg(name)
+        .output()
+        .expect("run the fallback fold");
+    let got = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(got, want, "the fallback must produce the same key as od");
+    assert!(
+        !got.ends_with('-'),
+        "an empty suffix collides again and disagrees with the plugin: {got:?}"
+    );
+}
+
+/// The common case must keep its plain, readable key: a suffix on every name
+/// would churn every existing record for no gain.
+#[test]
+fn an_unaltered_name_keeps_its_plain_key() {
+    for name in ["mob", "dotfiles", "zj-agent-mob", "a.b_c-1", "UPPER123"] {
+        assert_eq!(
+            zj_agent_mob::sanitize_session_for_test(name),
+            name,
+            "{name:?} needs no suffix and must not get one"
         );
     }
 }
@@ -1396,9 +1508,27 @@ fn same_pane_in_two_sessions_gets_two_records() {
 fn a_session_name_cannot_escape_the_spool_directory() {
     let h = Hook::new();
     h.env("ZELLIJ_SESSION_NAME", "../evil").run(&ev("UserPromptSubmit"));
+    // Folded, then suffixed with its own bytes because the fold altered it.
+    // Neither half can carry a separator: the fold leaves only [A-Za-z0-9._-]
+    // and the suffix is hex.
+    let key = zj_agent_mob::sanitize_session_for_test("../evil");
+    assert!(!key.contains('/'), "the key can still address a directory: {key:?}");
     assert!(
-        h.path("spool/.._evil.3").exists(),
+        h.path(&format!("spool/{key}.3")).exists(),
         "folded name did not land in the spool"
+    );
+    // Traversal needs a separator, not merely a dot: ".." inside a filename is
+    // an ordinary character. What must hold is that every record stayed inside
+    // the directory, and nothing was created beside it.
+    let written: Vec<_> = fs::read_dir(h.path("spool"))
+        .expect("read spool")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written.len(), 1, "expected exactly one record: {written:?}");
+    assert!(
+        !h.path("evil.3").exists() && !h.path("../evil.3").exists(),
+        "a record landed outside the spool directory"
     );
 }
 
@@ -1648,7 +1778,8 @@ fn an_empty_beacon_falls_back_to_its_filename() {
 #[test]
 fn fanout_self_skip_uses_the_sanitized_key() {
     let h = Hook::new();
-    with_named_panel(&h, "my_session", "my session");
+    let key = zj_agent_mob::sanitize_session_for_test("my session");
+    with_named_panel(&h, &key, "my session");
     let r = h.env("ZELLIJ_SESSION_NAME", "my session").run(&ev("Notification"));
     assert!(
         fanout_targets(&r).is_empty(),
@@ -1677,4 +1808,390 @@ fn a_fanned_out_pipe_carries_the_full_payload() {
     assert_eq!(fanned.args.get("pane_id").map(String::as_str), Some("3"));
     assert_eq!(fanned.args.get("status").map(String::as_str), Some("waiting"));
     assert_eq!(fanned.args.get("session_id").map(String::as_str), Some("sess-1"));
+}
+
+// ---------------------------------------------------------------------------
+// Deeper hook integration
+// ---------------------------------------------------------------------------
+
+/// An interrupted turn used to fall through the catch-all and report nothing,
+/// so the row kept a `working` it could no longer justify until it aged out.
+#[test]
+fn an_interrupt_reports_the_agent_back_at_its_prompt() {
+    let r = run(&ev("Interrupt"));
+    assert_eq!(r.field("status"), "idlewait");
+    assert_eq!(r.field("detail"), "interrupted");
+    assert_eq!(r.field("block"), "idle");
+}
+
+/// The model reaches the row, so a mixed-model fleet is legible at a glance.
+#[test]
+fn the_model_is_reported() {
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "model": "claude-sonnet-4-5-20250929",
+    })
+    .to_string();
+    let r = run(&json);
+    assert_eq!(r.field("model"), "claude-sonnet-4-5-20250929");
+}
+
+/// A tool call is timed across its two events, keyed by `tool_use_id`, so a
+/// long-running call is distinguishable from a wedged one.
+#[test]
+fn a_slow_tool_call_reports_its_duration() {
+    let h = Hook::new();
+    let pre = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "call-1",
+        "tool_input": {"command": "cargo test"},
+    })
+    .to_string();
+    h.run(&pre);
+
+    // Backdate the stamp rather than sleeping: the hook subtracts wall-clock
+    // seconds, and a real slow call is not something a test should wait out.
+    let stamp = h.path("spool").join("inflight..3");
+    let existing = fs::read_to_string(&stamp).expect("a stamp from PreToolUse");
+    let id = existing.split_whitespace().nth(1).unwrap_or("call-1").to_string();
+    let backdated = format!(
+        "{} {}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 94,
+        id
+    );
+    fs::write(&stamp, backdated).expect("backdate the stamp");
+
+    let post = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "call-1",
+        "tool_input": {"command": "cargo test"},
+    })
+    .to_string();
+    let r = h.run(&post);
+    assert_eq!(r.field("tool_secs"), "94");
+    assert!(
+        r.field("detail").contains("(94s)"),
+        "the detail line should say how long it took: {:?}",
+        r.field("detail")
+    );
+    assert!(!stamp.exists(), "the stamp must be cleared when the call finishes");
+}
+
+/// A quick call says nothing about its duration: every tool event would
+/// otherwise carry noise that is never the reason you are looking.
+#[test]
+fn a_fast_tool_call_is_not_annotated() {
+    let h = Hook::new();
+    let pre = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_use_id": "call-2",
+        "tool_input": {"file_path": "/tmp/x"},
+    })
+    .to_string();
+    h.run(&pre);
+    let post = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_use_id": "call-2",
+        "tool_input": {"file_path": "/tmp/x"},
+    })
+    .to_string();
+    let r = h.run(&post);
+    assert!(
+        !r.field("detail").contains("s)"),
+        "a fast call should not be annotated: {:?}",
+        r.field("detail")
+    );
+}
+
+/// An inner call finishing must not be measured against an outer call's start.
+#[test]
+fn an_unmatched_tool_id_does_not_clear_another_calls_stamp() {
+    let h = Hook::new();
+    h.run(
+        &serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "outer",
+            "tool_input": {"command": "long"},
+        })
+        .to_string(),
+    );
+    let r = h.run(
+        &serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_use_id": "inner",
+            "tool_input": {"file_path": "/tmp/y"},
+        })
+        .to_string(),
+    );
+    assert_eq!(r.field("tool_secs"), "");
+    assert!(
+        h.path("spool").join("inflight..3").exists(),
+        "the outer call's stamp must survive an unrelated Post"
+    );
+}
+
+/// A rule answers a prompt without anyone being asked, which is what stops a
+/// fleet interrupting you for something already settled.
+#[test]
+fn a_matching_rule_approves_without_asking() {
+    let h = Hook::new();
+    let rules = h.path("approve.rules");
+    fs::write(&rules, "# comment\nallow Read\n").expect("write rules");
+    let r = h
+        .env("ZJ_AGENT_APPROVE_RULES", &rules)
+        .env("ZJ_AGENT_APPROVE_TIMEOUT", "1")
+        .run(
+            &serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/tmp/z"},
+            })
+            .to_string(),
+        );
+    assert!(
+        r.stdout.contains("\"behavior\":\"allow\""),
+        "expected an allow decision, got {:?}",
+        r.stdout
+    );
+    assert!(r.ask_pipe().is_none(), "a settled prompt must not also park an ask");
+}
+
+/// A rule for one tool must not answer for another.
+#[test]
+fn a_rule_for_another_tool_does_not_match() {
+    let h = Hook::new();
+    let rules = h.path("approve.rules");
+    fs::write(&rules, "allow Read\n").expect("write rules");
+    let r = h
+        .env("ZJ_AGENT_APPROVE_RULES", &rules)
+        .env("ZJ_AGENT_APPROVE_TIMEOUT", "1")
+        .run(&permission_request());
+    assert!(
+        !r.stdout.contains("behavior"),
+        "a Bash prompt must not be settled by a Read rule: {:?}",
+        r.stdout
+    );
+    assert!(r.ask_pipe().is_some(), "it should fall through to the panel");
+}
+
+/// An argument prefix narrows a rule, so `allow Bash git` does not also approve
+/// every other shell command.
+#[test]
+fn a_rule_can_be_narrowed_by_argument_prefix() {
+    let h = Hook::new();
+    let rules = h.path("approve.rules");
+    fs::write(&rules, "allow Bash git \n").expect("write rules");
+    let allowed = h
+        .env("ZJ_AGENT_APPROVE_RULES", &rules)
+        .env("ZJ_AGENT_APPROVE_TIMEOUT", "1")
+        .run(
+            &serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Bash",
+                "tool_input": {"command": "git status"},
+            })
+            .to_string(),
+        );
+    assert!(
+        allowed.stdout.contains("\"behavior\":\"allow\""),
+        "git status should match `allow Bash git`: {:?}",
+        allowed.stdout
+    );
+
+    let denied = h
+        .env("ZJ_AGENT_APPROVE_RULES", &rules)
+        .env("ZJ_AGENT_APPROVE_TIMEOUT", "1")
+        .run(&permission_request());
+    assert!(
+        !denied.stdout.contains("behavior"),
+        "rm -rf must not match `allow Bash git`: {:?}",
+        denied.stdout
+    );
+}
+
+/// A queued follow-up becomes the agent's next instruction, and the row reports
+/// the continued turn rather than a `done` that is about to be untrue.
+#[test]
+fn a_queued_followup_is_delivered_at_stop() {
+    let h = Hook::new();
+    let tmp = h.path("tmp");
+    let dir = tmp.join("zj-agent-mob");
+    fs::create_dir_all(&dir).expect("create followup dir");
+    fs::write(dir.join("followup..3"), "now run the tests").expect("queue a followup");
+
+    let r = h.env("TMPDIR", &tmp).run(&ev("Stop"));
+    assert_eq!(r.field("status"), "working");
+    assert!(
+        r.field("detail").starts_with("followup:"),
+        "the row should say a follow-up took over: {:?}",
+        r.field("detail")
+    );
+    assert!(
+        r.stdout.contains("\"decision\": \"block\"") || r.stdout.contains("\"decision\":\"block\""),
+        "expected a block decision carrying the follow-up: {:?}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("now run the tests"),
+        "the queued text must reach the agent: {:?}",
+        r.stdout
+    );
+    assert!(
+        !dir.join("followup..3").exists(),
+        "a delivered follow-up must be consumed, not replayed every turn"
+    );
+}
+
+/// With nothing queued, `Stop` behaves exactly as it did before.
+#[test]
+fn stop_without_a_followup_is_unchanged() {
+    let h = Hook::new();
+    let tmp = h.path("tmp");
+    fs::create_dir_all(tmp.join("zj-agent-mob")).expect("create dir");
+    let r = h.env("TMPDIR", &tmp).run(&ev("Stop"));
+    assert_eq!(r.field("status"), "done");
+    assert!(!r.stdout.contains("block"), "no decision expected: {:?}", r.stdout);
+}
+
+/// Two agents in one repo is how a rebase gets stepped on, so the turn opens
+/// with a note naming the other one.
+#[test]
+fn a_peer_in_the_same_directory_is_announced() {
+    let h = Hook::new();
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("create spool");
+    fs::write(
+        spool.join("other.7"),
+        "ts=1,pane_id=7,session=other,tool=claude,status=working,session_id=s2,cwd=/repo,task=refactor the parser,detail=,block=,perm_mode=,model=,agent_type=\n",
+    )
+    .expect("write peer record");
+
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/repo",
+    })
+    .to_string();
+    let r = h.run(&json);
+    assert!(
+        r.stdout.contains("additionalContext"),
+        "expected injected context: {:?}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("refactor the parser"),
+        "the note should say what the peer is doing: {:?}",
+        r.stdout
+    );
+}
+
+/// The peer list and the advice that follows it must not run together: a
+/// missing newline produced "rebasing the branchCoordinate before ...".
+#[test]
+fn the_fleet_note_separates_the_peer_list_from_the_advice() {
+    let h = Hook::new();
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("create spool");
+    fs::write(
+        spool.join("other.7"),
+        "ts=1,pane_id=7,session=other,tool=claude,status=working,session_id=s2,cwd=/repo,task=rebasing the branch,detail=,block=,perm_mode=,model=,agent_type=\n",
+    )
+    .expect("write peer record");
+
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/repo",
+    })
+    .to_string();
+    let r = h.run(&json);
+    assert!(
+        !r.stdout.contains("rebasing the branchCoordinate"),
+        "the last peer ran into the advice line: {:?}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("rebasing the branch\\nCoordinate"),
+        "expected a newline between the list and the advice: {:?}",
+        r.stdout
+    );
+}
+
+/// A peer working somewhere else is not this turn's problem.
+#[test]
+fn a_peer_in_another_directory_is_not_announced() {
+    let h = Hook::new();
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("create spool");
+    fs::write(
+        spool.join("other.7"),
+        "ts=1,pane_id=7,session=other,tool=claude,status=working,session_id=s2,cwd=/elsewhere,task=other work,detail=,block=,perm_mode=,model=,agent_type=\n",
+    )
+    .expect("write peer record");
+
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/repo",
+    })
+    .to_string();
+    let r = h.run(&json);
+    assert!(
+        !r.stdout.contains("additionalContext"),
+        "no note expected: {:?}",
+        r.stdout
+    );
+}
+
+/// The agent's own record must never be reported to it as a peer.
+#[test]
+fn an_agent_is_not_announced_to_itself() {
+    let h = Hook::new();
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("create spool");
+    fs::write(
+        spool.join(".3"),
+        "ts=1,pane_id=3,session=,tool=claude,status=working,session_id=s1,cwd=/repo,task=my own work,detail=,block=,perm_mode=,model=,agent_type=\n",
+    )
+    .expect("write own record");
+
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/repo",
+    })
+    .to_string();
+    let r = h.run(&json);
+    assert!(
+        !r.stdout.contains("additionalContext"),
+        "an agent must not be told about itself: {:?}",
+        r.stdout
+    );
+}
+
+/// Injecting context spends the agent's tokens, so it must be switchable off.
+#[test]
+fn the_fleet_note_can_be_switched_off() {
+    let h = Hook::new();
+    let spool = h.path("spool");
+    fs::create_dir_all(&spool).expect("create spool");
+    fs::write(
+        spool.join("other.7"),
+        "ts=1,pane_id=7,session=other,tool=claude,status=working,session_id=s2,cwd=/repo,task=refactor,detail=,block=,perm_mode=,model=,agent_type=\n",
+    )
+    .expect("write peer record");
+
+    let json = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/repo",
+    })
+    .to_string();
+    let r = h.env("ZJ_AGENT_CONTEXT", "0").run(&json);
+    assert!(!r.stdout.contains("additionalContext"), "{:?}", r.stdout);
 }

@@ -140,8 +140,10 @@ order:
    agent is exempt: it writes nothing while it waits, so its unchanged record keeps re-confirming
    `waiting` / `done` for as long as the process is alive.
 4. **Did the pane id get recycled?** A record whose `session_id` disagrees with the running agent
-   is ignored on purpose - it belongs to a previous agent on that pane. Restarting the agent
-   rewrites it.
+   is ignored on purpose - it belongs to a previous agent on that pane. The row follows the new
+   agent as soon as that agent writes a record of its own, so quitting an agent and starting
+   another in the same pane recovers on the next event rather than leaving the dead agent's last
+   status on screen.
 
 `found` is never wrong, only incomplete: the agent is really there and <kbd>Enter</kbd> still
 jumps to it.
@@ -294,13 +296,20 @@ Claude has no "permission granted" event, so `waiting` to `working` relies on th
 `a` and `r` only act when a prompt is actually parked for the selected agent, and the footer
 shows `a approve  r reject` only then. If a prompt never appears:
 
-1. **Is it enabled?** It is off by default. `ZJ_AGENT_APPROVE=1` must be set in the environment
-   the agent itself runs in, not the panel's. Check with `echo $ZJ_AGENT_APPROVE` in the agent's pane.
+1. **Is it switched off?** It is on by default, so check nothing set `ZJ_AGENT_APPROVE=0` in the
+   environment the agent itself runs in, not the panel's. Check with `echo $ZJ_AGENT_APPROVE` in
+   the agent's pane. An agent started before the hooks were installed also has to be restarted.
 2. **Did you restart the agent?** As with any hook change, it is read at session start.
 3. **Is `PermissionRequest` registered?** Run `./init.sh status`, or check that the event is
    present and `async: false` in the settings file - an async hook cannot return a decision.
 4. **Did it time out?** The hook waits `ZJ_AGENT_APPROVE_TIMEOUT` seconds (default 30) and then
    falls through to the agent's own in-pane prompt. That is the designed failure mode, not a bug.
+
+   The panel stops offering <kbd>a</kbd> / <kbd>r</kbd> at the same moment: the prompt box and the
+   `a approve  r reject` hints disappear once the hook has stopped reading, so a keypress can no
+   longer report an approval that would reach nobody. If the box vanished while you were reading
+   it, answer in the pane itself - <kbd>Enter</kbd> jumps there. Raise `ZJ_AGENT_APPROVE_TIMEOUT`
+   if you want longer to decide.
 
 The panel writes the verdict to `$TMPDIR/zj-agent-mob/verdict.<pane_id>`; watch that path to see
 whether the keypress or the hook's read is the broken half.
@@ -366,7 +375,7 @@ the panel can answer:
 
 | `wants:` | <kbd>a</kbd> / <kbd>r</kbd> | What to do instead |
 |---|---|---|
-| `permission` | Works, with `ZJ_AGENT_APPROVE=1` | - |
+| `permission` | Works by default; `ZJ_AGENT_APPROVE=0` opts out | - |
 | `plan` | No | <kbd>Enter</kbd> to the pane and read it |
 | `question` | No | <kbd>m</kbd> to type a reply, or jump to the pane |
 | `idle` | No | Nothing is blocked on a decision |

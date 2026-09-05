@@ -29,6 +29,44 @@ pub(crate) fn write_verdict(path: &str, verdict: &str) {
     run_command(&["sh", "-c", "printf '%s' \"$1\" > \"$2\"", "sh", verdict, path], ctx);
 }
 
+#[cfg(target_family = "wasm")]
+pub(crate) fn append_approve_rule(tool: &str) {
+    let mut ctx = std::collections::BTreeMap::new();
+    ctx.insert("kind".to_string(), "rule".to_string());
+    run_command(
+        &[
+            "sh",
+            "-c",
+            "d=\"${ZJ_AGENT_APPROVE_RULES:-$HOME/.config/zj-agent-mob/approve.rules}\"; \
+             mkdir -p \"$(dirname \"$d\")\" 2>/dev/null; \
+             grep -qxF \"allow $1\" \"$d\" 2>/dev/null || printf 'allow %s\\n' \"$1\" >> \"$d\"",
+            "sh",
+            tool,
+        ],
+        ctx,
+    );
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn queue_followup(session: &str, pane_id: u32, text: &str) {
+    let mut ctx = std::collections::BTreeMap::new();
+    ctx.insert("kind".to_string(), "followup".to_string());
+    run_command(
+        &[
+            "sh",
+            "-c",
+            "d=\"${TMPDIR:-/tmp}/zj-agent-mob\"; \
+             [ -d \"$d\" ] || { mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; }; \
+             printf '%s' \"$3\" > \"$d/followup.$1.$2\" 2>/dev/null || true",
+            "sh",
+            session,
+            &pane_id.to_string(),
+            text,
+        ],
+        ctx,
+    );
+}
+
 /// Fires a desktop notification through whichever notifier was detected.
 ///
 /// The message carries task summaries and tool arguments, both of which come
@@ -123,6 +161,8 @@ mod stub {
     pub(crate) fn switch_session_with_focus(_name: &str, _tab: Option<usize>, _pane: Option<(u32, bool)>) {}
     pub(crate) fn rename_own_pane(_title: &str) {}
     pub(crate) fn write_verdict(_path: &str, _verdict: &str) {}
+    pub(crate) fn append_approve_rule(_tool: &str) {}
+    pub(crate) fn queue_followup(_session: &str, _pane_id: u32, _text: &str) {}
     pub(crate) fn notify(_notifier: &str, _title: &str, _body: &str, _sound: bool) {}
     pub(crate) fn session_action(_session: &str, _args: &[&str], _kind: &str) {}
     pub(crate) fn publish_summary(_summary: &str, _path: &str, _kv: &str) {}

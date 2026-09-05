@@ -16,11 +16,11 @@ cd "$(dirname "$0")/.."
 
 WASM=target/wasm32-wasip1/release/zj-agent-mob.wasm
 EXPORTS="_start load update render pipe plugin_version"
-SHELL_SCRIPTS="init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh"
+SHELL_SCRIPTS="init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh tests/e2e-zellij.sh"
 
 # `fast` steps are the ones quick enough for a tight local loop; `all` steps
 # also run on a bare `./scripts/check.sh`.
-STEPS="fmt clippy test shellcheck wasm exports installer"
+STEPS="fmt clippy test shellcheck wasm exports installer panel"
 FAST_STEPS="fmt clippy test shellcheck"
 
 run_step() {
@@ -36,6 +36,11 @@ run_step() {
     # writes is read by Claude Code and Codex themselves: a wrong event name or
     # matcher silences every agent and no Rust test would notice.
     installer) ./tests/e2e-install.sh ;;
+    # The only step that loads the compiled wasm into a real zellij. Everything
+    # else stops at a stub, so a render that overflows its pane, or a plugin
+    # that will not load at all, is invisible without this. Skips itself when
+    # zellij is absent, so CI is unaffected.
+    panel) ./tests/e2e-zellij.sh ;;
     *)
       echo "unknown step: $1" >&2
       echo "steps: $STEPS" >&2
@@ -83,6 +88,7 @@ steps, in CI order:
   wasm        cargo build --release --target wasm32-wasip1   [skipped by \`fast\`]
   exports     the six symbols Zellij loads                   [skipped by \`fast\`]
   installer   ./tests/e2e-install.sh                         [skipped by \`fast\`]
+  panel       ./tests/e2e-zellij.sh (real zellij)             [skipped by \`fast\`]
 EOF
 }
 

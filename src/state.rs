@@ -15,6 +15,12 @@ pub(crate) struct Ask {
     pub(crate) verdict_file: String,
     pub(crate) tool_name: String,
     pub(crate) tool_arg: String,
+    /// `now` past which the hook has stopped reading the verdict file. The hook
+    /// polls for a bounded time and then falls through to the agent's own
+    /// prompt, and a verdict written after that is read by nobody: the panel
+    /// would report an approval that never happened, while the agent sits on an
+    /// in-pane prompt the panel is no longer showing.
+    pub(crate) expires_at: f64,
 }
 
 /// How the list is ordered. Urgency alone scatters one project across the
@@ -97,6 +103,8 @@ pub struct State {
     pub(crate) summary_path: String,
     /// A free-text reply being typed for the selected agent.
     pub(crate) reply: Option<Reply>,
+    /// A follow-up instruction being typed, delivered when the turn ends.
+    pub(crate) followup: Option<Reply>,
     /// Digits typed after `G`, awaiting Enter or a non-digit. Vim-style, so a
     /// row past 9 is still reachable without stealing a letter command.
     pub(crate) jump_buf: Option<String>,
@@ -174,10 +182,13 @@ impl State {
         // A blocked row needs ticks too: it animates nothing, so without this
         // the clock stops and it can never reach the escalation threshold.
         let (home, now) = (&self.session_name, self.now);
-        let needed = self
-            .agents
-            .iter()
-            .any(|a| a.status.is_active() || (a.id.session != *home && a.session_alive) || a.escalation_pending(now));
+        // A parked prompt needs ticks of its own: it animates nothing, and
+        // without the clock it would never reach its expiry and would keep
+        // offering `a` for a hook that has already stopped listening.
+        let needed = !self.asks.is_empty()
+            || self.agents.iter().any(|a| {
+                a.status.is_active() || (a.id.session != *home && a.session_alive) || a.escalation_pending(now)
+            });
         if needed {
             self.timer_running = true;
             host::set_timeout(TICK);
@@ -312,7 +323,7 @@ impl State {
         if self.spool_poll_due() {
             self.request_scan();
         }
-        let aged = self.age_foreign_rows();
+        let aged = self.age_foreign_rows() | self.expire_asks();
         self.notifier.flush(self.now);
         self.publish_summary();
         // A pending flush keeps the clock running on its own: the window must
@@ -416,6 +427,9 @@ impl State {
             if let Some(m) = args.get("perm_mode") {
                 agent.perm_mode = m.clone();
             }
+            if let Some(m) = args.get("model").filter(|m| !m.is_empty()) {
+                agent.model = m.clone();
+            }
             // Only a blocked state has a reason to be blocked. Clearing it on
             // everything else stops a stale `plan` label outliving its prompt.
             agent.block = match status {
@@ -456,12 +470,14 @@ impl State {
                 pane_title: String::new(),
                 alive: true,
                 perm_mode: args.get("perm_mode").cloned().unwrap_or_default(),
+                model: args.get("model").cloned().unwrap_or_default(),
                 subagents: 0,
                 subagent_types: Vec::new(),
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
                 notified: false,
+                followup_queued: false,
                 block: args.get("block").and_then(|b| Block::parse(b)),
             });
         }
@@ -536,18 +552,35 @@ impl State {
         let Some(verdict_file) = args.get("verdict_file").filter(|f| !f.is_empty()) else {
             return false;
         };
+        // The hook sends its own timeout, so the two cannot drift. An older hook
+        // sends none, and the documented default is what it will be using.
+        let timeout = args
+            .get("timeout")
+            .and_then(|t| t.parse::<f64>().ok())
+            .filter(|t| *t > 0.0)
+            .unwrap_or(crate::DEFAULT_APPROVE_TIMEOUT);
         self.asks.retain(|a| a.id != id);
         self.asks.push(Ask {
             id,
             verdict_file: verdict_file.clone(),
             tool_name: args.get("tool_name").cloned().unwrap_or_default(),
             tool_arg: args.get("tool_arg").cloned().unwrap_or_default(),
+            expires_at: self.now + timeout,
         });
+        self.force_timer();
         true
     }
 
+    /// Drops prompts the hook has stopped waiting on. Returns whether any went.
+    pub(crate) fn expire_asks(&mut self) -> bool {
+        let now = self.now;
+        let before = self.asks.len();
+        self.asks.retain(|a| a.expires_at > now);
+        self.asks.len() != before
+    }
+
     pub(crate) fn ask_for(&self, id: &AgentId) -> Option<&Ask> {
-        self.asks.iter().find(|a| &a.id == id)
+        self.asks.iter().find(|a| &a.id == id && a.expires_at > self.now)
     }
 
     /// Writes the verdict the hook is polling for. The hook treats a missing
@@ -557,7 +590,7 @@ impl State {
         let Some(id) = self.agents.get(self.selected).map(|a| a.id.clone()) else {
             return false;
         };
-        let Some(ask) = self.asks.iter().find(|a| a.id == id) else {
+        let Some(ask) = self.asks.iter().find(|a| a.id == id && a.expires_at > self.now) else {
             return false;
         };
         let verdict = if allow { "allow" } else { "deny" };
@@ -573,6 +606,71 @@ impl State {
         }
         self.sort_agents();
         self.arm_timer();
+        true
+    }
+
+    /// Approves the pending prompt and records a rule so this tool stops asking.
+    /// The rule is written before the verdict: the hook reads rules on the *next*
+    /// prompt, so ordering only matters in that a failed write must not also cost
+    /// the approval the user just gave.
+    pub(crate) fn always_allow_selected(&mut self) -> bool {
+        let Some(id) = self.agents.get(self.selected).map(|a| a.id.clone()) else {
+            return false;
+        };
+        let Some(tool) = self
+            .asks
+            .iter()
+            .find(|a| a.id == id && a.expires_at > self.now)
+            .map(|a| a.tool_name.clone())
+            .filter(|t| !t.is_empty())
+        else {
+            return false;
+        };
+        host::append_approve_rule(&tool);
+        if !self.answer_selected(true) {
+            return false;
+        }
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+            agent.detail = Some(format!("always allowing {}", tool));
+        }
+        true
+    }
+
+    /// Queues the composed text as the agent's next instruction, delivered by the
+    /// hook when the current turn ends. Unlike a reply this needs no prompt to be
+    /// open: a working agent is exactly what it is for.
+    pub(crate) fn send_followup(&mut self, text: &str) -> bool {
+        let Some(id) = self.followup.as_ref().map(|r| r.id.clone()) else {
+            return false;
+        };
+        if text.is_empty() || !self.agents.iter().any(|a| a.id == id && a.session_alive) {
+            self.followup = None;
+            return false;
+        }
+        host::queue_followup(&id.session, id.pane_id, text);
+        self.followup = None;
+        let now = self.now;
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+            agent.detail = Some(format!("follow-up queued: {}", text));
+            agent.followup_queued = true;
+            let _ = now;
+        }
+        true
+    }
+
+    /// Opens the one-line editor for a follow-up to the selected agent.
+    pub(crate) fn begin_followup(&mut self) -> bool {
+        let Some(agent) = self.agents.get(self.selected) else {
+            return false;
+        };
+        if !agent.session_alive || agent.status == Status::Unknown {
+            return false;
+        }
+        let id = agent.id.clone();
+        self.followup = Some(Reply {
+            id,
+            text: String::new(),
+        });
         true
     }
 
@@ -847,6 +945,8 @@ impl State {
                 pane_title: String::new(),
                 alive: true,
                 perm_mode: String::new(),
+                model: String::new(),
+                followup_queued: false,
                 subagents: 0,
                 subagent_types: Vec::new(),
                 tasks_total: 0,
@@ -885,16 +985,29 @@ impl State {
                 continue;
             };
             // Pane ids are recycled, so a record from a previous agent on this
-            // pane must not colour the current one.
+            // pane must not colour the current one. Only an *older* record is
+            // rejected outright: a newer one carrying a different id is the
+            // same pane's next agent, and the row has to follow it. Rejecting
+            // both directions strands the row on the dead agent's last status
+            // for as long as the pane keeps a process on it, which is exactly
+            // what quitting an agent and starting another in place does.
             let rec_sid = rec.args.get("session_id").map(String::as_str).unwrap_or("");
             let row_sid = self.agents[idx].session_id.as_str();
-            if !rec_sid.is_empty() && !row_sid.is_empty() && rec_sid != row_sid {
-                continue;
-            }
+            let disagrees = !rec_sid.is_empty() && !row_sid.is_empty() && rec_sid != row_sid;
             let Some(status) = rec.args.get("status").and_then(|s| Status::parse(s)) else {
                 continue;
             };
             let age = self.spool_age(rec.ts);
+            // A disagreeing id is either the pane's next agent or the leftovers
+            // of its last one. Only a record that supersedes the one the row was
+            // built from is the former: the new agent is writing now, the dead
+            // one stopped. A row whose id came from a pipe rather than the spool
+            // has no record to supersede (`spool_ts` is 0) and is authoritative
+            // anyway, so a disagreeing record is always the previous agent's.
+            let restarted = disagrees && self.agents[idx].spool_ts > 0.0 && rec.ts > self.agents[idx].spool_ts;
+            if disagrees && !restarted {
+                continue;
+            }
             let agent = &mut self.agents[idx];
 
             // A blocked or idle agent writes nothing while it sits there, so
@@ -905,9 +1018,21 @@ impl State {
             // change one. Without this a foreign `waiting` row decays to
             // `unknown` while the agent is blocked on you, which is the one row
             // the panel exists to show.
-            let reconfirms = agent.status == status && status.persists_while_quiet();
+            let reconfirms = !restarted && agent.status == status && status.persists_while_quiet();
             if age >= STALE_AFTER && !reconfirms {
                 continue;
+            }
+            // The turn's fan-out, progress and summary all belonged to the
+            // agent that just went away.
+            if restarted {
+                agent.subagents = 0;
+                agent.subagent_types.clear();
+                agent.tasks_total = 0;
+                agent.tasks_done = 0;
+                agent.turns = 0;
+                agent.task = None;
+                agent.detail = None;
+                agent.block = None;
             }
             let seen_at = match reconfirms {
                 true => now,
@@ -956,6 +1081,12 @@ impl State {
             if let Some(m) = rec.args.get("perm_mode") {
                 if agent.perm_mode != *m {
                     agent.perm_mode = m.clone();
+                    changed = true;
+                }
+            }
+            if let Some(m) = rec.args.get("model").filter(|m| !m.is_empty()) {
+                if agent.model != *m {
+                    agent.model = m.clone();
                     changed = true;
                 }
             }
@@ -1554,6 +1685,93 @@ mod tests {
             ("tool_name", "Bash"),
             ("tool_arg", "rm -rf node_modules"),
         ])
+    }
+
+    #[test]
+    fn always_allow_answers_and_records_a_rule() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
+        s.handle_ask(&ask("1"));
+        s.selected = 0;
+        assert!(s.always_allow_selected());
+        assert!(s.ask_for(&id(1)).is_none(), "the prompt must be settled");
+        assert_eq!(s.agents[0].status, Status::Working);
+        assert!(
+            s.agents[0].detail.as_deref().is_some_and(|d| d.contains("Bash")),
+            "the row should name the tool it will stop asking about: {:?}",
+            s.agents[0].detail
+        );
+    }
+
+    /// Without a prompt open there is no tool to write a rule for, so the key
+    /// must do nothing rather than guess one.
+    #[test]
+    fn always_allow_without_a_prompt_is_a_no_op() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.selected = 0;
+        assert!(!s.always_allow_selected());
+    }
+
+    /// A follow-up needs no prompt: a working agent is exactly what it is for.
+    #[test]
+    fn a_followup_can_be_queued_for_a_working_agent() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.selected = 0;
+        assert!(s.begin_followup());
+        assert!(s.send_followup("run the tests"));
+        assert!(s.agents[0].followup_queued);
+        assert!(
+            s.agents[0]
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("run the tests")),
+            "{:?}",
+            s.agents[0].detail
+        );
+    }
+
+    /// Empty text is a cancelled compose, not an instruction to send.
+    #[test]
+    fn an_empty_followup_is_not_queued() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.selected = 0;
+        s.begin_followup();
+        assert!(!s.send_followup(""));
+        assert!(!s.agents[0].followup_queued);
+        assert!(s.followup.is_none(), "the editor must close either way");
+    }
+
+    /// Text composed for one agent must not be delivered to another, which is
+    /// what a re-sort under the cursor would otherwise cause.
+    #[test]
+    fn a_followup_follows_its_agent_not_the_selection() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "2"), ("status", "working")]));
+        s.selected = 0;
+        let target = s.agents[0].id.clone();
+        s.begin_followup();
+        s.selected = 1;
+        assert!(s.send_followup("for the first one"));
+        let queued = s.agents.iter().find(|a| a.id == target).expect("target still listed");
+        assert!(queued.followup_queued, "the bound agent should have received it");
+        let other = s.agents.iter().find(|a| a.id != target).expect("other agent");
+        assert!(!other.followup_queued, "the selection must not have been retargeted");
+    }
+
+    /// An agent that exited while the text was being typed can receive nothing.
+    #[test]
+    fn a_followup_for_a_departed_agent_is_dropped() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        s.selected = 0;
+        s.begin_followup();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "ended")]));
+        assert!(!s.send_followup("too late"));
+        assert!(s.followup.is_none());
     }
 
     #[test]
@@ -2297,14 +2515,23 @@ mod cross_session_tests {
     /// shell.
     #[test]
     fn session_sanitizing_matches_the_hook() {
-        assert_eq!(sanitize_session("my session"), "my_session");
-        assert_eq!(sanitize_session("a,b=c"), "a_b_c");
-        assert_eq!(sanitize_session("../evil"), ".._evil");
+        // A name the fold leaves alone keeps its plain, readable key.
         assert_eq!(sanitize_session("mob-2.1_x"), "mob-2.1_x");
+        assert_eq!(sanitize_session(""), "");
+        // One that it alters carries its own bytes in hex, so two names that
+        // fold alike do not share a spool file.
+        assert_eq!(sanitize_session("my session"), "my_session-6d79207365737369");
+        assert_eq!(sanitize_session("a,b=c"), "a_b_c-612c623d63");
+        assert_eq!(sanitize_session("../evil"), ".._evil-2e2e2f6576696c");
         // One underscore per *byte*, matching `tr`: "é" is two bytes, so a
         // char-wise fold would give "caf_" and miss the hook's "caf__".
-        assert_eq!(sanitize_session("café"), "caf__");
-        assert_eq!(sanitize_session("日本語"), "_________");
+        assert_eq!(sanitize_session("café"), "caf__-636166c3a9");
+        assert_eq!(sanitize_session("日本語"), "_________-e697a5e69cace8aa");
+        assert_ne!(
+            sanitize_session("my session"),
+            sanitize_session("my_session"),
+            "distinct sessions must key distinctly"
+        );
     }
 
     #[test]
