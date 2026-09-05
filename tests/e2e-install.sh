@@ -105,15 +105,23 @@ for ev in $(jq -r '.hooks | keys[]' "$CLAUDE_JSON"); do
 done
 assert_eq "every claude event is handled by the hook" "$missing" ""
 # async so a slow hook can never stall a turn; this is the whole reason the
-# plugin is safe to leave installed. PermissionRequest is the sole exception:
-# returning a decision requires blocking, which is why it is opt-in at runtime
-# via ZJ_AGENT_APPROVE and falls through to the agent's own prompt on timeout.
+# plugin is safe to leave installed. The three exceptions all have to influence
+# the turn they belong to, and an async hook's output is parsed too late for
+# that: PermissionRequest returns a verdict, Stop returns a queued follow-up,
+# UserPromptSubmit injects the fleet note. Each is bounded - a timeout, or a
+# read of files that are usually absent - and each degrades to doing nothing.
 assert_eq "claude reporting hooks are async" \
-  "$(jq '[.hooks | to_entries[] | select(.key != "PermissionRequest")
+  "$(jq '[.hooks | to_entries[]
+         | select(.key != "PermissionRequest" and .key != "Stop" and .key != "UserPromptSubmit")
          | .value[].hooks[] | select(.async != true)] | length' "$CLAUDE_JSON")" "0"
-assert_eq "PermissionRequest is the only synchronous hook" \
-  "$(jq '[.hooks | to_entries[] | select(.value[].hooks[].async != true) | .key] | join(",")' \
-     "$CLAUDE_JSON")" '"PermissionRequest"'
+assert_eq "only the deciding hooks are synchronous" \
+  "$(jq '[.hooks | to_entries[] | select(.value[].hooks[].async != true) | .key] | sort | join(",")' \
+     "$CLAUDE_JSON")" '"PermissionRequest,Stop,UserPromptSubmit"'
+# A synchronous hook occupies the turn, so the agent should say whose fault the
+# pause is rather than looking like a hang.
+assert_eq "every synchronous hook names itself on screen" \
+  "$(jq '[.hooks | to_entries[] | .value[].hooks[]
+         | select(.async != true) | select(.statusMessage == null)] | length' "$CLAUDE_JSON")" "0"
 assert_eq "claude hooks are command type" \
   "$(jq '[.hooks[][].hooks[] | select(.type != "command")] | length' "$CLAUDE_JSON")" "0"
 # Notification fires for many things; only the two that mean "needs you" should

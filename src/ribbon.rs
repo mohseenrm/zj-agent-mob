@@ -45,6 +45,7 @@ pub(crate) const LIST_HINTS: &[Hint] = &[
 pub(crate) const REPLY_HINTS: &[Hint] = &[
     Hint::new("y", "yes"),
     Hint::new("m", "message"),
+    Hint::new("f", "queue"),
     Hint::new("\u{21b5}", "jump"),
     Hint::new("x", "kill"),
     Hint::new("q", "hide"),
@@ -53,12 +54,16 @@ pub(crate) const REPLY_HINTS: &[Hint] = &[
 /// The one-line editor owns the keyboard while it is up.
 pub(crate) const REPLY_EDIT_HINTS: &[Hint] = &[Hint::new("\u{21b5}", "send"), Hint::new("esc", "cancel")];
 
+/// Composing an instruction the agent receives when its current turn ends.
+pub(crate) const FOLLOWUP_EDIT_HINTS: &[Hint] = &[Hint::new("\u{21b5}", "queue"), Hint::new("esc", "cancel")];
+
 /// Shown only while the selected agent has a permission prompt parked. Keeping
 /// approve and reject out of the default footer means they cannot be pressed
 /// by muscle memory when no prompt is waiting.
 pub(crate) const ASK_HINTS: &[Hint] = &[
     Hint::new("a", "approve"),
     Hint::new("r", "reject"),
+    Hint::new("A", "always"),
     Hint::new("\u{21b5}", "jump"),
     Hint::new("x", "kill"),
     Hint::new("q", "hide"),
@@ -118,6 +123,7 @@ mod tests {
             .chain(ASK_HINTS)
             .chain(REPLY_HINTS)
             .chain(REPLY_EDIT_HINTS)
+            .chain(FOLLOWUP_EDIT_HINTS)
         {
             let text = h.text();
             let r = h.key_range();
@@ -183,6 +189,7 @@ mod tests {
             ("ask", ASK_HINTS),
             ("reply", REPLY_HINTS),
             ("reply-edit", REPLY_EDIT_HINTS),
+            ("followup-edit", FOLLOWUP_EDIT_HINTS),
         ] {
             assert!(
                 ribbon_width(set) <= 84,

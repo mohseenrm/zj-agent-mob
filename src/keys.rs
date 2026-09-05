@@ -181,6 +181,38 @@ impl State {
         }
     }
 
+    /// The same one-line editor, composing an instruction the hook delivers when
+    /// the turn ends rather than text typed into a waiting prompt.
+    fn handle_followup_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Esc => {
+                self.followup = None;
+                true
+            }
+            BareKey::Enter => {
+                let text = self.followup.as_ref().map(|r| r.text.clone()).unwrap_or_default();
+                self.send_followup(text.trim());
+                self.followup = None;
+                true
+            }
+            BareKey::Backspace => {
+                if let Some(r) = &mut self.followup {
+                    r.text.pop();
+                }
+                true
+            }
+            BareKey::Char(c) => {
+                if let Some(r) = &mut self.followup {
+                    if r.text.chars().count() < crate::MAX_REPLY_CHARS {
+                        r.text.push(c);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The `/` prompt. Printable keys are query text, so none of the list
     /// shortcuts below are reachable while it is open: a stray `x` mid-search
     /// must never arm a kill. Movement is on Ctrl (and the arrows), fzf-style,
@@ -336,6 +368,9 @@ impl State {
         if self.find.is_some() {
             return self.handle_find_key(key);
         }
+        if self.followup.is_some() {
+            return self.handle_followup_key(key);
+        }
         if self.jump_buf.is_some() {
             return self.handle_jump_key(key);
         }
@@ -423,6 +458,11 @@ impl State {
             // a mis-keyed dismiss must never answer a permission prompt.
             BareKey::Char('a') => self.answer_selected(true),
             BareKey::Char('r') => self.answer_selected(false),
+            // Uppercase for the same reason `D` is: approving every future
+            // prompt for a tool must not be one slipped finger away from
+            // approving this one.
+            BareKey::Char('A') => self.always_allow_selected(),
+            BareKey::Char('f') => self.begin_followup(),
             BareKey::Char('d') => {
                 let now = self.now;
                 if let Some(agent) = self.agents.get_mut(self.selected) {

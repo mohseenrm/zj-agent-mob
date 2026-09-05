@@ -241,19 +241,20 @@ claude_hooks_json() {
     def h($extra): {type:"command", command:$cmd, async:true} + $extra;
     {
       SessionStart:       [{matcher:"*",                      hooks:[h({})]}],
-      UserPromptSubmit:   [{                                  hooks:[h({})]}],
+      UserPromptSubmit:   [{                                  hooks:[h({async:false, statusMessage:"zj-agent-mob: fleet check"})]}],
       PreToolUse:         [{matcher:"*",                      hooks:[h({})]}],
       PostToolUse:        [{matcher:"*",                      hooks:[h({})]}],
       PostToolUseFailure: [{matcher:"*",                      hooks:[h({})]}],
       Notification:       [{matcher:"permission_prompt|idle_prompt", hooks:[h({})]}],
-      PermissionRequest:  [{matcher:"*",                      hooks:[h({async:false})]}],
+      PermissionRequest:  [{matcher:"*",                      hooks:[h({async:false, statusMessage:"zj-agent-mob: awaiting panel verdict"})]}],
       SubagentStart:      [{matcher:"*",                      hooks:[h({})]}],
       SubagentStop:       [{matcher:"*",                      hooks:[h({})]}],
       TaskCreated:        [{                                  hooks:[h({})]}],
       TaskCompleted:      [{                                  hooks:[h({})]}],
       PreCompact:         [{matcher:"*",                      hooks:[h({})]}],
       PostCompact:        [{matcher:"*",                      hooks:[h({})]}],
-      Stop:               [{                                  hooks:[h({})]}],
+      Interrupt:          [{                                  hooks:[h({})]}],
+      Stop:               [{                                  hooks:[h({async:false, statusMessage:"zj-agent-mob: checking for follow-up"})]}],
       StopFailure:        [{matcher:"*",                      hooks:[h({})]}],
       SessionEnd:         [{matcher:"*",                      hooks:[h({})]}]
     }'
@@ -318,6 +319,7 @@ codex_hooks_json() {
         SubagentStop:     [{matcher:"*", hooks:[h]}],
         PreCompact:       [{matcher:"*", hooks:[h]}],
         PostCompact:      [{matcher:"*", hooks:[h]}],
+        Interrupt:        [{             hooks:[h]}],
         Stop:             [{             hooks:[h]}],
         SessionEnd:       [{matcher:"*", hooks:[h]}]
       }}'

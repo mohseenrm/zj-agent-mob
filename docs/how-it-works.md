@@ -2,6 +2,10 @@
 
 - [Status transport](#status-transport)
 - [Cross-session status: the spool](#cross-session-status-the-spool)
+- [In-flight tool timing](#in-flight-tool-timing)
+- [Answering prompts without being asked](#answering-prompts-without-being-asked)
+- [Queueing the next instruction](#queueing-the-next-instruction)
+- [Telling an agent about its neighbours](#telling-an-agent-about-its-neighbours)
 - [Cost per turn](#cost-per-turn)
 - [Task summaries](#task-summaries)
 - [Counter events](#counter-events)
@@ -17,6 +21,9 @@ zellij pipe --name agent-status --plugin file:...wasm \
   --args "pane_id=$ZELLIJ_PANE_ID,tool=claude,status=waiting,..."
 ```
 
+An interrupted turn (Esc) reports `idle-wait` with `interrupted`, so a row that
+the user just stopped stops claiming to be working.
+
 `$ZELLIJ_PANE_ID` is set by Zellij in every terminal pane and is inherited by processes started there, so it identifies the exact pane. If it isn't set, the hook exits immediately, which is what scopes monitoring to the current session: agents outside Zellij are ignored, and each session's plugin instance only sees its own panes.
 
 `zellij pipe --plugin` auto-launches the plugin if it isn't running, so there's no daemon and no socket.
@@ -31,7 +38,7 @@ answer it wants, which is what decides whether the panel can settle it:
 | `tool` | `PermissionRequest`, or `Notification` / `permission_prompt` | `wants: permission` |
 | `plan` | `PermissionRequest` with `tool_name=ExitPlanMode` | `wants: plan` |
 | `question` | `Notification` with no recognized type | `wants: question` |
-| `idle` | `Notification` / `idle_prompt`, `agent_needs_input` | `wants: idle` |
+| `idle` | `Notification` / `idle_prompt`, `agent_needs_input`, or `Interrupt` | `wants: idle` |
 
 Only the blocked statuses carry one. Any other event sends `block=` empty and the
 plugin clears the row's reason, so a `plan` label cannot outlive the prompt that
@@ -84,6 +91,13 @@ sanitizing is lossy: a session called `my session` is keyed `my_session`, and
 `AgentId.session` is the sanitized key and `real_session()` resolves it back for anything that
 takes a `--session` argument.
 
+Because the fold is lossy it can also collide: `my session` and `my_session` are different
+sessions that both fold to `my_session`, and one spool file cannot hold two agents - each write
+would erase the other's status. So a name the fold **altered** carries a suffix of its own bytes
+in hex (`my_session-6d79207365737369`), which the plugin appends the same way. Hex of the raw
+bytes rather than a checksum, so neither side has to implement the other's algorithm. Names the
+fold leaves unchanged - nearly all of them - keep their plain, readable key.
+
 The restriction to those four statuses is the cost control: tool events fire constantly, and
 they must never pay for a subprocess per open panel. Heartbeats take the spool path alone. A
 beacon older than five minutes is swept, so a closed panel stops attracting pipes. Set
@@ -128,7 +142,7 @@ Four defences keep a stale record from showing wrong data:
 | Defence | Stops |
 |---|---|
 | No process, no row | A record for an agent that has exited |
-| `session_id` must match | A recycled pane id inheriting the previous agent's status |
+| `session_id` must match, unless a newer record disagrees | A recycled pane id inheriting the previous agent's status, while still letting the pane's next agent take the row over |
 | `ts` older than `STALE_AFTER` is ignored | A record from a previous boot or a long-idle agent |
 | Filename must match the record's own `session`/`pane_id` | A malformed or mislabelled file |
 
@@ -155,6 +169,79 @@ The directory is created `0700` and namespaced by uid, because on a shared `/tmp
 contain task summaries, which are the user's own prompts. Set `ZJ_AGENT_SPOOL=0` to opt out
 entirely; the pipe keeps working for the agent's own session.
 
+## In-flight tool timing
+
+`PreToolUse` and `PostToolUse` carry a shared `tool_use_id`. The hook stamps the
+start into `inflight.<session>.<pane_id>` next to the spool records and subtracts
+at the matching `PostToolUse`, so a call that took a while reports itself:
+
+```
+      └ Bash cargo test (94s) · 3 turns · pane:5
+```
+
+Only the call that wrote the stamp clears it, matched on `tool_use_id`: tools
+nest, and an inner call finishing must not be measured against an outer one's
+start. Anything under `ZJ_AGENT_SLOW_TOOL` (10s) is not annotated, so the detail
+line stays quiet for the calls that are never the reason you are looking.
+
+The elapsed seconds are computed in the hook rather than sent as an epoch,
+because the plugin has no wall clock - the same constraint that makes the spool
+date its records relative to each other.
+
+## Answering prompts without being asked
+
+`ZJ_AGENT_APPROVE` is on by default, so a prompt parks in the panel rather than
+only in the pane. What makes that bearable at fleet scale is the rules file:
+
+```sh
+# ~/.config/zj-agent-mob/approve.rules
+allow Read
+allow Bash git
+```
+
+One `allow <tool> [arg-prefix]` per line. A matching rule answers the prompt
+immediately - no pipe, no wait, no interruption - so you are only asked about
+something new. <kbd>A</kbd> on a parked prompt approves it *and* appends the
+rule, which is how the file gets written in practice.
+
+Allow-only by design. A wrong auto-deny wedges a turn, where a wrong auto-allow
+is still bounded by whatever the agent's own sandbox permits, and the rules file
+is never rewritten by the panel - only appended to, and only with a line the
+user pressed a key for.
+
+## Queueing the next instruction
+
+<kbd>f</kbd> composes a follow-up for the selected agent and drops it in
+`followup.<session>.<pane_id>`. The next `Stop` finds it, consumes it, and
+returns `{"decision":"block","reason":"<text>"}`, which makes the agent continue
+with that text instead of ending its turn. The row reports `working` with
+`followup: <text>` rather than the `done` that was about to stop being true.
+
+Unlike a reply, this needs no prompt to be open - a working agent is exactly
+what it is for - and it reaches another session, because the transport is a file
+rather than a pipe. Nothing queued means `Stop` behaves exactly as it did
+before, byte for byte.
+
+## Telling an agent about its neighbours
+
+The panel is the only party that sees the whole fleet, and two agents in one
+repository is how a rebase gets stepped on. So on `UserPromptSubmit` the hook
+reads its own sibling spool records and, when another *active* agent shares this
+`cwd`, injects one note:
+
+```
+zj-agent-mob: 1 other agent(s) are working in this same directory right now:
+pane 4 (working): refactor the parser
+Coordinate before wide-reaching changes (rebases, file moves, dependency bumps).
+```
+
+Capped at three peers - a bigger fleet says how many it left out rather than
+naming a count it never printed - informational only, and never a veto: `additionalContext`
+adds to what the agent knows and cannot block the prompt. It costs the agent
+tokens, so `ZJ_AGENT_CONTEXT=0` switches it off. An agent is never told about
+itself, and only `working` / `waiting` / `idle-wait` / `compact` records count -
+a finished agent is not competition for the working tree.
+
 ## Cost per turn
 
 The hook runs on the agent's critical path, so it is worth knowing exactly what
@@ -167,6 +254,7 @@ one turn costs before tuning `ZJ_AGENT_HEARTBEAT` and `ZJ_AGENT_FANOUT`.
 | 1 `jq` | Every event. One invocation parses the whole payload into shell variables via `@sh`. |
 | 1 `zellij pipe` | Every event that produces a status or a counter delta. |
 | 1 file write | Every event, unless `ZJ_AGENT_SPOOL=0`. Done with a shell redirect, not a subprocess. |
+| 1 more file write | `PreToolUse` / `PostToolUse` only, the in-flight stamp. Same redirect-and-rename, no subprocess. Skipped with `ZJ_AGENT_HEARTBEAT=0`. |
 
 **Only on turn-opening boundaries** (`SessionStart`, `UserPromptSubmit`):
 
@@ -174,6 +262,14 @@ one turn costs before tuning `ZJ_AGENT_HEARTBEAT` and `ZJ_AGENT_FANOUT`.
 |---|---|
 | 1 `tail -n 300` | Bounded window, so a multi-megabyte transcript is never read whole. |
 | 1-2 more `jq` | Claude tries `ai-title` and falls back to `last-prompt`; Codex reads `event_msg` once. |
+
+**Only on turn boundaries and prompts:**
+
+| Cost | Notes |
+|---|---|
+| 1 spool directory read | `UserPromptSubmit` only, for the fleet note. Skipped with `ZJ_AGENT_CONTEXT=0`. |
+| 1 rules file read | `PermissionRequest` only, and only when the file exists. |
+| 1 file read | `Stop` only, checking for a queued follow-up. |
 
 **Only on `waiting` / `idlewait` / `failed` / `done`** — the states that actually
 need you:
@@ -228,13 +324,24 @@ These events are high-frequency during a fan-out, so they honour `ZJ_AGENT_HEART
 
 ## Answering permission prompts
 
-Opt-in via `ZJ_AGENT_APPROVE=1`, and the only hook that deliberately blocks a turn. `PermissionRequest` is registered with `async: false` for exactly this reason; every other Claude hook stays async so it can never stall the agent.
+On by default (`ZJ_AGENT_APPROVE=0` opts out), and one of the three hooks that deliberately blocks a turn. `PermissionRequest`, `Stop` and `UserPromptSubmit` are registered with `async: false` because an async hook's output cannot influence the turn it belongs to, and each of these three answers, continues, or informs one. Every other hook stays async so it can never stall the agent.
+
+Each of the three also carries a `statusMessage`, so the seconds a synchronous hook spends are attributed on screen instead of looking like a hang.
 
 The plugin cannot write to the stdin of an already-running hook, so the verdict travels through a file:
 
-1. The hook pipes `agent-ask` with a `verdict_file` path and blocks, polling for it.
+1. The hook pipes `agent-ask` with a `verdict_file` path and its own timeout, and blocks, polling
+   for the file.
 2. <kbd>a</kbd> / <kbd>r</kbd> in the panel writes `allow` or `deny` to that path via `run_command`.
 3. The hook reads it and prints `{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}`.
+
+A rule matching the prompt short-circuits all of this before step 1: see [answering prompts without being asked](#answering-prompts-without-being-asked).
+
+The timeout travels with the prompt so the two ends cannot disagree about when it lapsed. Past it
+the hook has already fallen through to the agent's own prompt and nothing is reading the file, so
+the panel drops the prompt: it stops rendering the box, stops offering the keys, and refuses the
+keypress. Otherwise <kbd>a</kbd> would write a verdict into the void and report an approval that
+never reached the agent.
 
 Polling rather than a FIFO: opening a FIFO with no reader blocks past any timeout, and Codex parses `async` but does not implement it, so there is nothing to absorb a hang. On timeout the hook prints nothing and exits 0, which falls through to the agent's own prompt - the worst case is the normal interactive experience, never a wedged turn.
 

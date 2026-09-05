@@ -299,8 +299,12 @@ Set these in the environment the *agent* runs in, not the panel's.
 |---|---|---|
 | `ZJ_AGENT_TOOL` | `claude` | Which transcript reader to use (`claude` / `codex`) |
 | `ZJ_AGENT_HEARTBEAT` | `1` | Set `0` to skip `PreToolUse`/`PostToolUse` (halves hook volume) |
-| `ZJ_AGENT_APPROVE` | `0` | Set `1` to park permission prompts in the panel for <kbd>a</kbd> / <kbd>r</kbd> |
+| `ZJ_AGENT_APPROVE` | `1` | Set `0` to stop parking permission prompts in the panel for <kbd>a</kbd> / <kbd>r</kbd> |
 | `ZJ_AGENT_APPROVE_TIMEOUT` | `30` | Seconds a parked prompt waits before falling through to the agent's own prompt |
+| `ZJ_AGENT_APPROVE_RULES` | `~/.config/zj-agent-mob/approve.rules` | Rules that answer a prompt without asking. One `allow <tool> [arg-prefix]` per line; <kbd>A</kbd> appends one |
+| `ZJ_AGENT_FOLLOWUP` | `1` | Set `0` to stop delivering a follow-up queued with <kbd>f</kbd> when the turn ends |
+| `ZJ_AGENT_CONTEXT` | `1` | Set `0` to stop telling an agent about other agents working in the same directory |
+| `ZJ_AGENT_SLOW_TOOL` | `10` | Seconds a tool call must take before its duration is shown on the detail line |
 | `ZJ_AGENT_SPOOL` | `1` | Set `0` to stop writing the cross-session status file. Agents in other sessions then show `found` instead of live status |
 | `ZJ_AGENT_SPOOL_DIR` | `$TMPDIR/zj-agent-mob-<uid>/status` | Where status files are written. Created `0700`, since records contain task summaries |
 | `ZJ_AGENT_FANOUT` | `1` | Set `0` to stop piping `waiting` / `failed` / `done` straight to panels in other sessions. They then wait for the next poll instead |

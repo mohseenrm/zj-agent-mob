@@ -169,8 +169,12 @@ impl ZellijPlugin for State {
     /// rows collide. Every element gets an explicit `y`.
     fn render(&mut self, rows: usize, cols: usize) {
         if !self.permissions_granted {
+            // The first screen anyone sees, and it is wider than a narrow pane.
             print_text_with_coordinates(
-                Text::new("zj-agent-mob needs permissions - press 'y' to grant"),
+                Text::new(truncate(
+                    "zj-agent-mob needs permissions - press 'y' to grant",
+                    content_width(cols),
+                )),
                 0,
                 0,
                 None,
@@ -242,6 +246,19 @@ pub(crate) fn reply_row(text: &str, cols: usize) -> Text {
     Text::new(line).color_range(2, at)
 }
 
+/// The follow-up editor. Distinct wording from the reply editor because the two
+/// arrive differently: a reply is typed into a prompt that is open now, a
+/// follow-up waits for the current turn to finish.
+pub(crate) fn followup_row(text: &str, cols: usize) -> Text {
+    const INDENT: &str = "      ";
+    const PROMPT: &str = "\u{2514} follow-up: ";
+    let room = cols.saturating_sub(INDENT.len() + chars(PROMPT) + 1);
+    let shown = truncate(text, room);
+    let line = format!("{}{}{}\u{2588}", INDENT, PROMPT, shown);
+    let at = chars(INDENT)..chars(INDENT) + chars(PROMPT);
+    Text::new(line).color_range(2, at)
+}
+
 /// The find prompt, footer-resident like a pending `g` count: the query, a
 /// block cursor, and the keys that end the search.
 pub(crate) fn find_prompt_row(query: &str, cols: usize) -> Text {
@@ -302,6 +319,14 @@ fn viewport(groups: &[Vec<Text>], scroll: usize, selected: usize, budget: usize)
     }
 }
 
+/// The list header: the text, the colour range tracking each count's digits,
+/// and the group chip's range when one was written.
+struct Head {
+    text: String,
+    ranges: Vec<(usize, bool, std::ops::Range<usize>)>,
+    group_range: Option<std::ops::Range<usize>>,
+}
+
 /// A group heading, carrying its member count so a collapsed-looking group is
 /// still legible when the viewport cuts it off below.
 fn group_header(name: &str, n: usize, width: usize) -> Text {
@@ -332,7 +357,11 @@ impl State {
     fn render_setup(&self, width: usize) {
         let mut y = self.render_header("setup", width);
         print_text_with_coordinates(
-            Text::new("  Hooks are not installed, so no agent can report status.").color_range(DIM_LEVEL, ..),
+            Text::new(truncate(
+                "  Hooks are not installed, so no agent can report status.",
+                width,
+            ))
+            .color_range(DIM_LEVEL, ..),
             0,
             y,
             None,
@@ -355,16 +384,25 @@ impl State {
         };
         let y = self.render_header(subtitle, width);
         let rows = vec![
-            Text::new("  Start claude or codex in a pane; hooks report status here.").color_range(DIM_LEVEL, ..),
-            Text::new("  Press n to start one here, or i to check and install the hooks.").color_range(DIM_LEVEL, ..),
+            Text::new(truncate(
+                "  Start claude or codex in a pane; hooks report status here.",
+                width,
+            ))
+            .color_range(DIM_LEVEL, ..),
+            Text::new(truncate(
+                "  Press n to start one here, or i to check and install the hooks.",
+                width,
+            ))
+            .color_range(DIM_LEVEL, ..),
         ];
         self.render_rows(rows, y);
     }
 
-    /// Returns the number of rows emitted, which must never exceed `rows`: a
-    /// row printed past the bottom edge is clipped by the terminal, taking the
-    /// footer and the key hints with it.
-    fn render_list(&mut self, rows: usize, width: usize) -> usize {
+    pub(crate) fn head_line(&self, width: usize) -> String {
+        self.build_head(width).text
+    }
+
+    fn build_head(&self, width: usize) -> Head {
         let (failed, waiting, working, done) = self.counts();
         // A zero failure count is omitted so the common case reads unchanged.
         let mut parts = Vec::new();
@@ -386,16 +424,24 @@ impl State {
 
         // Built up incrementally so each count's colour range tracks the digits
         // actually written; a two-digit count shifts everything after it.
+        //
+        // A segment that would not fit is dropped whole, rather than the line
+        // being truncated: cutting mid-segment leaves a dangling ` · ` and, at
+        // widths where the title alone fills the pane, the overflow wraps and
+        // eats the rule on the row below.
         let mut head = "zj-agent-mob   ".to_string();
         let mut ranges = Vec::new();
         for (i, (n, label, status)) in parts.into_iter().enumerate() {
-            if i > 0 {
-                head.push_str(" \u{b7} ");
-            }
+            let sep = if i > 0 { " \u{b7} " } else { "" };
             let digits = n.to_string();
+            let seg_len = chars(sep) + digits.chars().count() + 1 + chars(label);
+            if chars(&head) + seg_len > width {
+                break;
+            }
+            head.push_str(sep);
             // Character offsets: the `\u{b7}` separator is multi-byte, so byte
             // offsets would drift right by one per separator already written.
-            let range = chars(&head)..chars(&head) + digits.len();
+            let range = chars(&head)..chars(&head) + digits.chars().count();
             ranges.push((status.color_level(), status.is_error(), range));
             head.push_str(&digits);
             head.push(' ');
@@ -412,7 +458,31 @@ impl State {
                 group_range = Some(start..start + chars(&chip));
             }
         }
-        let head = ranges.into_iter().fold(Text::new(head), |t, (level, is_err, r)| {
+        // The title itself can exceed a very narrow pane, and nothing above
+        // clamps it: every count may have been dropped and it is still too long.
+        let head = truncate(&head, width);
+        // A range that the clamp cut through would colour past the end of the
+        // string, which panics rather than rendering wrong.
+        let end = chars(&head);
+        let ranges: Vec<_> = ranges.into_iter().filter(|(_, _, r)| r.end <= end).collect();
+        let group_range = group_range.filter(|r| r.end <= end);
+        Head {
+            text: head,
+            ranges,
+            group_range,
+        }
+    }
+
+    /// Returns the number of rows emitted, which must never exceed `rows`: a
+    /// row printed past the bottom edge is clipped by the terminal, taking the
+    /// footer and the key hints with it.
+    fn render_list(&mut self, rows: usize, width: usize) -> usize {
+        let Head {
+            text,
+            ranges,
+            group_range,
+        } = self.build_head(width);
+        let head = ranges.into_iter().fold(Text::new(text), |t, (level, is_err, r)| {
             if is_err {
                 t.error_color_range(r)
             } else {
@@ -424,7 +494,15 @@ impl State {
             None => head,
         };
         print_text_with_coordinates(head, 0, 0, None, None);
-        let mut y = self.render_rule(1, width);
+        // The rules are the first chrome to go in a pane too short for all of
+        // it: they separate, where the header and the hints carry information.
+        // Without this the fixed chrome overruns a short pane and the terminal
+        // clips whatever landed last, which is the hint ribbon.
+        let rules = rows >= 5;
+        let mut y = match rules {
+            true => self.render_rule(1, width),
+            false => 1,
+        };
 
         // An open find prompt narrows the list to its matches, in score order.
         // With no prompt this is the identity, so one code path renders both.
@@ -501,6 +579,9 @@ impl State {
                     if let Some(reply) = self.reply.as_ref().filter(|r| r.id == agent.id) {
                         g.push(reply_row(&reply.text, width));
                     }
+                    if let Some(f) = self.followup.as_ref().filter(|r| r.id == agent.id) {
+                        g.push(followup_row(&f.text, width));
+                    }
                 }
                 g
             })
@@ -508,7 +589,7 @@ impl State {
 
         // Everything that is not a list row: header, its rule, the footer rule,
         // the hints, and the error note when there is one.
-        let chrome = 4 + usize::from(self.action_error.is_some());
+        let chrome = 2 + 2 * usize::from(rules) + usize::from(self.action_error.is_some());
         let budget = rows.saturating_sub(chrome);
         let keep_visible = marked.and_then(|m| visible.iter().position(|&i| i == m)).unwrap_or(0);
         let view = viewport(&groups, self.scroll, keep_visible, budget);
@@ -528,7 +609,9 @@ impl State {
             items.push(more_row(view.hidden_below, false, width));
         }
         y = self.render_rows(items, y);
-        y = self.render_rule(y, width);
+        if rules {
+            y = self.render_rule(y, width);
+        }
         // A cross-session action that failed is the one thing here the panel
         // cannot show any other way: the row is already gone.
         if let Some(msg) = self.action_error.as_deref() {
@@ -541,6 +624,9 @@ impl State {
         // The find query lives in the footer the way a `g` count does: what has
         // been typed, a block cursor, and the keys that end the search.
         if let Some(f) = self.find.as_ref() {
+            if y >= rows {
+                return y;
+            }
             print_text_with_coordinates(find_prompt_row(&f.query, width), 0, y, None, None);
             return y + 1;
         }
@@ -548,12 +634,22 @@ impl State {
         // otherwise the digits vanish into a buffer with nothing on screen.
         // Echoed as vim would show it, count first.
         if let Some(buf) = self.jump_buf.as_deref() {
+            if y >= rows {
+                return y;
+            }
             let line = truncate(&format!("  g{}\u{2588}   \u{21b5} jump   esc cancel", buf), width);
             let count = chars("  g") + chars(buf) + 1;
             print_text_with_coordinates(Text::new(line).color_range(2, 2..count), 0, y, None, None);
             return y + 1;
         }
-        let hints = if self.reply.is_some() {
+        // A pane with room for nothing but the header has no line to spare for
+        // the ribbon, and printing it anyway is what the terminal clips.
+        if y >= rows {
+            return y;
+        }
+        let hints = if self.followup.is_some() {
+            ribbon::FOLLOWUP_EDIT_HINTS
+        } else if self.reply.is_some() {
             ribbon::REPLY_EDIT_HINTS
         } else if selected_has_ask {
             ribbon::ASK_HINTS
@@ -580,8 +676,10 @@ impl State {
 
     /// Returns the next free `y`.
     fn render_header(&self, subtitle: &str, width: usize) -> usize {
-        let text = format!("zj-agent-mob   {}", subtitle);
-        let at = "zj-agent-mob   ".len();
+        // Clamped like every other element: an over-long subtitle would wrap
+        // and the rule below would land on top of what wrapped.
+        let text = truncate(&format!("zj-agent-mob   {}", subtitle), width);
+        let at = "zj-agent-mob   ".len().min(chars(&text));
         print_text_with_coordinates(Text::new(text).color_range(DIM_LEVEL, at..), 0, 0, None, None);
         self.render_rule(1, width)
     }
@@ -694,6 +792,30 @@ mod viewport_tests {
             s.handle_status(&args);
         }
         s
+    }
+
+    /// A pane shorter than the chrome itself. The fixed header/rules/hints came
+    /// to four rows whatever the pane could hold, so the last line printed - the
+    /// hint ribbon, or the detail line above it - was clipped by the terminal.
+    #[test]
+    fn a_pane_too_short_for_the_chrome_still_fits_what_it_draws() {
+        for rows in [1usize, 2, 3, 4, 5] {
+            for agents in [1usize, 2, 5] {
+                let mut s = state_with(agents);
+                for sel in [0, agents - 1] {
+                    s.selected = sel;
+                    let emitted = s.render_list(rows, 100);
+                    assert!(
+                        emitted <= rows,
+                        "rows={} agents={} selected={} emitted {}",
+                        rows,
+                        agents,
+                        sel,
+                        emitted
+                    );
+                }
+            }
+        }
     }
 
     /// The bug this exists for: rows were emitted from y=2 with no upper bound,
@@ -915,6 +1037,142 @@ mod viewport_tests {
         for rows in [6usize, 10, 20] {
             assert!(s.render_list(rows, 100) <= rows, "rows={}", rows);
         }
+    }
+}
+
+#[cfg(test)]
+mod header_width_tests {
+    use crate::state::{Grouping, State};
+    use crate::status::Status;
+    use std::collections::BTreeMap;
+
+    fn state_with(counts: &[(&str, usize)]) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        let mut pane = 0;
+        for (status, n) in counts {
+            for _ in 0..*n {
+                pane += 1;
+                let args: BTreeMap<String, String> = [
+                    ("pane_id".to_string(), pane.to_string()),
+                    ("status".to_string(), status.to_string()),
+                ]
+                .into_iter()
+                .collect();
+                s.handle_status(&args);
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn the_head_line_never_exceeds_the_pane_width() {
+        let fleets: [&[(&str, usize)]; 5] = [
+            &[("working", 1)],
+            &[("waiting", 2), ("working", 1)],
+            &[("failed", 3), ("waiting", 12), ("working", 7), ("done", 44)],
+            &[("failed", 100), ("waiting", 200), ("working", 300), ("done", 400)],
+            &[("done", 1)],
+        ];
+        for fleet in fleets {
+            let mut s = state_with(fleet);
+            for grouping in [Grouping::Urgency, Grouping::Project, Grouping::Session] {
+                s.grouping = grouping;
+                for width in 1usize..=120 {
+                    let head = s.head_line(width);
+                    assert!(
+                        head.chars().count() <= width,
+                        "width={} grouping={:?} fleet={:?} produced {:?} ({} chars)",
+                        width,
+                        grouping,
+                        fleet,
+                        head,
+                        head.chars().count()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_head_line_never_ends_in_a_dangling_separator() {
+        let mut s = state_with(&[("failed", 3), ("waiting", 12), ("working", 7), ("done", 44)]);
+        s.grouping = Grouping::Urgency;
+        for width in 1usize..=120 {
+            let head = s.head_line(width);
+            let trimmed = head.trim_end();
+            assert!(
+                !trimmed.ends_with('\u{b7}'),
+                "width={} left a separator with nothing after it: {:?}",
+                width,
+                head
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_count_takes_its_whole_segment() {
+        let s = state_with(&[("waiting", 2), ("working", 1)]);
+        for width in 1usize..=120 {
+            let head = s.head_line(width);
+            if head.contains("working") {
+                assert!(
+                    head.contains("1 working"),
+                    "width={} kept the label without its count: {:?}",
+                    width,
+                    head
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_group_chip_is_dropped_rather_than_cut() {
+        let mut s = state_with(&[("waiting", 2), ("working", 1)]);
+        s.grouping = Grouping::Project;
+        for width in 1usize..=120 {
+            let head = s.head_line(width);
+            if head.contains("groups") {
+                assert!(
+                    head.contains("[project groups]"),
+                    "width={} cut the chip: {:?}",
+                    width,
+                    head
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_pane_still_shows_every_count() {
+        let s = state_with(&[("failed", 1), ("waiting", 2), ("working", 3), ("done", 4)]);
+        let head = s.head_line(120);
+        for want in ["1 failed", "2 waiting", "3 working", "4 done"] {
+            assert!(head.contains(want), "{:?} missing from {:?}", want, head);
+        }
+    }
+
+    #[test]
+    fn a_discovered_agent_gets_its_own_bucket() {
+        let mut s = state_with(&[("working", 1)]);
+        s.apply_scan(vec![crate::discover::Found {
+            session: "other".into(),
+            pane_id: 9,
+            tool: "codex".into(),
+        }]);
+        assert_eq!(s.discovered_count(), 1);
+        let head = s.head_line(120);
+        assert!(head.contains("1 found"), "{:?}", head);
+        assert!(
+            !head.contains("2 working"),
+            "a found agent must not be counted as working: {:?}",
+            head
+        );
+        let _ = Status::Discovered;
     }
 }
 
