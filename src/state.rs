@@ -68,8 +68,13 @@ pub struct State {
     pub(crate) install: Install,
     /// The panel's own session; rows from anywhere else are foreign.
     pub(crate) session_name: String,
-    /// Every session Zellij currently lists, used to spot dead ones.
+    /// Every session Zellij lists, which is only ever the panel's own:
+    /// `SessionUpdate` names sessions its own server owns.
     pub(crate) live_sessions: Vec<String>,
+    /// Sessions the last completed scan saw a running server for. Separate
+    /// from `live_sessions` because each has its own writer, and
+    /// `apply_sessions` fires on every pane event.
+    pub(crate) scanned_sessions: Vec<String>,
     /// Sanitized name -> the real one Zellij knows it by.
     ///
     /// Identity is sanitized so it can key a spool filename, but `zellij
@@ -301,15 +306,41 @@ impl State {
             .unwrap_or_else(|| sanitized.to_string())
     }
 
+    /// Liveness from the process scan, the only source that can see a foreign
+    /// session's server.
+    ///
+    /// Replaced rather than merged: an exited session is absent from the next
+    /// scan, and that absence is what must turn its rows `unknown`.
+    ///
+    /// An empty set is ignored. `scan.complete` does not imply a good scan -
+    /// `SCANEND` is its own line, so it still prints when the awk ahead of it
+    /// produced nothing - and the panel always runs inside a session, so zero
+    /// servers means the scan failed, not that every session died.
+    pub(crate) fn apply_scanned_sessions(&mut self, live: Vec<String>) -> bool {
+        if live.is_empty() || self.scanned_sessions == live {
+            return false;
+        }
+        self.scanned_sessions = live;
+        self.apply_liveness()
+    }
+
     /// Rows whose session is gone go `unknown` rather than disappearing.
     pub(crate) fn apply_sessions(&mut self, live: Vec<String>) -> bool {
         if live.is_empty() {
             return false;
         }
         self.live_sessions = live;
+        self.apply_liveness()
+    }
+
+    /// Re-derives liveness from both sources. Unioned here rather than in one
+    /// shared field so the order the two writers fire in does not matter.
+    fn apply_liveness(&mut self) -> bool {
+        // Cloned to sidestep the borrow against `iter_mut`; both are tiny.
+        let (reported, scanned) = (self.live_sessions.clone(), self.scanned_sessions.clone());
         let mut changed = false;
         for agent in self.agents.iter_mut() {
-            let alive = self.live_sessions.contains(&agent.id.session);
+            let alive = reported.contains(&agent.id.session) || scanned.contains(&agent.id.session);
             if agent.session_alive != alive {
                 agent.session_alive = alive;
                 changed = true;
@@ -883,6 +914,7 @@ impl State {
             found,
             spooled: Vec::new(),
             complete: true,
+            ..Default::default()
         })
     }
 
@@ -904,7 +936,9 @@ impl State {
                 self.spool_epoch_at = self.now;
             }
         }
-        let mut changed = self.merge_found(scan.found);
+        // Liveness first: `merge_found` culls foreign rows by `session_alive`.
+        let mut changed = self.apply_scanned_sessions(scan.live);
+        changed |= self.merge_found(scan.found);
         changed |= self.apply_spool(scan.spooled);
         if changed {
             self.clamp_selection();
@@ -2141,6 +2175,7 @@ mod tests {
                     .collect(),
             }],
             complete: true,
+            ..Default::default()
         });
         assert_eq!(s.notifier.pending.len(), 1, "a foreign block must reach you");
         assert_eq!(s.notifier.pending[0].id.session, "other");
@@ -2986,7 +3021,111 @@ mod cross_session_tests {
             found,
             spooled,
             complete: true,
+            ..Default::default()
         }
+    }
+
+    fn scan_live(
+        found: Vec<crate::discover::Found>,
+        spooled: Vec<crate::discover::Spooled>,
+        live: &[&str],
+    ) -> crate::discover::Scan {
+        crate::discover::Scan {
+            found,
+            spooled,
+            live: live.iter().map(|s| s.to_string()).collect(),
+            complete: true,
+        }
+    }
+
+    fn alive_in(s: &State, session: &str) -> bool {
+        s.agents
+            .iter()
+            .find(|a| a.id.session == session)
+            .map(|a| a.session_alive)
+            .unwrap_or(false)
+    }
+
+    /// The bug: every foreign row read `gone` while its session was running,
+    /// because `SessionUpdate` names only the panel's own session.
+    #[test]
+    fn a_foreign_session_the_scan_saw_survives_session_updates() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_scan_result(scan_live(found(&[("other", 3)]), vec![], &["mob", "other"]));
+        assert!(s.agents[0].session_alive);
+
+        s.apply_sessions(vec!["mob".to_string()]);
+        s.apply_sessions(vec!["mob".to_string()]);
+        assert!(
+            s.agents[0].session_alive,
+            "the scan is the witness SessionUpdate cannot be"
+        );
+        assert_eq!(s.agents[0].status, Status::Working, "and the status stands");
+    }
+
+    /// An exited session has no server, so it drops out of the next scan.
+    /// That absence is the signal; no staleness clock needed.
+    #[test]
+    fn a_session_that_leaves_the_scan_goes_unknown() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_scan_result(scan_live(found(&[("other", 3)]), vec![], &["mob", "other"]));
+        assert!(s.agents[0].session_alive);
+
+        s.apply_scan_result(scan_live(Vec::new(), vec![], &["mob"]));
+        assert!(
+            s.agents.is_empty() || !s.agents[0].session_alive,
+            "a real exit still reads gone"
+        );
+    }
+
+    /// Neither source may erase the other; `apply_sessions` runs far more
+    /// often than a scan.
+    #[test]
+    fn the_two_liveness_sources_do_not_clobber_each_other() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+        s.apply_sessions(vec!["mob".to_string()]);
+        s.apply_scan_result(scan_live(found(&[("other", 3), ("mob", 4)]), vec![], &["mob", "other"]));
+        assert!(
+            alive_in(&s, "other") && alive_in(&s, "mob"),
+            "both live after both sources"
+        );
+
+        s.apply_sessions(vec!["mob".to_string()]);
+        assert!(alive_in(&s, "other"), "a session event kept the scan's answer");
+        assert!(alive_in(&s, "mob"), "and its own");
+    }
+
+    /// A completed scan naming no session is a broken scan, not a machine
+    /// where every session died. Acting on it marked every row gone,
+    /// including the panel's own.
+    #[test]
+    fn an_empty_scan_does_not_kill_every_row() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        s.apply_sessions(vec!["mob".to_string()]);
+        s.apply_scan_result(scan_live(found(&[("mob", 4), ("other", 3)]), vec![], &["mob", "other"]));
+        assert!(s.agents.iter().all(|a| a.session_alive));
+        // Already `unknown` from the re-confirm rule, not from any empty scan.
+        let before = s.agents.iter().find(|a| a.id.session == "other").unwrap().status;
+
+        s.apply_scan_result(scan_live(found(&[("mob", 4), ("other", 3)]), vec![], &[]));
+        assert!(alive_in(&s, "other"), "a scan that saw nothing proves nothing");
+        assert!(alive_in(&s, "mob"), "least of all about the panel's own session");
+        assert_eq!(
+            s.agents.iter().find(|a| a.id.session == "other").unwrap().status,
+            before,
+            "and the empty scan changed no status either"
+        );
+        assert_eq!(
+            s.agents.iter().find(|a| a.id.session == "mob").unwrap().status,
+            Status::Working,
+            "the home row in particular is untouched"
+        );
     }
 
     /// The headline: a foreign agent's status arrives without a panel in its
@@ -3193,6 +3332,7 @@ mod cross_session_tests {
             found: Vec::new(),
             spooled: Vec::new(),
             complete: false,
+            ..Default::default()
         };
         assert!(!s.apply_scan_result(incomplete));
         assert_eq!(s.agents.len(), 1, "a partial read must not cull");
@@ -3341,6 +3481,7 @@ mod cross_session_tests {
             found: found(&[("other", 7)]),
             spooled: scan.spooled,
             complete: true,
+            ..Default::default()
         }));
         let a = &s.agents[0];
         assert_eq!(a.status, Status::Waiting, "live status without a panel in its session");
@@ -3378,6 +3519,7 @@ mod cross_session_tests {
                 found: found(&[("other", 7)]),
                 spooled: again.spooled,
                 complete: true,
+                ..Default::default()
             });
             s.age_foreign_rows();
         }
