@@ -29,3 +29,6 @@ docs/
 !docs/development.md
 !docs/img/
 !docs/img/*.png
+
+# Claude Code local state (settings, agent worktrees)
+.claude/

@@ -250,6 +250,7 @@ pub mod testing {
                 found,
                 spooled,
                 complete: true,
+                ..Default::default()
             })
         }
 

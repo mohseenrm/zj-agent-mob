@@ -35,6 +35,18 @@ pub(crate) fn scan_script(tools: &[&str]) -> String {
         r#"ps axeww -o pid=,command= 2>/dev/null | awk '
 {{
   cmd = $2; sub(/.*\//, "", cmd)
+  # One server per session; the socket path basename is the session name.
+  # No apostrophes in this block: the awk program is one single-quoted word.
+  if (cmd == "zellij" && $3 == "--server" && $4 != "") {{
+    # Rejoin: a session name may contain spaces, so the path is not one field.
+    s = ""
+    for (i = 4; i <= NF; i++) {{
+      if ($i ~ /^[A-Za-z_][A-Za-z0-9_]*=/) break
+      s = (s == "" ? $i : s " " $i)
+    }}
+    sub(/.*\//, "", s)
+    if (s != "") print "LIVE", s
+  }}
   if ({guard}) next
   pane = ""; sess = ""
   for (i = 3; i <= NF; i++) {{
@@ -107,6 +119,10 @@ pub(crate) struct Spooled {
 pub(crate) struct Scan {
     pub(crate) found: Vec<Found>,
     pub(crate) spooled: Vec<Spooled>,
+    /// Sanitized names of every session with a running Zellij server.
+    /// `SessionUpdate` reports only the panel's own, so this is the only
+    /// source that can speak for a foreign session's liveness.
+    pub(crate) live: Vec<String>,
     /// The script ran to completion. Without this a truncated read looks like
     /// "no agents anywhere" and would cull every foreign row.
     pub(crate) complete: bool,
@@ -137,6 +153,16 @@ pub(crate) fn parse(stdout: &str) -> Scan {
             continue;
         };
         match tag {
+            "LIVE" => {
+                let name = rest.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let sanitized = crate::agent::sanitize_session(name);
+                if !scan.live.contains(&sanitized) {
+                    scan.live.push(sanitized);
+                }
+            }
             "SCAN" => {
                 let mut parts = rest.split_whitespace();
                 let Some(session) = parts.next() else { continue };
@@ -404,6 +430,33 @@ mod tests {
             "1234 nvim ZELLIJ=0 ZELLIJ_PANE_ID=9 ZELLIJ_SESSION_NAME=mob\n",
             "5678 claude SOME=thing\n",
         );
+
+        /// A server process is not an agent, and an agent is not a server.
+        #[test]
+        fn reports_a_running_server_for_every_session() {
+            let procs = concat!(
+                "45985 claude ZELLIJ=0 ZELLIJ_PANE_ID=2 ZELLIJ_SESSION_NAME=mob\n",
+                "1743 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/mob X=1\n",
+                "6108 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/other X=1\n",
+                "540 /System/Library/CoreServices/appleeventsd --server\n",
+            );
+            let scan = parse(&run("live", procs));
+            assert_eq!(
+                scan.live,
+                vec!["mob".to_string(), "other".to_string()],
+                "one entry per zellij server, and nothing else's --server"
+            );
+            assert_eq!(scan.found.len(), 1, "a server process is not an agent");
+        }
+
+        /// Keyed the same way a row is, or the liveness lookup misses.
+        #[test]
+        fn a_servers_session_name_is_sanitized() {
+            let procs =
+                "1743 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/my session\n";
+            let scan = parse(&run("sanitize", procs));
+            assert_eq!(scan.live, vec![crate::agent::sanitize_session("my session")]);
+        }
 
         /// Every session at once: the scan is no longer scoped to one.
         #[test]
