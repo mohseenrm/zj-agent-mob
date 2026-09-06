@@ -452,8 +452,7 @@ mod tests {
         /// Keyed the same way a row is, or the liveness lookup misses.
         #[test]
         fn a_servers_session_name_is_sanitized() {
-            let procs =
-                "1743 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/my session\n";
+            let procs = "1743 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/my session\n";
             let scan = parse(&run("sanitize", procs));
             assert_eq!(scan.live, vec![crate::agent::sanitize_session("my session")]);
         }

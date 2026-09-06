@@ -37,9 +37,6 @@ by urgency, so whatever needs you most sits at the top.
 | Requirement | Why |
 |---|---|
 | Zellij 0.44+ | Plugin API (`LaunchOrFocusPlugin`, pipes, `RunCommandResult`) |
-| `jq` | The hook parses hook-event JSON; the installer merges settings |
-| `curl` or `wget` | Only for the one-line install; not needed from a clone |
-| Claude Code, Codex, or both | The agents being monitored |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
 
 ## Quick start

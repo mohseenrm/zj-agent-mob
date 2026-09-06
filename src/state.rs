@@ -340,8 +340,7 @@ impl State {
         let (reported, scanned) = (self.live_sessions.clone(), self.scanned_sessions.clone());
         let mut changed = false;
         for agent in self.agents.iter_mut() {
-            let alive =
-                reported.contains(&agent.id.session) || scanned.contains(&agent.id.session);
+            let alive = reported.contains(&agent.id.session) || scanned.contains(&agent.id.session);
             if agent.session_alive != alive {
                 agent.session_alive = alive;
                 changed = true;
@@ -3089,11 +3088,7 @@ mod cross_session_tests {
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
         s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
         s.apply_sessions(vec!["mob".to_string()]);
-        s.apply_scan_result(scan_live(
-            found(&[("other", 3), ("mob", 4)]),
-            vec![],
-            &["mob", "other"],
-        ));
+        s.apply_scan_result(scan_live(found(&[("other", 3), ("mob", 4)]), vec![], &["mob", "other"]));
         assert!(
             alive_in(&s, "other") && alive_in(&s, "mob"),
             "both live after both sources"
@@ -3113,11 +3108,7 @@ mod cross_session_tests {
         s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
         s.apply_sessions(vec!["mob".to_string()]);
-        s.apply_scan_result(scan_live(
-            found(&[("mob", 4), ("other", 3)]),
-            vec![],
-            &["mob", "other"],
-        ));
+        s.apply_scan_result(scan_live(found(&[("mob", 4), ("other", 3)]), vec![], &["mob", "other"]));
         assert!(s.agents.iter().all(|a| a.session_alive));
         // Already `unknown` from the re-confirm rule, not from any empty scan.
         let before = s.agents.iter().find(|a| a.id.session == "other").unwrap().status;
