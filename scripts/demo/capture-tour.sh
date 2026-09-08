@@ -24,7 +24,7 @@ SESSION=${ZJ_TOUR_SESSION:-zjtour}
 API_SESSION=payments-api
 INFRA_SESSION=platform-infra
 CFG=/tmp/zj-tour-cfg
-WASM="$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
+WASM=${ZJ_TOUR_WASM:-$HOME/.config/zellij/plugins/zj-agent-mob.wasm}
 # Discovery ON, unlike the old tour.
 #
 # `discover=false` also switches off the SPOOL POLL - request_scan() returns
@@ -327,18 +327,16 @@ _i=0
 while [ "$_i" -lt 240 ]; do
   rm -f /tmp/zj-tour-warm.txt
   za dump-screen --path /tmp/zj-tour-warm.txt >/dev/null 2>&1 || true
-  if [ -s /tmp/zj-tour-warm.txt ] && grep -q 'zj-agent-mob' /tmp/zj-tour-warm.txt 2>/dev/null; then
-    break
-  fi
   # Grant the plugin permission if this build has none. Zellij keys it by
   # plugin path in the cache dir, so `reinstall-local.sh` drops it and the
   # panel comes up asking instead of rendering.
   if [ -s /tmp/zj-tour-warm.txt ] && grep -q 'Allow?' /tmp/zj-tour-warm.txt 2>/dev/null; then
-    # The prompt only reads keys with focus, and its pane is named by the wasm
-    # path rather than "Agent Mob" until the grant goes through.
-    _pp=$(za list-panes 2>/dev/null | awk '/zj-agent-mob\.wasm/ { print $1; exit }' | sed 's/^plugin_//')
-    [ -n "$_pp" ] && za focus-pane-id "$_pp" >/dev/null 2>&1
+    # The permission prompt is not listed as a plugin pane until it is granted.
+    # Send the answer while the launch modal still owns input.
     za write-chars "y" >/dev/null 2>&1 || true
+  fi
+  if [ -s /tmp/zj-tour-warm.txt ] && grep -q '^zj-agent-mob' /tmp/zj-tour-warm.txt 2>/dev/null; then
+    break
   fi
   sleep 0.5
   _i=$((_i + 1))
@@ -347,9 +345,10 @@ done
 PANEL=$(za list-panes 2>/dev/null | awk '/Agent Mob/ { print $1; exit }')
 [ -n "$PANEL" ] || { echo "no panel pane" >&2; exit 1; }
 
-# Size to the content: the panel renders from the top, so height past the last
-# row is dead space. A resize issued before the viewport settles is silently
-# ignored, so settle first and let fill() re-assert it per frame.
+# Keep a tall viewport so the tour shows the footer anchored at the bottom while
+# agent rows remain stable at the top. A resize issued before the viewport
+# settles is silently ignored, so settle first and let fill() re-assert it per
+# frame.
 sleep 2
 fill
 sleep 1.5
