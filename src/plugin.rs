@@ -186,11 +186,11 @@ impl ZellijPlugin for State {
         let width = content_width(cols);
 
         if self.install.open {
-            self.render_install(width);
+            self.render_install(rows, width);
             return;
         }
         if self.showing_setup() {
-            self.render_setup(width);
+            self.render_setup(rows, width);
             return;
         }
         if self.agents.is_empty() {
@@ -341,20 +341,26 @@ fn more_row(n: usize, up: bool, width: usize) -> Text {
     Text::new(line).color_range(DIM_LEVEL, ..)
 }
 
+fn footer_start(content_end: usize, rows: usize, height: usize) -> usize {
+    content_end.max(rows.saturating_sub(height))
+}
+
 impl State {
     fn rename_pane(&self) {
         host::rename_own_pane(PANE_TITLE);
     }
 
-    fn render_install(&self, width: usize) {
+    fn render_install(&self, rows: usize, width: usize) {
         let mut y = self.render_header("install", width);
         y = self.render_rows(self.install.list_items(), y);
+        let note = self.install.notes();
+        y = footer_start(y, rows, 2 + usize::from(note.is_some()));
         y = self.render_rule(y, width);
-        y = self.render_notes(self.install.notes(), y, width);
+        y = self.render_notes(note, y, width);
         self.render_hints(ribbon::INSTALL_HINTS, y, width);
     }
 
-    fn render_setup(&self, width: usize) {
+    fn render_setup(&self, rows: usize, width: usize) {
         let mut y = self.render_header("setup", width);
         print_text_with_coordinates(
             Text::new(truncate(
@@ -369,8 +375,10 @@ impl State {
         );
         y += 2;
         y = self.render_rows(self.install.setup_items(), y);
+        let note = self.install.notes();
+        y = footer_start(y, rows, 2 + usize::from(note.is_some()));
         y = self.render_rule(y, width);
-        y = self.render_notes(self.install.notes(), y, width);
+        y = self.render_notes(note, y, width);
         self.render_hints(ribbon::SETUP_HINTS, y, width);
     }
 
@@ -609,6 +617,8 @@ impl State {
             items.push(more_row(view.hidden_below, false, width));
         }
         y = self.render_rows(items, y);
+        let footer_height = usize::from(rules) + usize::from(self.action_error.is_some()) + 1;
+        y = footer_start(y, rows, footer_height);
         if rules {
             y = self.render_rule(y, width);
         }
@@ -772,6 +782,19 @@ mod reply_row_tests {
 mod viewport_tests {
     use crate::state::{Grouping, State};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn footer_fills_unused_space() {
+        assert_eq!(super::footer_start(6, 20, 2), 18);
+        assert_eq!(super::footer_start(6, 20, 3), 17);
+    }
+
+    #[test]
+    fn footer_never_overlaps_content() {
+        assert_eq!(super::footer_start(6, 8, 2), 6);
+        assert_eq!(super::footer_start(7, 8, 2), 7);
+        assert_eq!(super::footer_start(1, 1, 2), 1);
+    }
 
     fn state_with(n: usize) -> State {
         let mut s = State {
