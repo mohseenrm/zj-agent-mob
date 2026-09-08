@@ -139,11 +139,31 @@ assert_panel() {
 assert_panel "panel renders after the permission grant"
 
 echo
+echo "footer alignment"
+zj action write-chars "i" >/dev/null 2>&1 || true
+sleep 2
+screen=$(dump)
+body_line=$(printf '%s\n' "$screen" | awk '/Plugin wasm/ { print NR; exit }')
+rule_line=$(printf '%s\n' "$screen" | awk '/^─+$/ { line = NR } END { print line }')
+hint_line=$(printf '%s\n' "$screen" | awk '/c claude/ { print NR; exit }')
+if [ -n "$body_line" ] && [ -n "$rule_line" ] && [ -n "$hint_line" ] \
+  && [ "$rule_line" -ge $((body_line + 2)) ] && [ "$hint_line" -gt "$rule_line" ]; then
+  ok "install hints are anchored below unused pane space"
+else
+  bad "install hints are anchored below unused pane space" \
+    "body=${body_line:-missing} rule=${rule_line:-missing} hints=${hint_line:-missing}: $screen"
+fi
+zj action write 27 >/dev/null 2>&1 || true
+sleep 1
+
+echo
 echo "hook -> panel, for real"
 
 # This is the seam the two suites each half-test: the hook's --args string
 # meeting the plugin's parser, with no stub on either side.
 hook '{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/proj-alpha","session_id":"sess-a"}'
+zj action write-chars "/proj-alpha" >/dev/null 2>&1 || true
+sleep 1
 screen=$(dump)
 case "$screen" in
   *"claude"*) ok "a real hook event produces a row" ;;
@@ -153,6 +173,8 @@ case "$screen" in
   *"working"*) ok "the row carries the status the hook sent" ;;
   *) bad "the row carries the status the hook sent" "no 'working': $screen" ;;
 esac
+zj action write 27 >/dev/null 2>&1 || true
+sleep 1
 
 hook '{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt","cwd":"/tmp/proj-alpha","session_id":"sess-a"}'
 screen=$(dump)

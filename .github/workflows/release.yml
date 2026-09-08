@@ -56,7 +56,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file .github/release-notes.md \
             target/wasm32-wasip1/release/zj-agent-mob.wasm \
             init.sh \
             scripts/zj-agent-mob-hook.sh
