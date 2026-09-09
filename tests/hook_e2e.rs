@@ -1814,14 +1814,13 @@ fn a_fanned_out_pipe_carries_the_full_payload() {
 // Deeper hook integration
 // ---------------------------------------------------------------------------
 
-/// An interrupted turn used to fall through the catch-all and report nothing,
-/// so the row kept a `working` it could no longer justify until it aged out.
+/// Claude Code has no `Interrupt` event and never did, so a config asking for
+/// one was silently dropped. A mid-turn interrupt is not observable from hooks;
+/// the row reaches `idlewait` through Notification/idle_prompt instead.
 #[test]
-fn an_interrupt_reports_the_agent_back_at_its_prompt() {
+fn an_unknown_event_is_ignored() {
     let r = run(&ev("Interrupt"));
-    assert_eq!(r.field("status"), "idlewait");
-    assert_eq!(r.field("detail"), "interrupted");
-    assert_eq!(r.field("block"), "idle");
+    assert!(r.silent(), "unknown event should emit nothing, got: {:?}", r.pipes);
 }
 
 /// The model reaches the row, so a mixed-model fleet is legible at a glance.
