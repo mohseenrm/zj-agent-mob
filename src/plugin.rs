@@ -47,6 +47,8 @@ impl ZellijPlugin for State {
         ]);
         set_selectable(true);
 
+        self.own_plugin_id = host::own_plugin_id();
+
         self.rename_pane();
     }
 
@@ -75,6 +77,10 @@ impl ZellijPlugin for State {
             }
             Event::Timer(_) => self.on_tick(),
             Event::PaneUpdate(manifest) => {
+                if self.duplicate_of(&manifest).is_some() {
+                    host::close_self();
+                    return false;
+                }
                 self.reconcile(manifest);
                 // A pane appearing or closing is the cheapest signal that the
                 // set of running agents may have changed.

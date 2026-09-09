@@ -123,6 +123,7 @@ pub struct State {
     /// the agent kept running.
     pub(crate) action_error: Option<String>,
     pub(crate) grouping: Grouping,
+    pub(crate) own_plugin_id: u32,
 }
 
 /// A reply being composed in the panel, bound to the agent it will be sent to.
@@ -1193,6 +1194,22 @@ impl State {
             return true;
         }
         false
+    }
+
+    pub(crate) fn duplicate_of(&self, manifest: &PaneManifest) -> Option<u32> {
+        let mine = manifest
+            .panes
+            .values()
+            .flatten()
+            .find(|p| p.is_plugin && p.id == self.own_plugin_id)?;
+        let url = mine.plugin_url.as_deref()?;
+        manifest
+            .panes
+            .values()
+            .flatten()
+            .filter(|p| p.is_plugin && p.id < self.own_plugin_id && p.plugin_url.as_deref() == Some(url))
+            .map(|p| p.id)
+            .min()
     }
 
     pub(crate) fn reconcile(&mut self, manifest: PaneManifest) {
@@ -2396,6 +2413,148 @@ mod reconcile_tests {
             m.panes.entry(*tab).or_default().push(p);
         }
         m
+    }
+
+    const MOB: &str = "file:/home/u/.config/zellij/plugins/zj-agent-mob.wasm";
+
+    fn plugin_manifest(panes: &[(u32, &str)]) -> PaneManifest {
+        let mut m = PaneManifest {
+            panes: std::collections::HashMap::new(),
+        };
+        for (id, url) in panes {
+            let p = PaneInfo {
+                id: *id,
+                is_plugin: true,
+                plugin_url: Some((*url).to_string()),
+                ..Default::default()
+            };
+            m.panes.entry(0).or_default().push(p);
+        }
+        m
+    }
+
+    /// Zellij serializes floating plugin panes into the session layout, so a
+    /// resurrect restores them next to a freshly launched one and the panel
+    /// stacks a new copy every cycle. The lowest id is the survivor.
+    #[test]
+    fn a_resurrected_duplicate_recognises_the_older_instance() {
+        let s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        let m = plugin_manifest(&[(4, MOB), (12, MOB)]);
+        assert_eq!(s.duplicate_of(&m), Some(4));
+    }
+
+    #[test]
+    fn the_oldest_instance_is_nobodys_duplicate() {
+        let s = State {
+            own_plugin_id: 4,
+            ..Default::default()
+        };
+        let m = plugin_manifest(&[(4, MOB), (12, MOB), (30, MOB)]);
+        assert_eq!(s.duplicate_of(&m), None, "the lowest id must survive");
+    }
+
+    /// The whole cascade collapses to one survivor: every copy but the oldest
+    /// sees a lower id and closes itself.
+    #[test]
+    fn a_whole_cascade_collapses_to_one_survivor() {
+        let ids: Vec<u32> = (1..=28).collect();
+        let panes: Vec<(u32, &str)> = ids.iter().map(|i| (*i, MOB)).collect();
+        let m = plugin_manifest(&panes);
+        let survivors: Vec<u32> = ids
+            .iter()
+            .filter(|id| {
+                State {
+                    own_plugin_id: **id,
+                    ..Default::default()
+                }
+                .duplicate_of(&m)
+                .is_none()
+            })
+            .copied()
+            .collect();
+        assert_eq!(survivors, vec![1], "exactly one panel may remain");
+    }
+
+    /// Ids taken from a session that had actually cascaded: 74 copies of the
+    /// panel on contiguous ids from 3, alongside the built-ins that must be
+    /// left alone.
+    #[test]
+    fn the_measured_cascade_leaves_exactly_one_panel() {
+        let mut panes: Vec<(u32, &str)> = (3..=76).map(|i| (i, MOB)).collect();
+        panes.push((1, "zellij:tab-bar"));
+        panes.push((2, "zellij:status-bar"));
+        let m = plugin_manifest(&panes);
+        let survivors: Vec<u32> = (3..=76)
+            .filter(|id| {
+                State {
+                    own_plugin_id: *id,
+                    ..Default::default()
+                }
+                .duplicate_of(&m)
+                .is_none()
+            })
+            .collect();
+        assert_eq!(survivors, vec![3]);
+    }
+
+    /// A different plugin in the same session is not a copy of this one.
+    #[test]
+    fn another_plugin_is_not_a_duplicate() {
+        let s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        let m = plugin_manifest(&[(4, "zellij:status-bar"), (7, "zellij:tab-bar"), (12, MOB)]);
+        assert_eq!(s.duplicate_of(&m), None);
+    }
+
+    /// Terminal panes carry ids from a separate space, so a terminal sharing our
+    /// number must never be mistaken for an older panel.
+    #[test]
+    fn a_terminal_pane_is_never_a_duplicate() {
+        let s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        let mut m = plugin_manifest(&[(12, MOB)]);
+        m.panes.entry(0).or_default().push(PaneInfo {
+            id: 3,
+            is_plugin: false,
+            ..Default::default()
+        });
+        assert_eq!(s.duplicate_of(&m), None);
+    }
+
+    /// A manifest that does not list us yet says nothing about duplicates, and
+    /// closing on it would kill the only panel there is.
+    #[test]
+    fn an_absent_self_never_closes() {
+        let s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        let m = plugin_manifest(&[(4, MOB)]);
+        assert_eq!(s.duplicate_of(&m), None, "must not close before we appear");
+    }
+
+    /// `own_plugin_id` is 0 until `load()` runs, and nothing sorts below 0, so
+    /// an event arriving first can never close the only panel there is.
+    #[test]
+    fn an_unloaded_state_never_closes_itself() {
+        let m = plugin_manifest(&[(0, MOB)]);
+        assert_eq!(State::default().duplicate_of(&m), None);
+    }
+
+    #[test]
+    fn a_lone_panel_is_never_a_duplicate() {
+        let s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        assert_eq!(s.duplicate_of(&plugin_manifest(&[(12, MOB)])), None);
     }
 
     #[test]
