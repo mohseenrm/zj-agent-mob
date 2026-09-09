@@ -160,7 +160,6 @@ case "$event" in
     status=working ;;
   Stop)              status='done' ;;
   StopFailure)       status=failed ;;
-  Interrupt)         status=idlewait ;;
   PreCompact)        status=compact ;;
   PostCompact)       status=working ;;
   SubagentStart|SubagentStop|TaskCreated|TaskCompleted)
@@ -244,8 +243,6 @@ case "$event" in
     detail=${err_msg:-$err_type} ;;
   PreCompact)
     detail="compacting context (${compact_trigger:-auto})" ;;
-  Interrupt)
-    detail='interrupted' ;;
   PermissionRequest)
     detail="needs approval: ${tool_arg:-$tool_name}" ;;
   PreToolUse|PostToolUse|PostToolUseFailure)
@@ -275,7 +272,6 @@ case "$event" in
       permission_prompt)             block=tool ;;
       *)                             block=question ;;
     esac ;;
-  Interrupt) block=idle ;;
 esac
 
 followup=''

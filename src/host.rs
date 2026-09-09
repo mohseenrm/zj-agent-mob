@@ -3,9 +3,14 @@
 
 #[cfg(target_family = "wasm")]
 pub(crate) use zellij_tile::shim::{
-    close_terminal_pane, focus_terminal_pane, hide_self, open_command_pane_floating, run_command,
+    close_self, close_terminal_pane, focus_terminal_pane, hide_self, open_command_pane_floating, run_command,
     send_sigint_to_pane_id, set_timeout, show_self, switch_session_with_focus, write_chars_to_pane_id,
 };
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn own_plugin_id() -> u32 {
+    zellij_tile::shim::get_plugin_ids().plugin_id
+}
 
 /// Renames the pane this plugin is running in. Needs our own plugin id, which
 /// only the host can tell us, so it is a single call rather than two.
@@ -160,6 +165,10 @@ mod stub {
     pub(crate) fn run_command(_cmd: &[&str], _ctx: BTreeMap<String, String>) {}
     pub(crate) fn switch_session_with_focus(_name: &str, _tab: Option<usize>, _pane: Option<(u32, bool)>) {}
     pub(crate) fn rename_own_pane(_title: &str) {}
+    pub(crate) fn close_self() {}
+    pub(crate) fn own_plugin_id() -> u32 {
+        0
+    }
     pub(crate) fn write_verdict(_path: &str, _verdict: &str) {}
     pub(crate) fn append_approve_rule(_tool: &str) {}
     pub(crate) fn queue_followup(_session: &str, _pane_id: u32, _text: &str) {}
