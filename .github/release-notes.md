@@ -1,25 +1,27 @@
-The controls used to sit directly below the last agent, so they moved whenever the list changed. They now stay at the bottom of the pane while agent rows remain at the top.
+Fixes panels stacking up until a session fills with nested `Agent Mob` panes. One session hit 74 copies.
 
-## The fix
+Zellij saves floating plugin panes into the session layout. Resurrecting restored every saved copy, then the keybind launched another beside them, so each cycle left one more panel behind.
 
-- Bottom-aligned hints in the agent list, setup screen, and install screen.
-- Prompts and errors stay in the same footer area.
-- The tour now shows the new layout.
-- Unit tests and the real-Zellij harness cover the spacing.
+## Changes
+
+- The panel now closes itself when an older copy is already running. Any stack collapses to one.
+- Removed the `Interrupt` hook. Claude Code has no such event, so it never fired. Interrupted turns still show as `idlewait`.
 
 ## Upgrading
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.10.2/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.10.3/init.sh | sh
 ```
 
-Then reload the plugin, since Zellij caches compiled plugins:
+Reload the plugin, since Zellij caches compiled builds:
 
 ```sh
 zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
   "file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
 ```
 
-No hook changes in this release, so running agents do not need a restart.
+The hook changed in this release, so restart your agents after installing.
 
-**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.10.1...v0.10.2
+Already have a stack? The new build clears it on load. A session saved beforehand may restore it once more; start it again and it settles.
+
+**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.10.2...v0.10.3
