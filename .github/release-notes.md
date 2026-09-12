@@ -1,32 +1,57 @@
-Fixes a panel that could spin on load, filling the pane with stacked `Loading … zj-agent-mob.wasm` frames and leaving hook messages unanswered.
-
-## What went wrong
-
-When a second copy of the panel is open, the newer one closes itself so only one survives. But `close_self` is a request, not an instant exit: the pane keeps receiving updates until the host acts on it. The panel asked again on every one of those updates, dozens of times a second, which starved its own thread. Hook pipes then timed out waiting for it:
+The panel now updates itself. When a newer release is out, a line shows up in the footer:
 
 ```
-ERROR zellij_server::route: Action CliPipe did not complete within 1s timeout
+update available: v0.12.0 (press U)
 ```
 
-Upgrading in place was the usual way to hit this, since reloading the plugin briefly leaves two copies alive.
+Press <kbd>U</kbd> and the panel downloads the release, swaps the wasm, hook script and installer into place, and reloads itself. No shell, no reinstall, no leaving Zellij. This should be the last release you install by hand.
 
-## Changes
+## How it works
 
-- The panel asks to close once, then waits. If the older copy disappears first, it unlatches and goes back to rendering.
+On load the panel asks the installed `install.sh` for the latest tag:
+
+```sh
+~/.config/zj-agent-mob/install.sh check-update
+```
+
+The answer is cached for six hours in `~/.config/zj-agent-mob/update-check`, so ten sessions starting at once make one request. <kbd>U</kbd> then runs `install.sh --version <tag> plugin` and reloads the plugin once it exits cleanly. A failed update leaves the running version alone and prints the first error line in the footer; <kbd>U</kbd> retries.
+
+Some details worth knowing:
+
+- Updates never touch your agent hook settings. If you deliberately hooked only Claude or only Codex, it stays that way.
+- Other Zellij sessions keep the old code until they reload. Their next <kbd>U</kbd> finds the files already current and just reloads.
+- The install screen (<kbd>i</kbd>) now shows the running version in its header.
+- Rather not have the panel phone GitHub? Turn it off in the plugin config:
+
+```kdl
+LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
+    floating true
+    check_updates false
+}
+```
+
+## Installer fixes
+
+Two `init.sh` bugs the update path would have tripped over, fixed for manual installs too:
+
+- A from-release run used to copy its stale self over `~/.config/zj-agent-mob/install.sh` forever; it now fetches the installer from the release like everything else.
+- The wasm is swapped in with a rename instead of a plain `cp`, so a reload can never catch it half-written and two sessions updating at once cannot race.
 
 ## Upgrading
 
+One last time by hand:
+
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.11.1/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.12.0/init.sh | sh
 ```
 
-Reload the plugin, since Zellij caches compiled builds:
+Then reload the plugin, since Zellij caches compiled builds:
 
 ```sh
 zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
   "file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
 ```
 
-The hook is unchanged from v0.11.0, so agents started since then don't need restarting.
+The hook script is unchanged from v0.11.x, so running agents don't need restarting.
 
-**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.11.0...v0.11.1
+**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.11.1...v0.12.0
