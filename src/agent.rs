@@ -73,7 +73,20 @@ pub(crate) struct RowCtx<'a> {
     pub(crate) now: f64,
     pub(crate) cols: usize,
     pub(crate) show_cwd: bool,
+    /// Width of the identity column, sized per frame to the longest identity
+    /// on screen so `zj-agent-mob` is not clipped to fit a ten-char default.
+    pub(crate) id_width: usize,
     pub(crate) home: &'a str,
+}
+
+/// One subagent spawned by an agent this turn. Finished entries are kept until
+/// the next turn starts, so "what just ran" stays answerable.
+#[derive(Clone, Debug)]
+pub(crate) struct Subagent {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) started: f64,
+    pub(crate) done: Option<f64>,
 }
 
 pub(crate) struct Agent {
@@ -100,9 +113,14 @@ pub(crate) struct Agent {
     pub(crate) perm_mode: String,
     /// The model the agent is running, when the hook reported one.
     pub(crate) model: String,
-    /// Subagents currently running, and the distinct types seen this turn.
-    pub(crate) subagents: u32,
-    pub(crate) subagent_types: Vec<String>,
+    /// The git identity the hook derived from the agent's cwd: the main
+    /// checkout's dir name, the worktree dir name when the cwd is a linked
+    /// worktree, and the checked-out branch. All empty outside a repo.
+    pub(crate) repo: String,
+    pub(crate) wt: String,
+    pub(crate) branch: String,
+    /// This turn's subagents, running and finished.
+    pub(crate) subagents: Vec<Subagent>,
     pub(crate) tasks_total: u32,
     pub(crate) tasks_done: u32,
     /// False once the agent's session stops being listed by Zellij.
@@ -178,12 +196,54 @@ impl Agent {
         matches!(self.status, Status::Waiting | Status::IdleWait)
     }
 
-    /// Falls back to the pane title when there is no transcript summary.
+    /// A pane title the user set themselves, as opposed to Zellij's default
+    /// (the running command) or its numbered fallback. A deliberate rename is
+    /// the task in the user's own words, so it outranks anything derived.
+    pub(crate) fn custom_title(&self) -> Option<&str> {
+        let t = self.pane_title.trim();
+        let default =
+            t.is_empty() || t == self.tool || t.starts_with(&format!("{} ", self.tool)) || t.starts_with("Pane #");
+        match default {
+            true => None,
+            false => Some(t),
+        }
+    }
+
+    /// A renamed pane wins over the hook's summary; the summary is the
+    /// fallback, and the raw title the last resort.
     pub(crate) fn display_task(&self) -> &str {
+        if let Some(t) = self.custom_title() {
+            return t;
+        }
         match self.task.as_deref() {
             Some(t) if !t.is_empty() => t,
             _ => &self.pane_title,
         }
+    }
+
+    /// The identity cell: `repo/wt` once git identity is known, the repo alone
+    /// outside a worktree, the cwd basename before any hook reported.
+    pub(crate) fn identity(&self) -> String {
+        match (self.repo.is_empty(), self.wt.is_empty()) {
+            (false, false) => format!("{}/{}", self.repo, self.wt),
+            (false, true) => self.repo.clone(),
+            _ => self.project().to_string(),
+        }
+    }
+
+    pub(crate) fn subagents_live(&self) -> usize {
+        self.subagents.iter().filter(|s| s.done.is_none()).count()
+    }
+
+    /// Distinct subagent kinds seen this turn, in spawn order.
+    pub(crate) fn subagent_kinds(&self) -> Vec<String> {
+        let mut kinds: Vec<String> = Vec::new();
+        for s in &self.subagents {
+            if !s.kind.is_empty() && !kinds.contains(&s.kind) {
+                kinds.push(s.kind.clone());
+            }
+        }
+        kinds
     }
 
     /// One agent's row. The icon and status label are themed; the rest is plain.
@@ -194,6 +254,7 @@ impl Agent {
             now,
             cols,
             show_cwd,
+            id_width,
             home,
         } = ctx;
         let marker = if selected { "\u{25b6}" } else { " " };
@@ -228,17 +289,25 @@ impl Agent {
         let foreign = !home.is_empty() && self.session() != home;
         let mut session_range = None;
         if show_cwd {
-            let col = match foreign {
-                true => self.session(),
-                false => self.project(),
+            // A foreign row names its session unless git identity says which
+            // worktree it is, which is the better answer; the session then
+            // moves to the detail line.
+            let col = match foreign && self.repo.is_empty() {
+                true => self.session().to_string(),
+                false => self.identity(),
             };
-            text.push_str("  ");
-            let start = chars(&text);
-            let cell = format!("{:<10}", truncate(col, 10));
-            if foreign {
-                session_range = Some(start..start + chars(cell.trim_end()));
+            // The frame's width is capped by the room this row actually has,
+            // so a wide identity never pushes the row past `cols`.
+            let w = id_width.min(cols.saturating_sub(chars(&text) + 2));
+            if w > 0 {
+                text.push_str("  ");
+                let start = chars(&text);
+                let cell = format!("{:<w$}", truncate(&col, w), w = w);
+                if foreign {
+                    session_range = Some(start..start + chars(cell.trim_end()));
+                }
+                text.push_str(&cell);
             }
-            text.push_str(&cell);
         }
         // Only rendered when the mode is risky enough to differ from `default`,
         // and only when it fits: a narrow pane drops it like the other columns.
@@ -251,6 +320,23 @@ impl Agent {
             let start = chars(&text);
             text.push_str(&badge);
             Some(start..start + chars(&badge))
+        } else {
+            None
+        };
+        // The fan-out badge: live count while subagents run, a check once the
+        // last one finished this turn. On the main row so it survives the
+        // narrow widths that drop the detail line.
+        let live = self.subagents_live();
+        let sub_badge = match (live, self.subagents.is_empty()) {
+            (0, true) => String::new(),
+            (0, false) => "\u{2442}\u{2713}".to_string(),
+            (n, _) => format!("\u{2442}{}", n),
+        };
+        let sub_range = if !sub_badge.is_empty() && text.chars().count() + 2 + chars(&sub_badge) <= cols {
+            text.push_str("  ");
+            let start = chars(&text);
+            text.push_str(&sub_badge);
+            Some((start..start + chars(&sub_badge), live > 0))
         } else {
             None
         };
@@ -270,6 +356,12 @@ impl Agent {
         if let Some(r) = mode_range {
             text = text.color_range(2, r);
         }
+        if let Some((r, running)) = sub_range {
+            text = match running {
+                true => text.color_range(Status::Working.color_level(), r),
+                false => text.color_range(DIM_LEVEL, r),
+            };
+        }
         if let Some(r) = session_range {
             text = text.color_range(DIM_LEVEL, r);
         }
@@ -281,7 +373,7 @@ impl Agent {
     }
 
     /// The dimmed second line under an agent's row.
-    pub(crate) fn detail_item(&self, kill_armed: bool, cols: usize) -> Text {
+    pub(crate) fn detail_item(&self, kill_armed: bool, now: f64, foreign: bool, cols: usize) -> Text {
         let mut bits: Vec<String> = Vec::new();
         if kill_armed {
             bits.push("press x again to close pane".to_string());
@@ -308,11 +400,15 @@ impl Agent {
                 bits.insert(0, format!("wants: {}", b.label()));
             }
         }
-        if self.subagents > 0 {
-            bits.push(match self.subagent_types.is_empty() {
-                true => format!("{} subagents", self.subagents),
-                false => format!("{} subagents: {}", self.subagents, self.subagent_types.join(", ")),
-            });
+        // A renamed pane displaced the hook's summary from the main row; the
+        // summary still says what the agent is actually doing, so it lands here.
+        if self.custom_title().is_some() {
+            if let Some(t) = self.task.as_deref().filter(|t| !t.is_empty()) {
+                bits.push(t.to_string());
+            }
+        }
+        if !self.subagents.is_empty() {
+            bits.push(self.subagent_summary(now));
         }
         // Native task counts are a real progress signal; turns are a proxy.
         if self.tasks_total > 0 {
@@ -322,6 +418,16 @@ impl Agent {
         }
         if !self.model.is_empty() {
             bits.push(short_model(&self.model));
+        }
+        // The identity column shows the worktree dir; the branch only earns a
+        // mention when it does not match, which is when the two can mislead.
+        if !self.wt.is_empty() && !self.branch.is_empty() && self.branch != self.wt {
+            bits.push(format!("branch:{}", self.branch));
+        }
+        // A foreign row whose identity cell went to `repo/wt` still has to say
+        // where it lives; a bare pane number is ambiguous across sessions.
+        if foreign && !self.repo.is_empty() {
+            bits.push(format!("session:{}", self.session()));
         }
         if let Some(t) = self.tab {
             bits.push(format!("tab:{}", t + 1));
@@ -343,6 +449,80 @@ impl Agent {
         }
     }
 
+    /// The fan-out in one phrase: who is running and for how long, then how
+    /// many finished. `o` expands this into one row per subagent.
+    fn subagent_summary(&self, now: f64) -> String {
+        let live: Vec<&Subagent> = self.subagents.iter().filter(|s| s.done.is_none()).collect();
+        let done = self.subagents.len() - live.len();
+        let named: Vec<String> = live
+            .iter()
+            .take(3)
+            .map(|s| {
+                let kind = match s.kind.is_empty() {
+                    true => "subagent",
+                    false => s.kind.as_str(),
+                };
+                format!("{} {}", kind, fmt_elapsed(now - s.started))
+            })
+            .collect();
+        let extra = live.len().saturating_sub(3);
+        let mut out = String::from("\u{2442} ");
+        if !live.is_empty() {
+            out.push_str(&format!("{} running ({}", live.len(), named.join(", ")));
+            if extra > 0 {
+                out.push_str(&format!(", +{}", extra));
+            }
+            out.push(')');
+            if done > 0 {
+                out.push_str(&format!(", {} done", done));
+            }
+        } else {
+            out.push_str(&format!("{} done", done));
+            let kinds = self.subagent_kinds();
+            if !kinds.is_empty() {
+                out.push_str(&format!(" ({})", kinds.join(", ")));
+            }
+        }
+        out
+    }
+
+    /// One row per subagent, shown under the agent while `o` has it expanded.
+    /// A finished entry shows its total runtime rather than a still-running
+    /// clock.
+    pub(crate) fn subagent_rows(&self, now: f64, cols: usize) -> Vec<Text> {
+        self.subagents
+            .iter()
+            .map(|s| {
+                let kind = match s.kind.is_empty() {
+                    true => "subagent",
+                    false => s.kind.as_str(),
+                };
+                let (label, elapsed) = match s.done {
+                    Some(at) => ("done", fmt_elapsed(at - s.started)),
+                    None => ("running", fmt_elapsed(now - s.started)),
+                };
+                let line = format!(
+                    "        \u{2442} {:<14} {:<8} {:>6}",
+                    truncate(kind, 14),
+                    label,
+                    elapsed
+                );
+                let text = Text::new(truncate(&line, cols));
+                match s.done {
+                    Some(_) => text.color_range(DIM_LEVEL, ..),
+                    None => {
+                        let start = chars("        \u{2442} ") + 15;
+                        let end = (start + chars(label)).min(cols);
+                        match start < end {
+                            true => text.color_range(Status::Working.color_level(), start..end),
+                            false => text,
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn project(&self) -> &str {
         self.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.cwd)
     }
@@ -353,6 +533,10 @@ impl Agent {
     pub(crate) fn group_key(&self, grouping: crate::state::Grouping) -> &str {
         match grouping {
             crate::state::Grouping::Session => self.session(),
+            // The repo, not the cwd basename: worktrees of one repo belong
+            // under one heading, and the row's identity cell already names
+            // which worktree each is.
+            _ if !self.repo.is_empty() => &self.repo,
             _ => match self.project() {
                 "" => "(no cwd)",
                 p => p,
@@ -388,8 +572,10 @@ mod render_tests {
             pane_title: "claude".into(),
             alive: true,
             perm_mode: String::new(),
-            subagents: 0,
-            subagent_types: Vec::new(),
+            repo: String::new(),
+            wt: String::new(),
+            branch: String::new(),
+            subagents: Vec::new(),
             tasks_total: 0,
             tasks_done: 0,
             session_alive: true,
@@ -405,6 +591,7 @@ mod render_tests {
             now,
             cols,
             show_cwd,
+            id_width: 10,
             home,
         }
     }
@@ -498,7 +685,7 @@ mod render_tests {
 
     #[test]
     fn detail_line_lists_activity_turns_tab_and_pane() {
-        let d = item_text(&agent().detail_item(false, 110));
+        let d = item_text(&agent().detail_item(false, 0.0, false, 110));
         assert!(d.contains("Edit src/webhook.rs"));
         assert!(d.contains("4 turns"));
         assert!(
@@ -511,7 +698,7 @@ mod render_tests {
 
     #[test]
     fn kill_armed_replaces_activity_with_confirmation() {
-        let d = item_text(&agent().detail_item(true, 110));
+        let d = item_text(&agent().detail_item(true, 0.0, false, 110));
         assert!(d.contains("press x again"), "{:?}", d);
         assert!(!d.contains("Edit src/webhook.rs"));
     }
@@ -536,13 +723,68 @@ mod render_tests {
         }
     }
 
+    fn sub(id: &str, kind: &str, started: f64, done: Option<f64>) -> Subagent {
+        Subagent {
+            id: id.into(),
+            kind: kind.into(),
+            started,
+            done,
+        }
+    }
+
     #[test]
-    fn detail_line_lists_subagents_with_types() {
+    fn detail_line_summarizes_the_fan_out() {
         let mut a = agent();
-        a.subagents = 2;
-        a.subagent_types = vec!["Explore".into(), "Plan".into()];
-        let d = item_text(&a.detail_item(false, 110));
-        assert!(d.contains("2 subagents: Explore, Plan"), "{:?}", d);
+        a.subagents = vec![sub("a", "Explore", 0.0, None), sub("b", "Plan", 48.0, None)];
+        let d = item_text(&a.detail_item(false, 60.0, false, 110));
+        assert!(d.contains("\u{2442} 2 running (Explore 1m00s, Plan 12s)"), "{:?}", d);
+    }
+
+    #[test]
+    fn finished_subagents_stay_counted_until_the_next_turn() {
+        let mut a = agent();
+        a.subagents = vec![sub("a", "Explore", 0.0, Some(30.0)), sub("b", "Plan", 0.0, None)];
+        let d = item_text(&a.detail_item(false, 60.0, false, 110));
+        assert!(d.contains("1 running"), "{:?}", d);
+        assert!(d.contains("1 done"), "{:?}", d);
+
+        a.subagents = vec![sub("a", "Explore", 0.0, Some(30.0))];
+        let d = item_text(&a.detail_item(false, 60.0, false, 110));
+        assert!(d.contains("\u{2442} 1 done (Explore)"), "{:?}", d);
+    }
+
+    /// The badge is the narrow-pane fallback: the detail line disappears under
+    /// 60 columns, and the fan-out must not disappear with it.
+    #[test]
+    fn the_main_row_carries_a_subagent_badge() {
+        let mut a = agent();
+        assert!(!row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains('\u{2442}'));
+        a.subagents = vec![sub("a", "Explore", 0.0, None), sub("b", "Plan", 0.0, None)];
+        assert!(
+            row(&a, 0, false, "\u{25cf}", 0.0, 110, true).contains("\u{2442}2"),
+            "live count"
+        );
+        for e in a.subagents.iter_mut() {
+            e.done = Some(10.0);
+        }
+        assert!(
+            row(&a, 0, false, "\u{25cf}", 20.0, 110, true).contains("\u{2442}\u{2713}"),
+            "a drained fan-out shows the check"
+        );
+    }
+
+    #[test]
+    fn expanded_subagent_rows_show_state_and_elapsed() {
+        let mut a = agent();
+        a.subagents = vec![sub("a", "Explore", 0.0, None), sub("b", "Plan", 10.0, Some(55.0))];
+        let rows: Vec<String> = a.subagent_rows(70.0, 110).iter().map(item_text).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("Explore") && rows[0].contains("running") && rows[0].contains("1m10s"));
+        assert!(rows[1].contains("Plan") && rows[1].contains("done") && rows[1].contains("45s"));
+        for (i, r) in rows.iter().enumerate() {
+            assert!(r.chars().count() <= 110, "row {} too wide: {:?}", i, r);
+            assert!(!r.contains('\n'));
+        }
     }
 
     #[test]
@@ -550,7 +792,7 @@ mod render_tests {
         let mut a = agent();
         a.tasks_total = 7;
         a.tasks_done = 4;
-        let d = item_text(&a.detail_item(false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert!(d.contains("4/7 tasks"), "{:?}", d);
         assert!(!d.contains("4 turns"), "native counts win over the proxy: {:?}", d);
     }
@@ -609,7 +851,7 @@ mod render_tests {
         let mut a = agent();
         a.detail = Some("Bash rm -rf node_modules".into());
         a.block = Some(Block::Plan);
-        let d = item_text(&a.detail_item(false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert!(d.contains("wants: plan"), "{:?}", d);
     }
 
@@ -620,7 +862,7 @@ mod render_tests {
         let mut a = agent();
         a.detail = Some("needs approval: git push".into());
         a.block = Some(Block::Tool);
-        let d = item_text(&a.detail_item(false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert_eq!(
             d.matches("permission").count(),
             0,
@@ -637,7 +879,7 @@ mod render_tests {
         let mut a = agent();
         a.detail = Some("needs approval: ExitPlanMode".into());
         a.block = Some(Block::Plan);
-        let d = item_text(&a.detail_item(false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert!(d.contains("wants: plan"), "{:?}", d);
     }
 
@@ -647,7 +889,7 @@ mod render_tests {
             let mut a = agent();
             a.block = Some(Block::Question);
             a.detail = Some("x".repeat(200));
-            let d = item_text(&a.detail_item(false, cols));
+            let d = item_text(&a.detail_item(false, 0.0, false, cols));
             assert!(d.chars().count() <= cols, "cols={} produced {:?}", cols, d);
         }
     }
@@ -658,7 +900,7 @@ mod render_tests {
         a.status = Status::Discovered;
         a.detail = None;
         a.turns = 0;
-        let d = item_text(&a.detail_item(false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert!(d.contains("no report yet"), "{:?}", d);
         assert!(d.contains("pane:3"), "{:?}", d);
     }
@@ -679,13 +921,13 @@ mod render_tests {
     fn dead_pane_is_flagged() {
         let mut a = agent();
         a.alive = false;
-        assert!(item_text(&a.detail_item(false, 110)).contains("(pane gone)"));
+        assert!(item_text(&a.detail_item(false, 0.0, false, 110)).contains("(pane gone)"));
     }
 
     #[test]
     fn detail_line_respects_cols() {
         for cols in [30usize, 60, 110] {
-            let d = item_text(&agent().detail_item(false, cols));
+            let d = item_text(&agent().detail_item(false, 0.0, false, cols));
             assert!(d.chars().count() <= cols, "cols={} got {:?}", cols, d);
         }
     }
@@ -722,6 +964,111 @@ mod render_tests {
         }
     }
 
+    /// The rename is the task in the user's own words, so it outranks the
+    /// hook's summary; the summary moves down rather than vanishing.
+    #[test]
+    fn a_renamed_pane_wins_over_the_hook_summary() {
+        let mut a = agent();
+        a.pane_title = "fix webhook retries".into();
+        assert_eq!(a.display_task(), "fix webhook retries");
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        assert!(d.contains("Add retry to webhook client"), "{:?}", d);
+    }
+
+    /// Zellij's default titles are the command or a pane number, which say
+    /// nothing the row does not already.
+    #[test]
+    fn a_default_pane_title_is_not_a_task() {
+        let mut a = agent();
+        for t in ["claude", "claude --resume", "Pane #3", "", "  "] {
+            a.pane_title = t.into();
+            assert_eq!(a.display_task(), "Add retry to webhook client", "title {:?}", t);
+        }
+    }
+
+    #[test]
+    fn git_identity_shows_repo_and_worktree() {
+        let mut a = agent();
+        assert_eq!(a.identity(), "api", "cwd basename before git identity");
+        a.repo = "zj-agent-mob".into();
+        assert_eq!(a.identity(), "zj-agent-mob");
+        a.wt = "fuzzy-find".into();
+        assert_eq!(a.identity(), "zj-agent-mob/fuzzy-find");
+        let mut c = ctx(false, "\u{25cf}", 0.0, 110, true, "mob");
+        c.id_width = 24;
+        let r = item_text(&a.list_item(0, c));
+        assert!(r.contains("zj-agent-mob/fuzzy-find"), "{:?}", r);
+    }
+
+    /// The clamp floor keeps the pinned ten-char layout; a longer identity gets
+    /// the width the frame computed for it instead of a hard clip.
+    #[test]
+    fn the_identity_column_width_is_the_contexts() {
+        let mut a = agent();
+        a.cwd = "/Users/x/Projects/zj-agent-mob".into();
+        let narrow = item_text(&a.list_item(0, ctx(false, "\u{25cf}", 0.0, 110, true, "mob")));
+        assert!(
+            narrow.contains("zj-agent-\u{2026}"),
+            "width 10 still clips: {:?}",
+            narrow
+        );
+        let mut c = ctx(false, "\u{25cf}", 0.0, 110, true, "mob");
+        c.id_width = 12;
+        let wide = item_text(&a.list_item(0, c));
+        assert!(wide.contains("zj-agent-mob"), "{:?}", wide);
+        for cols in [40usize, 50, 60, 80, 110] {
+            let mut c = ctx(true, "\u{25cf}", 0.0, cols, cols >= 50, "mob");
+            c.id_width = 24;
+            let r = item_text(&a.list_item(0, c));
+            assert!(r.chars().count() <= cols, "cols={} produced {:?}", cols, r);
+        }
+    }
+
+    /// A foreign row with git identity shows the worktree - the better answer -
+    /// and its session moves to the detail line.
+    #[test]
+    fn a_foreign_row_with_git_identity_names_the_worktree() {
+        let mut a = agent();
+        a.repo = "zj-agent-mob".into();
+        a.wt = "fuzzy-find".into();
+        let mut c = ctx(false, "\u{25cf}", 0.0, 110, true, "elsewhere");
+        c.id_width = 24;
+        let r = item_text(&a.list_item(0, c));
+        assert!(r.contains("zj-agent-mob/fuzzy-find"), "{:?}", r);
+        assert!(!r.contains("mob "), "session leaves the main row: {:?}", r);
+        let d = item_text(&a.detail_item(false, 0.0, true, 110));
+        assert!(d.contains("session:mob"), "{:?}", d);
+    }
+
+    #[test]
+    fn the_branch_appears_only_when_it_differs_from_the_worktree() {
+        let mut a = agent();
+        a.repo = "zj-agent-mob".into();
+        a.wt = "fuzzy-find".into();
+        a.branch = "fuzzy-find".into();
+        assert!(!item_text(&a.detail_item(false, 0.0, false, 110)).contains("branch:"));
+        a.branch = "feat/fuzzy".into();
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        assert!(d.contains("branch:feat/fuzzy"), "{:?}", d);
+    }
+
+    /// Two worktrees of one repo group together; the identity cell already says
+    /// which worktree each row is.
+    #[test]
+    fn worktrees_of_one_repo_share_a_group() {
+        let mut a = agent();
+        a.repo = "zj-agent-mob".into();
+        a.wt = "fuzzy-find".into();
+        assert_eq!(a.group_key(crate::state::Grouping::Project), "zj-agent-mob");
+        assert_eq!(a.group_key(crate::state::Grouping::Session), "mob");
+        a.repo = String::new();
+        assert_eq!(
+            a.group_key(crate::state::Grouping::Project),
+            "api",
+            "no git identity falls back to the cwd basename"
+        );
+    }
+
     /// With no session known yet every row would otherwise read as foreign.
     #[test]
     fn an_unknown_home_session_leaves_rows_local() {
@@ -741,7 +1088,7 @@ mod render_tests {
             "a gone session is not merely stale: {:?}",
             row
         );
-        let d = item_text(&a.detail_item(false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert!(d.contains("(session exited)"), "{:?}", d);
         assert!(!d.contains("(pane gone)"), "the session is the bigger fact: {:?}", d);
     }
@@ -790,7 +1137,7 @@ mod render_tests {
     fn rows_contain_no_embedded_newlines() {
         let a = agent();
         assert!(!row(&a, 0, true, "\u{280b}", 10.0, 110, true).contains('\n'));
-        assert!(!item_text(&a.detail_item(false, 110)).contains('\n'));
+        assert!(!item_text(&a.detail_item(false, 0.0, false, 110)).contains('\n'));
     }
 
     /// Coming back from a banner should not mean re-scanning the whole list.
@@ -865,14 +1212,14 @@ mod model_tests {
     fn the_model_appears_on_the_detail_line() {
         let mut a = super::render_tests::agent();
         a.model = "claude-sonnet-4-5-20250929".into();
-        let line = crate::util::testing::item_text(&a.detail_item(false, 200));
+        let line = crate::util::testing::item_text(&a.detail_item(false, 0.0, false, 200));
         assert!(line.contains("sonnet-4-5"), "{:?}", line);
     }
 
     #[test]
     fn no_model_adds_nothing_to_the_line() {
         let a = super::render_tests::agent();
-        let line = crate::util::testing::item_text(&a.detail_item(false, 200));
+        let line = crate::util::testing::item_text(&a.detail_item(false, 0.0, false, 200));
         assert!(!line.contains("sonnet"), "{:?}", line);
     }
 }

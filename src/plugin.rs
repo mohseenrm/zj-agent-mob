@@ -533,6 +533,22 @@ impl State {
         // A detail line per agent needs two rows each, plus header and footer.
         let detail_lines = rows >= 4 + visible.len() * 2 && width >= 60;
         let show_cwd = width >= 50;
+        // The identity column is sized to the longest identity actually on
+        // screen, so `zj-agent-mob` is not clipped to a ten-char default while
+        // a fleet of short names pays nothing.
+        let id_width = visible
+            .iter()
+            .map(|&i| {
+                let a = &self.agents[i];
+                let foreign = !self.session_name.is_empty() && a.session() != self.session_name;
+                match foreign && a.repo.is_empty() {
+                    true => chars(a.session()),
+                    false => chars(&a.identity()),
+                }
+            })
+            .max()
+            .unwrap_or(0)
+            .clamp(10, 24);
 
         // Only the first row of a run gets a heading, so a group of six costs
         // one header row rather than six. Suppressed while finding: match order
@@ -577,11 +593,16 @@ impl State {
                         now: self.now,
                         cols: width,
                         show_cwd,
+                        id_width,
                         home: &self.session_name,
                     },
                 ));
+                let foreign = !self.session_name.is_empty() && agent.session() != self.session_name;
                 if detail_lines {
-                    g.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), width));
+                    g.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), self.now, foreign, width));
+                }
+                if detail_lines && self.subs_open.as_ref() == Some(&agent.id) {
+                    g.extend(agent.subagent_rows(self.now, width));
                 }
                 // The prompt belongs to one agent, so it renders under that
                 // row. Not while finding: ask and reply act on the selection,
@@ -1291,6 +1312,7 @@ mod find_render_tests {
                 now: 0.0,
                 cols: 100,
                 show_cwd: false,
+                id_width: 10,
                 home: "mob",
             },
         ));

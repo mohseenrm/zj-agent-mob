@@ -92,7 +92,7 @@ peer_records() {
     [ -f "$_rec" ] || continue
     _name=${_rec##*/}
     case "$_name" in
-      panel.*|inflight.*|*.tmp) continue ;;
+      panel.*|inflight.*|git.*|*.tmp) continue ;;
     esac
     [ "$_name" = "$_self" ] && continue
     _line=$(head -n 1 "$_rec" 2>/dev/null) || continue
@@ -132,6 +132,7 @@ eval "$(printf '%s' "$json" | jq -r '
        notif_type=\(.notification_type // "")
        perm_mode=\(.permission_mode // "")
        agent_type=\(.agent_type // "")
+       agent_id=\(.agent_id // "")
        err_type=\(.error_type // "")
        err_msg=\(.error_message // "")
        model=\(.model // "")
@@ -305,8 +306,51 @@ esac
 # `default` is the common case and would be noise on every row.
 [ "$perm_mode" = default ] && perm_mode=''
 agent_type=$(sanitize "$agent_type")
+agent_id=$(sanitize "$agent_id")
 perm_mode=$(sanitize "$perm_mode")
 model=$(sanitize "$model")
+
+# Git identity: the repo, the worktree dir when cwd is a linked worktree, and
+# the branch. Derived at most once per cwd and cached, because this runs on the
+# hot path of every tool call: only a cache miss (first event, or the agent
+# cd'd somewhere new) pays for git. Values are cached already sanitized.
+repo=''; wt=''; branch=''
+if [ -n "$cwd" ] && command -v git >/dev/null 2>&1; then
+  gdir=$(spool_dir)
+  gfile="$gdir/git.$SESSION.$ZELLIJ_PANE_ID"
+  cached=$(head -n 1 "$gfile" 2>/dev/null || true)
+  case "$cached" in
+    "$cwd|"*)
+      rest=${cached#*|}
+      repo=${rest%%|*}; rest=${rest#*|}
+      wt=${rest%%|*}; branch=${rest#*|} ;;
+    *)
+      gitout=$(git -C "$cwd" rev-parse --path-format=absolute \
+        --show-toplevel --git-common-dir --abbrev-ref HEAD 2>/dev/null) || gitout=''
+      if [ -n "$gitout" ]; then
+        top=$(printf '%s\n' "$gitout" | sed -n 1p)
+        common=$(printf '%s\n' "$gitout" | sed -n 2p)
+        branch=$(printf '%s\n' "$gitout" | sed -n 3p)
+        main=${common%/.git}
+        # A linked worktree's common dir lives under another checkout; the
+        # main checkout's is its own toplevel.
+        if [ -n "$top" ] && [ "$main" != "$common" ] && [ "$main" != "$top" ]; then
+          repo=${main##*/}
+          wt=${top##*/}
+        else
+          repo=${top##*/}
+        fi
+        [ "$branch" = HEAD ] && branch=''
+      fi
+      repo=$(sanitize "$repo"); wt=$(sanitize "$wt"); branch=$(sanitize "$branch")
+      [ -d "$gdir" ] || { mkdir -p "$gdir" 2>/dev/null && chmod 700 "$gdir" 2>/dev/null; }
+      if [ -d "$gdir" ] && printf '%s|%s|%s|%s\n' "$cwd" "$repo" "$wt" "$branch" > "$gfile.$$.tmp" 2>/dev/null; then
+        mv -f "$gfile.$$.tmp" "$gfile" 2>/dev/null || rm -f "$gfile.$$.tmp" 2>/dev/null || true
+      else
+        rm -f "$gfile.$$.tmp" 2>/dev/null || true
+      fi ;;
+  esac
+fi
 
 if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
   mkdir -p "$HOME/.cache/zj-agent-mob"
@@ -315,7 +359,7 @@ if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
     >> "$HOME/.cache/zj-agent-mob/hook.log"
 fi
 
-ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,tool_secs=$tool_secs,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
+ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,agent_id=$agent_id,repo=$repo,wt=$wt,branch=$branch,tool_secs=$tool_secs,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
 
 zellij pipe --name agent-status --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
 
@@ -373,7 +417,7 @@ if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ende
     if [ -z "$status" ]; then
       SKIP_SPOOL=1
     fi
-    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type"
+    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,repo=$repo,wt=$wt,branch=$branch"
     # Rename is atomic within a filesystem, so a reader sees the old record or
     # the new one, never a half-written one. $$ keeps concurrent hooks apart.
     if [ "${SKIP_SPOOL:-0}" != "1" ] && printf 'ts=%s,%s\n' "$(date +%s)" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then
@@ -385,9 +429,10 @@ if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ende
 fi
 
 # SessionEnd retires the agent, so its record must not outlive it and colour a
-# recycled pane id later.
+# recycled pane id later. The git cache goes with it: the next occupant of this
+# pane may sit in a different checkout.
 if [ "$status" = ended ] && [ -n "$SESSION" ]; then
-  rm -f "$(spool_dir)/$SESSION.$ZELLIJ_PANE_ID" 2>/dev/null || true
+  rm -f "$(spool_dir)/$SESSION.$ZELLIJ_PANE_ID" "$(spool_dir)/git.$SESSION.$ZELLIJ_PANE_ID" 2>/dev/null || true
 fi
 
 # Answering a permission prompt from the panel.

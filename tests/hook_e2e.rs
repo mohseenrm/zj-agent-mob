@@ -374,6 +374,119 @@ fn identifying_fields_reach_the_args() {
 }
 
 #[test]
+fn subagent_events_forward_the_agent_id() {
+    let r = run(&serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_id": "sub-123",
+        "agent_type": "Explore",
+    })
+    .to_string());
+    assert_eq!(r.field("agent_id"), "sub-123");
+    assert_eq!(r.field("agent_type"), "Explore");
+    assert_eq!(r.field("subagent_delta"), "1");
+}
+
+// ---------------------------------------------------------------------------
+// git identity
+// ---------------------------------------------------------------------------
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A committed repo the identity tests can hang worktrees off.
+fn seed_repo(h: &Hook) -> PathBuf {
+    let repo = h.path("myrepo");
+    fs::create_dir_all(&repo).expect("mkdir repo");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("f"), "x").expect("seed file");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "x"]);
+    repo
+}
+
+fn session_start_in(dir: &Path) -> String {
+    serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "cwd": dir.to_string_lossy(),
+    })
+    .to_string()
+}
+
+#[test]
+fn a_main_checkout_reports_repo_and_branch() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let h = Hook::new();
+    let repo = seed_repo(&h);
+    let r = h.run(&session_start_in(&repo));
+    assert_eq!(r.field("repo"), "myrepo");
+    assert_eq!(r.field("wt"), "", "the main checkout is not a worktree");
+    assert_eq!(r.field("branch"), "main");
+    assert!(
+        h.path("spool/git..3").exists(),
+        "the derivation is cached so tool events never fork git"
+    );
+}
+
+#[test]
+fn a_linked_worktree_reports_repo_worktree_and_branch() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let h = Hook::new();
+    let repo = seed_repo(&h);
+    git(&repo, &["worktree", "add", "-q", "-b", "feat/x", "../feat-wt"]);
+    let r = h.run(&session_start_in(&h.path("feat-wt")));
+    assert_eq!(r.field("repo"), "myrepo", "the repo is the main checkout's name");
+    assert_eq!(r.field("wt"), "feat-wt");
+    assert_eq!(r.field("branch"), "feat/x");
+}
+
+#[test]
+fn outside_a_repo_the_identity_fields_are_empty() {
+    let h = Hook::new();
+    let dir = h.path("plain");
+    fs::create_dir_all(&dir).expect("mkdir");
+    let r = h.run(&session_start_in(&dir));
+    assert_eq!(r.field("repo"), "");
+    assert_eq!(r.field("wt"), "");
+    assert_eq!(r.field("branch"), "");
+}
+
+/// The cache is keyed by cwd: an agent that moves to another checkout must not
+/// keep wearing the old identity.
+#[test]
+fn a_changed_cwd_rederives_the_identity() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let h = Hook::new();
+    let repo = seed_repo(&h);
+    assert_eq!(h.run(&session_start_in(&repo)).field("repo"), "myrepo");
+    let plain = h.path("plain");
+    fs::create_dir_all(&plain).expect("mkdir");
+    let r = h.run(&session_start_in(&plain));
+    assert_eq!(r.field("repo"), "", "the old repo must not stick to a new cwd");
+}
+
+#[test]
 fn the_tool_can_be_overridden() {
     let r = Hook::new().env("ZJ_AGENT_TOOL", "codex").run(&ev("Stop"));
     assert_eq!(r.field("tool"), "codex");

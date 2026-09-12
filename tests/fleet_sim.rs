@@ -125,9 +125,17 @@ fn subagent_counters_return_to_zero_over_a_turn() {
     }
     let (_, subs, _, _) = sim.counters()[0].clone();
     assert_eq!(subs, 0, "every subagent that started also stopped");
+    assert_eq!(
+        sim.subagent_types(0),
+        vec!["type0", "type1", "type2"],
+        "finished subagents stay as this turn's history"
+    );
+
+    sim.status(&args(&[("pane_id", "1"), ("status", "done"), ("session_id", "s")]));
+    sim.status(&args(&[("pane_id", "1"), ("status", "working"), ("session_id", "s")]));
     assert!(
         sim.subagent_types(0).is_empty(),
-        "the type list must clear with the last subagent"
+        "the next turn retires the previous turn's fan-out"
     );
 }
 

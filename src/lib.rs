@@ -170,7 +170,7 @@ pub mod testing {
                 .map(|a| {
                     (
                         (a.id.session.clone(), a.id.pane_id),
-                        a.subagents,
+                        a.subagents_live() as u32,
                         a.tasks_total,
                         a.tasks_done,
                     )
@@ -179,7 +179,7 @@ pub mod testing {
         }
 
         pub fn subagent_types(&self, i: usize) -> Vec<String> {
-            self.state.agents[i].subagent_types.clone()
+            self.state.agents[i].subagent_kinds()
         }
 
         pub fn kill_armed(&self) -> Option<(String, u32)> {

@@ -498,6 +498,16 @@ impl State {
                 self.kill_armed = None;
                 true
             }
+            // Expands the selected row's subagents into one line each. Toggled
+            // per agent: the expansion follows the id, not the row index.
+            BareKey::Char('o') => {
+                let id = self.agents.get(self.selected).map(|a| a.id.clone());
+                self.subs_open = match id {
+                    Some(id) if self.subs_open.as_ref() != Some(&id) => Some(id),
+                    _ => None,
+                };
+                true
+            }
             BareKey::Char('y') => self.send_reply("y\n"),
             BareKey::Char('m') => self.begin_reply(),
             BareKey::Char('n') => self.spawn_agent(),
