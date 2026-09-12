@@ -116,6 +116,8 @@ pub struct State {
     /// The `/` prompt, while it is open. `Some` narrows the list to matches and
     /// turns every printable key into query text.
     pub(crate) find: Option<Find>,
+    /// The agent whose subagents `o` expanded into per-subagent rows.
+    pub(crate) subs_open: Option<AgentId>,
     /// First visible row, kept so the selection stays on screen.
     pub(crate) scroll: usize,
     /// The last cross-session action that failed. Those run through the `zellij`
@@ -474,6 +476,14 @@ impl State {
             if let Some(m) = args.get("model").filter(|m| !m.is_empty()) {
                 agent.model = m.clone();
             }
+            // The three are derived together, so a present `repo` key means the
+            // hook computed identity this event and empties are real: an agent
+            // that left a worktree must not keep wearing its old one.
+            if args.contains_key("repo") {
+                agent.repo = args.get("repo").cloned().unwrap_or_default();
+                agent.wt = args.get("wt").cloned().unwrap_or_default();
+                agent.branch = args.get("branch").cloned().unwrap_or_default();
+            }
             // Only a blocked state has a reason to be blocked. Clearing it on
             // everything else stops a stale `plan` label outliving its prompt.
             agent.block = match status {
@@ -487,8 +497,7 @@ impl State {
             }
             // A new turn retires the previous turn's fan-out and task list.
             if changed && status == Status::Working {
-                agent.subagents = 0;
-                agent.subagent_types.clear();
+                agent.subagents.clear();
                 agent.tasks_total = 0;
                 agent.tasks_done = 0;
             }
@@ -515,8 +524,10 @@ impl State {
                 alive: true,
                 perm_mode: args.get("perm_mode").cloned().unwrap_or_default(),
                 model: args.get("model").cloned().unwrap_or_default(),
-                subagents: 0,
-                subagent_types: Vec::new(),
+                repo: args.get("repo").cloned().unwrap_or_default(),
+                wt: args.get("wt").cloned().unwrap_or_default(),
+                branch: args.get("branch").cloned().unwrap_or_default(),
+                subagents: Vec::new(),
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
@@ -568,21 +579,30 @@ impl State {
         if sub == 0 && created == 0 && done == 0 {
             return false;
         }
+        let now = self.now;
         let Some(agent) = self.agents.iter_mut().find(|a| &a.id == id) else {
             return false;
         };
-        agent.subagents = agent.subagents.saturating_add_signed(sub);
         agent.tasks_total = agent.tasks_total.saturating_add_signed(created);
         agent.tasks_done = agent.tasks_done.saturating_add_signed(done);
         if sub > 0 {
-            if let Some(t) = args.get("agent_type").filter(|t| !t.is_empty()) {
-                if !agent.subagent_types.contains(t) {
-                    agent.subagent_types.push(t.clone());
-                }
+            agent.subagents.push(crate::agent::Subagent {
+                id: args.get("agent_id").cloned().unwrap_or_default(),
+                kind: args.get("agent_type").cloned().unwrap_or_default(),
+                started: now,
+                done: None,
+            });
+        } else if sub < 0 {
+            // A Stop from an older hook carries no id; it can only mean the
+            // most recently started one still running.
+            let sid = args.get("agent_id").map(String::as_str).unwrap_or("");
+            let entry = match sid.is_empty() {
+                false => agent.subagents.iter_mut().find(|s| s.done.is_none() && s.id == sid),
+                true => agent.subagents.iter_mut().rev().find(|s| s.done.is_none()),
+            };
+            if let Some(e) = entry {
+                e.done = Some(now);
             }
-        }
-        if agent.subagents == 0 {
-            agent.subagent_types.clear();
         }
         true
     }
@@ -993,9 +1013,11 @@ impl State {
                 alive: true,
                 perm_mode: String::new(),
                 model: String::new(),
+                repo: String::new(),
+                wt: String::new(),
+                branch: String::new(),
                 followup_queued: false,
-                subagents: 0,
-                subagent_types: Vec::new(),
+                subagents: Vec::new(),
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
@@ -1072,8 +1094,7 @@ impl State {
             // The turn's fan-out, progress and summary all belonged to the
             // agent that just went away.
             if restarted {
-                agent.subagents = 0;
-                agent.subagent_types.clear();
+                agent.subagents.clear();
                 agent.tasks_total = 0;
                 agent.tasks_done = 0;
                 agent.turns = 0;
@@ -1135,6 +1156,19 @@ impl State {
                 if agent.model != *m {
                     agent.model = m.clone();
                     changed = true;
+                }
+            }
+            if rec.args.contains_key("repo") {
+                for (key, slot) in [
+                    ("repo", &mut agent.repo),
+                    ("wt", &mut agent.wt),
+                    ("branch", &mut agent.branch),
+                ] {
+                    let v = rec.args.get(key).cloned().unwrap_or_default();
+                    if *slot != v {
+                        *slot = v;
+                        changed = true;
+                    }
                 }
             }
             let block = match agent.status {
@@ -1324,9 +1358,11 @@ impl State {
     fn find_score(&self, query: &str, a: &Agent) -> Option<u32> {
         // The name the user knows the session by, not the sanitized file key.
         let session = self.real_session(a.session());
-        let fields: [(&str, u32); 6] = [
+        let fields: [(&str, u32); 8] = [
             (a.display_task(), 4),
             (a.project(), 4),
+            (&a.wt, 4),
+            (&a.repo, 2),
             (&a.cwd, 2),
             (&session, 2),
             (&a.tool, 1),
@@ -1438,6 +1474,40 @@ mod tests {
         assert_eq!(s.agents[0].perm_mode, "", "hook sends empty for default mode");
     }
 
+    /// The three arrive together, so present-but-empty means "not in a repo
+    /// any more" rather than "unchanged".
+    #[test]
+    fn git_identity_is_carried_and_cleared_as_a_unit() {
+        let mut s = state();
+        s.handle_status(&args(&[
+            ("pane_id", "1"),
+            ("status", "working"),
+            ("repo", "zj-agent-mob"),
+            ("wt", "fuzzy-find"),
+            ("branch", "feat/fuzzy"),
+        ]));
+        let a = &s.agents[0];
+        assert_eq!(
+            (a.repo.as_str(), a.wt.as_str(), a.branch.as_str()),
+            ("zj-agent-mob", "fuzzy-find", "feat/fuzzy")
+        );
+        s.handle_status(&args(&[
+            ("pane_id", "1"),
+            ("status", "working"),
+            ("repo", ""),
+            ("wt", ""),
+            ("branch", ""),
+        ]));
+        let a = &s.agents[0];
+        assert_eq!(
+            (a.repo.as_str(), a.wt.as_str()),
+            ("", ""),
+            "leaving the repo clears the identity"
+        );
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "done")]));
+        assert!(s.agents[0].repo.is_empty(), "an old hook sending no keys leaves it be");
+    }
+
     #[test]
     fn subagent_deltas_accumulate_and_drain() {
         let mut s = state();
@@ -1450,16 +1520,17 @@ mod tests {
                 ("agent_type", t),
             ]));
         }
-        assert_eq!(s.agents[0].subagents, 2);
-        assert_eq!(s.agents[0].subagent_types, vec!["Explore", "Plan"]);
+        assert_eq!(s.agents[0].subagents_live(), 2);
+        assert_eq!(s.agents[0].subagent_kinds(), vec!["Explore", "Plan"]);
 
         s.handle_status(&args(&[("pane_id", "1"), ("status", ""), ("subagent_delta", "-1")]));
-        assert_eq!(s.agents[0].subagents, 1);
+        assert_eq!(s.agents[0].subagents_live(), 1);
         s.handle_status(&args(&[("pane_id", "1"), ("status", ""), ("subagent_delta", "-1")]));
-        assert_eq!(s.agents[0].subagents, 0);
-        assert!(
-            s.agents[0].subagent_types.is_empty(),
-            "types clear once the fan-out drains"
+        assert_eq!(s.agents[0].subagents_live(), 0);
+        assert_eq!(
+            s.agents[0].subagent_kinds(),
+            vec!["Explore", "Plan"],
+            "finished entries stay as this turn's history"
         );
     }
 
@@ -1469,7 +1540,34 @@ mod tests {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
         s.handle_status(&args(&[("pane_id", "1"), ("status", ""), ("subagent_delta", "-1")]));
-        assert_eq!(s.agents[0].subagents, 0);
+        assert_eq!(s.agents[0].subagents_live(), 0);
+        assert!(s.agents[0].subagents.is_empty(), "a stop with no start records nothing");
+    }
+
+    /// A Stop naming an id must finish that entry, not the newest one.
+    #[test]
+    fn subagent_stop_matches_by_id() {
+        let mut s = state();
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
+        for (id, t) in [("sub-a", "Explore"), ("sub-b", "Plan")] {
+            s.handle_status(&args(&[
+                ("pane_id", "1"),
+                ("status", ""),
+                ("subagent_delta", "1"),
+                ("agent_id", id),
+                ("agent_type", t),
+            ]));
+        }
+        s.handle_status(&args(&[
+            ("pane_id", "1"),
+            ("status", ""),
+            ("subagent_delta", "-1"),
+            ("agent_id", "sub-a"),
+        ]));
+        let a = &s.agents[0];
+        assert_eq!(a.subagents_live(), 1);
+        let still = a.subagents.iter().find(|e| e.done.is_none()).unwrap();
+        assert_eq!(still.id, "sub-b", "the named entry finished, not the newest");
     }
 
     #[test]
@@ -1484,8 +1582,8 @@ mod tests {
                 ("agent_type", "Explore"),
             ]));
         }
-        assert_eq!(s.agents[0].subagents, 2);
-        assert_eq!(s.agents[0].subagent_types, vec!["Explore"]);
+        assert_eq!(s.agents[0].subagents_live(), 2);
+        assert_eq!(s.agents[0].subagent_kinds(), vec!["Explore"]);
     }
 
     #[test]
@@ -1514,9 +1612,8 @@ mod tests {
         s.handle_status(&args(&[("pane_id", "1"), ("status", ""), ("task_delta", "2")]));
         s.handle_status(&args(&[("pane_id", "1"), ("status", "done")]));
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
-        assert_eq!(s.agents[0].subagents, 0);
+        assert!(s.agents[0].subagents.is_empty());
         assert_eq!(s.agents[0].tasks_total, 0);
-        assert!(s.agents[0].subagent_types.is_empty());
     }
 
     /// Counter events name no status, so they must never create a row.
@@ -1762,11 +1859,17 @@ mod tests {
     #[test]
     fn display_task_falls_back_to_pane_title() {
         let mut s = state();
-        s.handle_status(&args(&[("pane_id", "1"), ("status", "idle")]));
-        s.agents[0].pane_title = "nvim src/lib.rs".to_string();
-        assert_eq!(s.agents[0].display_task(), "nvim src/lib.rs");
+        s.handle_status(&args(&[("pane_id", "1"), ("status", "idle"), ("tool", "claude")]));
+        s.agents[0].pane_title = "claude".to_string();
+        assert_eq!(s.agents[0].display_task(), "claude", "default title is the last resort");
         s.agents[0].task = Some("Real summary".to_string());
         assert_eq!(s.agents[0].display_task(), "Real summary");
+        s.agents[0].pane_title = "port the parser".to_string();
+        assert_eq!(
+            s.agents[0].display_task(),
+            "port the parser",
+            "a deliberate rename outranks the summary"
+        );
     }
 
     #[test]
@@ -2904,6 +3007,7 @@ mod cross_session_tests {
                         now: s.now,
                         cols: 110,
                         show_cwd: true,
+                        id_width: 10,
                         home: &s.session_name,
                     },
                 ))
@@ -3563,12 +3667,12 @@ mod cross_session_tests {
             ])
         };
         s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
-        let first = (s.agents[0].subagents, s.agents[0].tasks_total);
+        let first = (s.agents[0].subagents.len(), s.agents[0].tasks_total);
         for _ in 0..5 {
             s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
         }
         assert_eq!(
-            (s.agents[0].subagents, s.agents[0].tasks_total),
+            (s.agents[0].subagents.len(), s.agents[0].tasks_total),
             first,
             "a re-read snapshot must be idempotent"
         );
@@ -3726,6 +3830,7 @@ mod cross_session_tests {
                         now: s.now,
                         cols: 110,
                         show_cwd: true,
+                        id_width: 10,
                         home: &s.session_name,
                     },
                 ))

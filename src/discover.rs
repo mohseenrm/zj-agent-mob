@@ -190,8 +190,9 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 if name.ends_with(".tmp") {
                     continue;
                 }
-                // Panel beacons share the directory but are not agent records.
-                if name.starts_with("panel.") || name.starts_with("inflight.") {
+                // Panel beacons and per-pane caches share the directory but
+                // are not agent records.
+                if name.starts_with("panel.") || name.starts_with("inflight.") || name.starts_with("git.") {
                     continue;
                 }
                 // First line wins: a file with more is malformed, and later

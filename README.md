@@ -113,8 +113,10 @@ See [docs/setup.md](docs/setup.md) for per-target install, the in-panel install 
 <tr>
 <td width="50%">
 
-**The agent list.** One row per agent: status, elapsed time, project, task, and
-an indented detail line.
+**The agent list.** One row per agent: status, elapsed time, where it runs
+(`repo/worktree` once the hooks report git identity), task, and an indented
+detail line. A renamed pane wins as the task label, and a `⑂N` badge counts
+running subagents.
 
 ![The agent list: one row per agent with status, elapsed time, project, and task](docs/img/02-agent-list.png)
 
@@ -160,13 +162,14 @@ running only one agent's hooks is supported.
 | <kbd>g</kbd> <var>N</var> <kbd>Enter</kbd> | Jump to any row by number, including past 9. <kbd>g</kbd> opens a count, <kbd>Enter</kbd> or <kbd>G</kbd> closes it: `g25`<kbd>Enter</kbd>, or `g25G` for the vim spelling |
 | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd> | First row / last row |
 | <kbd>/</kbd> | Fuzzy find: type to narrow the list (task, worktree, path, session, tool, status), <kbd>Ctrl</kbd>+<kbd>j</kbd>/<kbd>k</kbd> or <kbd>↓</kbd>/<kbd>↑</kbd> to pick a match, <kbd>Enter</kbd> jumps to it, <kbd>Esc</kbd> cancels. Smartcase, like vim |
-| <kbd>s</kbd> | Cycle the ordering: urgency (default) -> grouped by project -> grouped by session |
+| <kbd>s</kbd> | Cycle the ordering: urgency (default) -> grouped by project (the git repo, so worktrees group together) -> grouped by session |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt |
 | <kbd>A</kbd> | Approve, and stop that tool asking again |
 | <kbd>f</kbd> | Queue a follow-up, delivered when the turn ends |
 | <kbd>y</kbd> | Answer a blocked agent with `y` (only shown while it is waiting) |
 | <kbd>m</kbd> | Type a one-line reply to a blocked agent; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> cancels |
+| <kbd>o</kbd> | Expand the selected row's subagents into one line each; press again to collapse |
 | <kbd>d</kbd> | Dismiss a `done` badge |
 | <kbd>D</kbd> | Dismiss every `done` badge at once |
 | <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory (advertised in the empty state rather than the footer) |

@@ -218,8 +218,10 @@ mod tests {
     #[test]
     fn no_list_key_is_undiscoverable() {
         // Keys surfaced by a context-sensitive footer instead: they appear only
-        // while the selected row can actually accept them.
-        let contextual = ["a", "r", "y", "m"];
+        // while the selected row can actually accept them. `o` is advertised by
+        // the \u{2442} badge and detail line it expands: it only does anything
+        // on a row whose fan-out is already on screen.
+        let contextual = ["a", "r", "y", "m", "o"];
         // Shift-variants of a key already in the footer, plus vim motions whose
         // lowercase form is there. Discoverable via the README, and deliberately
         // kept out so a slipped finger cannot reach the whole-fleet action.
@@ -228,7 +230,7 @@ mod tests {
         let shift_or_motion = ["D", "G", "g", "j", "k"];
 
         for key in [
-            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "i", "q", "/",
+            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "o", "i", "q", "/",
         ] {
             let in_footer = LIST_HINTS.iter().any(|h| h.key == key);
             let excused = contextual.contains(&key) || shift_or_motion.contains(&key) || key == "n";
