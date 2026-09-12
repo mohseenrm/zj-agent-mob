@@ -19,6 +19,10 @@ pub(crate) const INSTALLER: &str = "$HOME/.config/zj-agent-mob/install.sh";
 pub(crate) const CTX_KEY: &str = "zj-agent-mob";
 pub(crate) const CTX_STATUS: &str = "install-status";
 pub(crate) const CTX_ACTION: &str = "install-action";
+pub(crate) const CTX_UPDATE_CHECK: &str = "update-check";
+pub(crate) const CTX_UPDATE_RUN: &str = "update-run";
+
+pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Target {
@@ -359,6 +363,93 @@ impl Install {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct Update {
+    pub(crate) latest: Option<String>,
+    pub(crate) busy: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl Update {
+    pub(crate) fn dispatch_check() {
+        host::run_command(
+            &["sh", "-c", &format!("{} check-update", INSTALLER)],
+            ctx(CTX_UPDATE_CHECK, None),
+        );
+    }
+
+    pub(crate) fn apply_check(&mut self, exit_code: Option<i32>, stdout: &str) -> bool {
+        if exit_code != Some(0) {
+            return false;
+        }
+        let Some(tag) = stdout.lines().find_map(|l| l.trim().strip_prefix("latest=")) else {
+            return false;
+        };
+        let tag = tag.trim();
+        let latest = (valid_tag(tag) && version_gt(tag, CURRENT_VERSION)).then(|| tag.to_string());
+        let changed = latest != self.latest;
+        self.latest = latest;
+        changed
+    }
+
+    pub(crate) fn available(&self) -> Option<&str> {
+        match self.busy {
+            true => None,
+            false => self.latest.as_deref(),
+        }
+    }
+
+    pub(crate) fn begin(&mut self) -> bool {
+        let Some(tag) = self.available().map(str::to_string) else {
+            return false;
+        };
+        self.busy = true;
+        self.error = None;
+        host::run_command(
+            &["sh", "-c", &format!("{} --version {} plugin", INSTALLER, tag)],
+            ctx(CTX_UPDATE_RUN, None),
+        );
+        true
+    }
+
+    pub(crate) fn finish(&mut self, exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
+        self.busy = false;
+        if exit_code == Some(0) {
+            self.latest = None;
+            return true;
+        }
+        self.error = first_line(stderr).or_else(|| first_line(stdout));
+        false
+    }
+
+    pub(crate) fn note(&self) -> Option<(String, bool)> {
+        if self.busy {
+            Some(("updating...".to_string(), false))
+        } else if let Some(err) = &self.error {
+            Some((format!("update failed: {}", err), true))
+        } else {
+            self.latest
+                .as_ref()
+                .map(|tag| (format!("update available: {} (press U)", tag), false))
+        }
+    }
+}
+
+fn valid_tag(t: &str) -> bool {
+    t.strip_prefix('v')
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+fn version_gt(tag: &str, current: &str) -> bool {
+    let nums = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split('.')
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    nums(tag) > nums(current)
+}
+
 fn ctx(kind: &str, target: Option<Target>) -> BTreeMap<String, String> {
     let mut c = BTreeMap::new();
     c.insert(CTX_KEY.to_string(), kind.to_string());
@@ -385,6 +476,83 @@ mod tests {
         let mut c = BTreeMap::new();
         c.insert(CTX_KEY.to_string(), kind.to_string());
         c
+    }
+
+    #[test]
+    fn version_compare_orders_numerically() {
+        assert!(version_gt("v0.12.0", "0.11.1"));
+        assert!(version_gt("v1.0.0", "0.99.9"));
+        assert!(version_gt("v0.11.10", "0.11.9"));
+        assert!(!version_gt("v0.11.1", "0.11.1"));
+        assert!(!version_gt("v0.9.9", "0.11.1"));
+    }
+
+    #[test]
+    fn check_result_flags_only_newer_releases() {
+        let mut u = Update::default();
+        assert!(!u.apply_check(Some(0), "latest=v0.0.1\n"));
+        assert!(u.latest.is_none(), "an older release is not an update");
+        assert!(u.apply_check(Some(0), "latest=v999.0.0\n"));
+        assert_eq!(u.latest.as_deref(), Some("v999.0.0"));
+        assert!(!u.apply_check(Some(1), "latest=v9999.0.0\n"));
+        assert_eq!(
+            u.latest.as_deref(),
+            Some("v999.0.0"),
+            "a failed check keeps what was known"
+        );
+    }
+
+    #[test]
+    fn malformed_tags_are_rejected() {
+        let mut u = Update::default();
+        for bad in ["v1.0.0; rm -rf /", "1.0.0", "v", "vabc", "latest"] {
+            u.apply_check(Some(0), &format!("latest={}\n", bad));
+            assert!(u.latest.is_none(), "{:?} must not become an update offer", bad);
+        }
+    }
+
+    #[test]
+    fn begin_needs_a_known_update_and_is_single_flight() {
+        let mut u = Update::default();
+        assert!(!u.begin());
+        u.latest = Some("v999.0.0".to_string());
+        assert!(u.begin());
+        assert!(u.busy);
+        assert!(!u.begin());
+        assert!(u.finish(Some(0), "", ""));
+        assert!(u.latest.is_none());
+        assert!(!u.busy);
+        assert!(u.note().is_none());
+    }
+
+    #[test]
+    fn failed_update_surfaces_the_error_and_keeps_the_offer() {
+        let mut u = Update {
+            latest: Some("v999.0.0".to_string()),
+            ..Default::default()
+        };
+        u.begin();
+        assert!(!u.finish(Some(1), "", "error: could not download the plugin"));
+        assert_eq!(u.error.as_deref(), Some("could not download the plugin"));
+        assert_eq!(u.available(), Some("v999.0.0"));
+        let (msg, is_error) = u.note().unwrap();
+        assert!(is_error);
+        assert!(msg.contains("could not download"));
+        assert!(u.begin(), "a failed update can be retried");
+        assert!(u.error.is_none());
+    }
+
+    #[test]
+    fn notes_cover_every_update_state() {
+        let mut u = Update::default();
+        assert!(u.note().is_none());
+        u.latest = Some("v999.0.0".to_string());
+        let (msg, is_error) = u.note().unwrap();
+        assert!(msg.contains("v999.0.0") && msg.contains('U'));
+        assert!(!is_error);
+        u.busy = true;
+        let (msg, _) = u.note().unwrap();
+        assert_eq!(msg, "updating...");
     }
 
     #[test]

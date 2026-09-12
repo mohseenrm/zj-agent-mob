@@ -66,6 +66,8 @@ pub struct State {
     pub(crate) popup_on_waiting: bool,
     pub(crate) hidden: bool,
     pub(crate) install: Install,
+    pub(crate) update: crate::install::Update,
+    pub(crate) check_updates: bool,
     /// The panel's own session; rows from anywhere else are foreign.
     pub(crate) session_name: String,
     /// Every session Zellij lists, which is only ever the panel's own:

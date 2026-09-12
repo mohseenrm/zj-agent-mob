@@ -3,8 +3,8 @@
 
 #[cfg(target_family = "wasm")]
 pub(crate) use zellij_tile::shim::{
-    close_self, close_terminal_pane, focus_terminal_pane, hide_self, open_command_pane_floating, run_command,
-    send_sigint_to_pane_id, set_timeout, show_self, switch_session_with_focus, write_chars_to_pane_id,
+    close_self, close_terminal_pane, focus_terminal_pane, hide_self, open_command_pane_floating, reload_plugin_with_id,
+    run_command, send_sigint_to_pane_id, set_timeout, show_self, switch_session_with_focus, write_chars_to_pane_id,
 };
 
 #[cfg(target_family = "wasm")]
@@ -169,6 +169,7 @@ mod stub {
     pub(crate) fn own_plugin_id() -> u32 {
         0
     }
+    pub(crate) fn reload_plugin_with_id(_id: u32) {}
     pub(crate) fn write_verdict(_path: &str, _verdict: &str) {}
     pub(crate) fn append_approve_rule(_tool: &str) {}
     pub(crate) fn queue_followup(_session: &str, _pane_id: u32, _text: &str) {}

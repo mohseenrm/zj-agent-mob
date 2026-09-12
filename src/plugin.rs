@@ -26,6 +26,7 @@ impl ZellijPlugin for State {
             .unwrap_or(60.0);
         self.notifier.sound = configuration.get("notify_sound").map(|v| v == "true").unwrap_or(false);
         self.summary_path = configuration.get("summary_file").cloned().unwrap_or_default();
+        self.check_updates = configuration.get("check_updates").map(|v| v != "false").unwrap_or(true);
 
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -61,6 +62,9 @@ impl ZellijPlugin for State {
                 // `run_command` only reaches the host after the grant; a refresh
                 // fired from `load` is silently dropped.
                 self.install.refresh();
+                if self.check_updates {
+                    crate::install::Update::dispatch_check();
+                }
                 self.request_scan();
                 self.detect_notifier();
                 self.rename_pane();
@@ -131,6 +135,15 @@ impl ZellijPlugin for State {
                         false => "none".to_string(),
                     };
                     return false;
+                }
+                if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::install::CTX_UPDATE_CHECK) {
+                    return self.update.apply_check(exit_code, &out);
+                }
+                if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::install::CTX_UPDATE_RUN) {
+                    if self.update.finish(exit_code, &out, &err) {
+                        host::reload_plugin_with_id(self.own_plugin_id);
+                    }
+                    return true;
                 }
                 if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::discover::CTX_SCAN) {
                     self.scan_pending = false;
@@ -363,9 +376,9 @@ impl State {
     }
 
     fn render_install(&self, rows: usize, width: usize) {
-        let mut y = self.render_header("install", width);
+        let mut y = self.render_header(&format!("install \u{00b7} v{}", crate::install::CURRENT_VERSION), width);
         y = self.render_rows(self.install.list_items(), y);
-        let note = self.install.notes();
+        let note = self.install.notes().or_else(|| self.update.note());
         y = footer_start(y, rows, 2 + usize::from(note.is_some()));
         y = self.render_rule(y, width);
         y = self.render_notes(note, y, width);
@@ -415,7 +428,8 @@ impl State {
             ))
             .color_range(DIM_LEVEL, ..),
         ];
-        self.render_rows(rows, y);
+        let y = self.render_rows(rows, y);
+        self.render_notes(self.update.note(), y + 1, width);
     }
 
     pub(crate) fn head_line(&self, width: usize) -> String {
@@ -630,7 +644,9 @@ impl State {
 
         // Everything that is not a list row: header, its rule, the footer rule,
         // the hints, and the error note when there is one.
-        let chrome = 2 + 2 * usize::from(rules) + usize::from(self.action_error.is_some());
+        let update_note = self.update.note();
+        let chrome =
+            2 + 2 * usize::from(rules) + usize::from(self.action_error.is_some()) + usize::from(update_note.is_some());
         let budget = rows.saturating_sub(chrome);
         let keep_visible = marked.and_then(|m| visible.iter().position(|&i| i == m)).unwrap_or(0);
         let view = viewport(&groups, self.scroll, keep_visible, budget);
@@ -650,7 +666,8 @@ impl State {
             items.push(more_row(view.hidden_below, false, width));
         }
         y = self.render_rows(items, y);
-        let footer_height = usize::from(rules) + usize::from(self.action_error.is_some()) + 1;
+        let footer_height =
+            usize::from(rules) + usize::from(self.action_error.is_some()) + usize::from(update_note.is_some()) + 1;
         y = footer_start(y, rows, footer_height);
         if rules {
             y = self.render_rule(y, width);
@@ -659,6 +676,9 @@ impl State {
         // cannot show any other way: the row is already gone.
         if let Some(msg) = self.action_error.as_deref() {
             y = self.render_notes(Some((msg.to_string(), true)), y, width);
+        }
+        if update_note.is_some() {
+            y = self.render_notes(update_note, y, width);
         }
         let selected_has_ask = self
             .agents
