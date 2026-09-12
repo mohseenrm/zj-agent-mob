@@ -11,6 +11,7 @@
 #   ./init.sh --from-release     fetch hook + plugin from a GitHub release
 #   ./init.sh --version v0.2.0   pin a release; implies --from-release
 #   ./init.sh --no-download      fail rather than fetch anything (offline)
+#   ./init.sh check-update       print the latest release tag (cached)
 #
 # Targets: claude, codex, plugin. Omitting the target means all of them.
 #
@@ -103,6 +104,7 @@ for arg in "$@"; do
     install)   MODE=install ;;
     uninstall) MODE=uninstall ;;
     status)    MODE=status ;;
+    check-update) MODE=check-update ;;
     --from-release) FETCH=1 ;;
     --no-download)  FETCH=0 ;;
     --version)      WANT_VERSION=1 ;;
@@ -136,6 +138,41 @@ warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 [ -z "$WANT_VERSION" ] || die "--version needs a value, e.g. --version v0.2.0"
+
+UPDATE_CACHE="$HOOK_DIR/update-check"
+UPDATE_TTL_MIN="${ZJ_AGENT_UPDATE_TTL_MIN:-360}"
+
+latest_release_tag() {
+  if [ -n "${ZJ_AGENT_LATEST:-}" ]; then
+    printf '%s' "$ZJ_AGENT_LATEST"
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null \
+      | sed -n 's#.*/tag/##p'
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+      | sed -n 's/.*"tag_name"[^"]*"\([^"]*\)".*/\1/p' | head -n 1
+  elif command -v gh >/dev/null 2>&1; then
+    gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null
+  fi
+}
+
+if [ "$MODE" = check-update ]; then
+  if [ -f "$UPDATE_CACHE" ] && [ -n "$(find "$UPDATE_CACHE" -mmin "-$UPDATE_TTL_MIN" 2>/dev/null)" ]; then
+    _tag=$(cat "$UPDATE_CACHE")
+  else
+    _tag=$(latest_release_tag)
+    case "$_tag" in
+      v[0-9]*)
+        mkdir -p "$HOOK_DIR"
+        printf '%s' "$_tag" > "$UPDATE_CACHE.zjtmp" && mv "$UPDATE_CACHE.zjtmp" "$UPDATE_CACHE"
+        ;;
+      *) _tag= ;;
+    esac
+  fi
+  [ -n "$_tag" ] || die "could not determine the latest release"
+  say "latest=$_tag"
+  exit 0
+fi
 
 command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
 
@@ -457,7 +494,7 @@ if [ "$DRY" = 0 ]; then
   # the source is a consumed stdin pipe, so there is nothing to copy. Without
   # this fallback the install screen is left with no installer to drive, which
   # is exactly the state that makes it report "Installer not found".
-  if [ -f "$0" ]; then
+  if [ -f "$0" ] && [ "$FETCH" != 1 ]; then
     if same_file "$0" "$SELF_DST"; then
       say "installer -> $SELF_DST (already current)"
     else
@@ -471,6 +508,11 @@ if [ "$DRY" = 0 ]; then
     say "downloading install.sh ($VERSION)..."
     if fetch "$(release_url)/init.sh" "$SELF_DST"; then
       say "installer -> $SELF_DST"
+    elif [ -f "$0" ] && ! same_file "$0" "$SELF_DST"; then
+      cp "$0" "$SELF_DST"
+      say "installer -> $SELF_DST (download failed; used the running copy)"
+    elif [ -f "$SELF_DST" ]; then
+      warn "could not download the installer; kept the existing $SELF_DST."
     else
       warn "could not download the installer to $SELF_DST."
       warn "The install screen will report it as missing until you re-run this"
@@ -508,7 +550,7 @@ if wants plugin; then
     fi
     if [ "$DRY" = 0 ]; then
       mkdir -p "$PLUGIN_DIR"
-      cp "$WASM_SRC" "$PLUGIN_DST"
+      cp "$WASM_SRC" "$PLUGIN_DST.zjtmp" && mv -f "$PLUGIN_DST.zjtmp" "$PLUGIN_DST"
       say "plugin -> $PLUGIN_DST"
     else
       say "  [dry-run] would install plugin -> $PLUGIN_DST"

@@ -254,6 +254,19 @@ Two benign cases also read `unknown`, both self-correcting:
 - The agent is genuinely mid-turn and quiet. Only `working` and `compact` decay this way - a
   blocked or finished agent keeps its status, since silence is what those states predict.
 
+## "update available" never appears / pressing <kbd>U</kbd> fails
+
+The check runs through `~/.config/zj-agent-mob/install.sh check-update`, so it needs that
+installer on disk (run `./init.sh` once if the install screen says "Installer not found") and one
+of `curl`, `wget` or `gh` to reach GitHub. The result is cached in
+`~/.config/zj-agent-mob/update-check` for six hours; delete that file to force a fresh check on
+the next plugin load. `check_updates false` in the plugin config disables the check entirely.
+
+A failed update shows its first error line in the footer and leaves the running version in place;
+re-running `install.sh --version vX.Y.Z plugin` from a shell shows the full output. Only this
+session's panel reloads after an update - other sessions keep the old code until they reload, and
+their <kbd>U</kbd> then finds the files current and just reloads.
+
 ## The install screen says "Installer not found"
 
 The plugin drives `~/.config/zj-agent-mob/install.sh`, which `init.sh` puts there. Nothing else creates it, so this means `init.sh` has never completed a run on this machine.

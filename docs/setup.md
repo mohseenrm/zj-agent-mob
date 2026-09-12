@@ -199,6 +199,30 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 | `notify_cooldown` | `60` | Seconds before the same agent may notify again, so a flapping row cannot spam you |
 | `notify_sound` | `false` | Play a sound with the notification |
 | `summary_file` | unset | Write the fleet summary here on every change, for a status bar to render. Also writes `<path>.kv` for parsing. Unset means nothing is published. See [the fleet summary](#the-fleet-summary-in-your-status-bar) |
+| `check_updates` | `true` | Check GitHub for a newer release on load, via the installed `install.sh`. Set `false` to never touch the network. See [updating](#updating) |
+
+## Updating
+
+On load the panel asks the installed `~/.config/zj-agent-mob/install.sh` for the
+latest release tag (cached for six hours, so many sessions loading at once make
+one request). When a newer release exists a dim footer line appears:
+
+```
+update available: v0.12.0 (press U)
+```
+
+Press <kbd>U</kbd> (from the list or the install screen) and the panel drives
+`install.sh --version <tag> plugin`, which downloads the new wasm, hook script
+and installer, swaps them into place, and reloads the plugin in this session.
+Agent hooks in your settings files are never touched by an update.
+
+Other Zellij sessions keep running the old code until their own reload; their
+next <kbd>U</kbd> finds the files already current and just reloads. Running
+agents pick up the new hook script on their next hook fire, and the current
+version is always shown in the install screen header (<kbd>i</kbd>).
+
+Set `check_updates false` to disable the check entirely; `install.sh --version
+vX.Y.Z` from a shell still updates (or downgrades) manually.
 
 ## The fleet summary in your status bar
 

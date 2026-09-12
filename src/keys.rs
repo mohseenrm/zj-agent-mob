@@ -76,6 +76,7 @@ impl State {
                 self.install.refresh();
                 true
             }
+            BareKey::Char('U') => self.update.begin(),
             BareKey::Char('q') | BareKey::Esc | BareKey::Char('i') => {
                 self.install.open = false;
                 true
@@ -418,6 +419,7 @@ impl State {
                 self.jump_to_row(self.agents.len());
                 true
             }
+            BareKey::Char('U') => self.update.begin(),
             BareKey::Char(c @ '1'..='9') => {
                 let idx = (c as u8 - b'1') as usize;
                 if idx < self.agents.len() {
@@ -600,6 +602,26 @@ mod tests {
             s.kill_armed.is_none(),
             "re-sorting must not leave a kill armed on a moved row"
         );
+    }
+
+    #[test]
+    fn shift_u_starts_an_update_only_when_one_is_known() {
+        let mut s = state_with_one_agent();
+        assert!(!s.handle_key(key('U')));
+        assert!(!s.update.busy);
+        s.update.latest = Some("v999.0.0".to_string());
+        assert!(s.handle_key(key('U')));
+        assert!(s.update.busy);
+    }
+
+    #[test]
+    fn shift_u_works_on_the_install_screen_too() {
+        let mut s = state_with_one_agent();
+        s.handle_key(key('i'));
+        s.update.latest = Some("v999.0.0".to_string());
+        assert!(s.handle_key(key('U')));
+        assert!(s.update.busy);
+        assert!(s.install.open, "updating must not close the screen");
     }
 
     #[test]
