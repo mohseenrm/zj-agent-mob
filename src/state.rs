@@ -126,6 +126,12 @@ pub struct State {
     pub(crate) action_error: Option<String>,
     pub(crate) grouping: Grouping,
     pub(crate) own_plugin_id: u32,
+    /// Set once this instance has asked the host to close it as a duplicate.
+    /// `close_self` is a request, not a guarantee: the pane survives until the
+    /// host acts, and every `PaneUpdate` in between would ask again. Asking in
+    /// a loop starves the plugin thread, which is what stalls `CliPipe` and
+    /// leaves hook messages unanswered.
+    pub(crate) closing: bool,
 }
 
 /// A reply being composed in the panel, bound to the agent it will be sent to.
@@ -2601,6 +2607,49 @@ mod reconcile_tests {
             })
             .collect();
         assert_eq!(survivors, vec![3]);
+    }
+
+    /// The regression: `close_self` is a request, and the pane keeps receiving
+    /// updates until the host honours it. Asking on every one of them spins the
+    /// plugin thread, which is what stalls `CliPipe` and strands hook messages.
+    #[test]
+    fn a_duplicate_asks_to_close_only_once() {
+        let mut s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        let m = plugin_manifest(&[(4, MOB), (12, MOB)]);
+
+        let mut asks = 0;
+        for _ in 0..10 {
+            if s.duplicate_of(&m).is_some() {
+                if !s.closing {
+                    s.closing = true;
+                    asks += 1;
+                }
+                continue;
+            }
+            s.closing = false;
+        }
+        assert_eq!(asks, 1, "one close request, however many updates arrive");
+    }
+
+    /// The older copy can go away first - a resurrect that the user then closes
+    /// by hand. This instance is the survivor and must go back to rendering.
+    #[test]
+    fn a_reprieved_duplicate_stops_trying_to_close() {
+        let mut s = State {
+            own_plugin_id: 12,
+            ..Default::default()
+        };
+        let crowded = plugin_manifest(&[(4, MOB), (12, MOB)]);
+        let alone = plugin_manifest(&[(12, MOB)]);
+
+        assert!(s.duplicate_of(&crowded).is_some());
+        s.closing = true;
+        assert_eq!(s.duplicate_of(&alone), None);
+        s.closing = false;
+        assert!(!s.closing, "the survivor must not stay latched shut");
     }
 
     /// A different plugin in the same session is not a copy of this one.

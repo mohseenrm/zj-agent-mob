@@ -78,9 +78,15 @@ impl ZellijPlugin for State {
             Event::Timer(_) => self.on_tick(),
             Event::PaneUpdate(manifest) => {
                 if self.duplicate_of(&manifest).is_some() {
-                    host::close_self();
+                    if !self.closing {
+                        self.closing = true;
+                        host::close_self();
+                    }
                     return false;
                 }
+                // The older copy went away before the host closed us, so this
+                // instance is the survivor after all.
+                self.closing = false;
                 self.reconcile(manifest);
                 // A pane appearing or closing is the cheapest signal that the
                 // set of running agents may have changed.
