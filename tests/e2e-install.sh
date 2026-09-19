@@ -563,6 +563,46 @@ home_init uninstall >/dev/null 2>&1 || true
 assert_eq "uninstall removes a legacy absolute entry" \
   "$(jq -r '.hooks // "removed"' "$HOME_CLAUDE")" "removed"
 
+# ---------------------------------------------------------------------------
+# check-update: the cache keeps the background check off the network, and
+# --force is what makes pressing U in the panel a real check rather than a
+# reply from a six-hour-old file.
+# ---------------------------------------------------------------------------
+echo
+echo "check-update caching and --force"
+fresh
+mkdir -p "$ZJ_AGENT_HOOK_DIR"
+CACHE="$ZJ_AGENT_HOOK_DIR/update-check"
+
+assert_eq "a check reports the tag it found" \
+  "$(ZJ_AGENT_LATEST=v9.9.9 sh "$INIT" check-update)" "latest=v9.9.9"
+assert_eq "the tag is cached for the next check" "$(cat "$CACHE")" "v9.9.9"
+
+# With a warm cache the network answer is ignored entirely: that is the point.
+assert_eq "a cached check does not ask again" \
+  "$(ZJ_AGENT_LATEST=v1.1.1 sh "$INIT" check-update)" "latest=v9.9.9"
+assert_eq "--force ignores the cache" \
+  "$(ZJ_AGENT_LATEST=v1.1.1 sh "$INIT" check-update --force)" "latest=v1.1.1"
+assert_eq "a forced check refreshes the cache for everyone else" \
+  "$(cat "$CACHE")" "v1.1.1"
+
+# An expired cache is the same path as no cache at all. Backdating the file is
+# what makes this the real TTL check: `-mmin -0` still matches a file written
+# this instant, so a zero TTL alone would not expire anything.
+touch -t 200001010000 "$CACHE"
+assert_eq "an expired cache is re-fetched" \
+  "$(ZJ_AGENT_LATEST=v2.2.2 sh "$INIT" check-update)" "latest=v2.2.2"
+
+# The panel reads the exit code, so a lookup that comes back with nothing must
+# fail rather than print a tag it does not have.
+if ZJ_AGENT_LATEST=" " sh "$INIT" check-update --force >/dev/null 2>&1; then
+  bad "an unresolvable check fails" "exited zero with no tag"
+else
+  ok "an unresolvable check fails"
+fi
+assert_eq "a failed forced check leaves the last good tag cached" \
+  "$(cat "$CACHE")" "v2.2.2"
+
 echo
 echo "-------------------------------------------"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

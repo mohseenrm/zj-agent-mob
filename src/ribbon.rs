@@ -40,6 +40,21 @@ pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("q", "hide"),
 ];
 
+/// The list footer while an update is waiting, so the key that installs it is
+/// on screen at the one moment it does something. `U update` costs twelve
+/// columns, which is more than the 84-column ribbon budget has spare: `g goto`
+/// and `d clear` step aside for it. Both are still reachable, and neither is
+/// what you came to the panel for while a release is sitting there unread.
+pub(crate) const LIST_HINTS_UPDATE: &[Hint] = &[
+    Hint::new("\u{21b5}", "jump"),
+    Hint::new("/", "find"),
+    Hint::new("x", "kill"),
+    Hint::new("s", "sort"),
+    Hint::new("i", "install"),
+    Hint::new("U", "update"),
+    Hint::new("q", "hide"),
+];
+
 /// Shown while the selected agent is blocked on you, so the keys that type into
 /// its pane appear only when there is a prompt there to answer.
 pub(crate) const REPLY_HINTS: &[Hint] = &[
@@ -81,6 +96,7 @@ pub(crate) const INSTALL_HINTS: &[Hint] = &[
     Hint::new("x", "codex"),
     Hint::new("p", "plugin"),
     Hint::new("r", "refresh"),
+    Hint::new("U", "update"),
     Hint::new("esc", "back"),
 ];
 
@@ -118,6 +134,7 @@ mod tests {
     fn key_range_covers_the_key_only() {
         for h in LIST_HINTS
             .iter()
+            .chain(LIST_HINTS_UPDATE)
             .chain(INSTALL_HINTS)
             .chain(SETUP_HINTS)
             .chain(ASK_HINTS)
@@ -140,7 +157,14 @@ mod tests {
 
     #[test]
     fn every_hint_has_a_distinct_key() {
-        for set in [LIST_HINTS, INSTALL_HINTS, ASK_HINTS, REPLY_HINTS, REPLY_EDIT_HINTS] {
+        for set in [
+            LIST_HINTS,
+            LIST_HINTS_UPDATE,
+            INSTALL_HINTS,
+            ASK_HINTS,
+            REPLY_HINTS,
+            REPLY_EDIT_HINTS,
+        ] {
             let mut keys: Vec<&str> = set.iter().map(|h| h.key).collect();
             keys.sort_unstable();
             let before = keys.len();
@@ -153,7 +177,7 @@ mod tests {
     /// narrower than the ribbons it replaces and still name every key.
     #[test]
     fn plain_fallback_is_narrower_and_keeps_every_key() {
-        for set in [LIST_HINTS, SETUP_HINTS, INSTALL_HINTS] {
+        for set in [LIST_HINTS, LIST_HINTS_UPDATE, SETUP_HINTS, INSTALL_HINTS] {
             let plain = plain_line(set);
             assert!(
                 plain.chars().count() < ribbon_width(set),
@@ -184,6 +208,7 @@ mod tests {
     fn every_hint_row_fits_a_typical_pane_as_ribbons() {
         for (name, set) in [
             ("list", LIST_HINTS),
+            ("list-update", LIST_HINTS_UPDATE),
             ("setup", SETUP_HINTS),
             ("install", INSTALL_HINTS),
             ("ask", ASK_HINTS),
@@ -202,6 +227,21 @@ mod tests {
 
     /// The footer is the only discoverability surface for these keys, so every
     /// key the list screen handles should appear in it.
+    /// The key is only worth a footer slot if pressing it does something, and
+    /// the update footer only replaces the default one while it does.
+    #[test]
+    fn the_update_footer_advertises_u_and_keeps_the_essentials() {
+        let keys: Vec<&str> = LIST_HINTS_UPDATE.iter().map(|h| h.key).collect();
+        assert!(keys.contains(&"U"), "the update footer must name the update key");
+        for essential in ["\u{21b5}", "x", "i", "q"] {
+            assert!(keys.contains(&essential), "dropped {:?} to fit U", essential);
+        }
+        assert!(
+            INSTALL_HINTS.iter().any(|h| h.key == "U"),
+            "the install screen advertises U unconditionally: there it always acts"
+        );
+    }
+
     #[test]
     fn list_hints_cover_the_documented_keys() {
         let keys: Vec<&str> = LIST_HINTS.iter().map(|h| h.key).collect();

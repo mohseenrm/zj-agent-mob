@@ -12,6 +12,7 @@
 #   ./init.sh --version v0.2.0   pin a release; implies --from-release
 #   ./init.sh --no-download      fail rather than fetch anything (offline)
 #   ./init.sh check-update       print the latest release tag (cached)
+#   ./init.sh check-update --force   ignore the cache and ask GitHub now
 #
 # Targets: claude, codex, plugin. Omitting the target means all of them.
 #
@@ -91,6 +92,11 @@ TARGET=all
 FETCH=auto
 # --version takes a value, so one iteration has to consume the next argument.
 WANT_VERSION=
+# Skips the check-update cache. The background check runs on a TTL so every
+# panel that opens does not hit GitHub; a keypress is a deliberate ask, and
+# answering it from a six-hour-old cache would report "up to date" about a
+# release that shipped an hour ago.
+FORCE_CHECK=0
 for arg in "$@"; do
   if [ -n "$WANT_VERSION" ]; then
     # Naming a version asks for that release specifically, so silently using a
@@ -105,6 +111,7 @@ for arg in "$@"; do
     uninstall) MODE=uninstall ;;
     status)    MODE=status ;;
     check-update) MODE=check-update ;;
+    --force)        FORCE_CHECK=1 ;;
     --from-release) FETCH=1 ;;
     --no-download)  FETCH=0 ;;
     --version)      WANT_VERSION=1 ;;
@@ -157,7 +164,8 @@ latest_release_tag() {
 }
 
 if [ "$MODE" = check-update ]; then
-  if [ -f "$UPDATE_CACHE" ] && [ -n "$(find "$UPDATE_CACHE" -mmin "-$UPDATE_TTL_MIN" 2>/dev/null)" ]; then
+  if [ "$FORCE_CHECK" = 0 ] && [ -f "$UPDATE_CACHE" ] &&
+     [ -n "$(find "$UPDATE_CACHE" -mmin "-$UPDATE_TTL_MIN" 2>/dev/null)" ]; then
     _tag=$(cat "$UPDATE_CACHE")
   else
     _tag=$(latest_release_tag)

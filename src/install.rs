@@ -20,6 +20,9 @@ pub(crate) const CTX_KEY: &str = "zj-agent-mob";
 pub(crate) const CTX_STATUS: &str = "install-status";
 pub(crate) const CTX_ACTION: &str = "install-action";
 pub(crate) const CTX_UPDATE_CHECK: &str = "update-check";
+/// The check `U` fires by hand. Separate from `CTX_UPDATE_CHECK` so the result
+/// can install: the background check must never act on its own.
+pub(crate) const CTX_UPDATE_CHECK_NOW: &str = "update-check-now";
 pub(crate) const CTX_UPDATE_RUN: &str = "update-run";
 
 pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -363,14 +366,32 @@ impl Install {
     }
 }
 
+/// What a press of `U` is currently doing. The panel has one update at a time,
+/// so this is a phase rather than a set of independent flags.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Phase {
+    #[default]
+    Idle,
+    /// Asking GitHub for the latest tag because the user pressed `U` with
+    /// nothing known. Distinct from the background check, which never installs.
+    Checking,
+    /// The installer is running.
+    Installing,
+}
+
 #[derive(Default)]
 pub(crate) struct Update {
     pub(crate) latest: Option<String>,
-    pub(crate) busy: bool,
+    pub(crate) phase: Phase,
     pub(crate) error: Option<String>,
+    /// Set when a forced check found nothing, so `U` can say "already current"
+    /// instead of appearing to do nothing at all. Cleared by the next press.
+    pub(crate) current: bool,
 }
 
 impl Update {
+    /// The periodic check. Answered from the installer's cache, so opening a
+    /// panel does not hit the network.
     pub(crate) fn dispatch_check() {
         host::run_command(
             &["sh", "-c", &format!("{} check-update", INSTALLER)],
@@ -378,42 +399,81 @@ impl Update {
         );
     }
 
+    /// Records a background check. Never installs: the periodic check runs
+    /// without anyone asking, so acting on it would update the panel out from
+    /// under whoever is using it.
     pub(crate) fn apply_check(&mut self, exit_code: Option<i32>, stdout: &str) -> bool {
-        if exit_code != Some(0) {
+        if exit_code != Some(0) || !stdout.lines().any(|l| l.trim().starts_with("latest=")) {
             return false;
         }
-        let Some(tag) = stdout.lines().find_map(|l| l.trim().strip_prefix("latest=")) else {
-            return false;
-        };
-        let tag = tag.trim();
-        let latest = (valid_tag(tag) && version_gt(tag, CURRENT_VERSION)).then(|| tag.to_string());
-        let changed = latest != self.latest;
-        self.latest = latest;
+        let found = parse_latest(exit_code, stdout);
+        let changed = found != self.latest;
+        self.latest = found;
         changed
     }
 
+    /// True while a check or an install is in flight.
+    pub(crate) fn busy(&self) -> bool {
+        self.phase != Phase::Idle
+    }
+
     pub(crate) fn available(&self) -> Option<&str> {
-        match self.busy {
+        match self.busy() {
             true => None,
             false => self.latest.as_deref(),
         }
     }
 
+    /// The whole feature behind one key. With a release already known this
+    /// installs it; with nothing known it asks GitHub first and installs
+    /// whatever comes back, so a cold panel still updates on the first press.
     pub(crate) fn begin(&mut self) -> bool {
-        let Some(tag) = self.available().map(str::to_string) else {
+        if self.busy() {
             return false;
-        };
-        self.busy = true;
+        }
         self.error = None;
+        self.current = false;
+        match self.available().map(str::to_string) {
+            Some(tag) => self.install(&tag),
+            None => {
+                self.phase = Phase::Checking;
+                host::run_command(
+                    &["sh", "-c", &format!("{} check-update --force", INSTALLER)],
+                    ctx(CTX_UPDATE_CHECK_NOW, None),
+                );
+            }
+        }
+        true
+    }
+
+    fn install(&mut self, tag: &str) {
+        self.phase = Phase::Installing;
         host::run_command(
             &["sh", "-c", &format!("{} --version {} plugin", INSTALLER, tag)],
             ctx(CTX_UPDATE_RUN, None),
         );
+    }
+
+    /// The forced check `U` fires. Unlike the background one this goes straight
+    /// on to install, which is what makes the key a single press.
+    pub(crate) fn on_forced_check(&mut self, exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
+        self.phase = Phase::Idle;
+        if exit_code != Some(0) {
+            self.error = first_line(stderr).or_else(|| first_line(stdout));
+            return true;
+        }
+        self.latest = parse_latest(exit_code, stdout);
+        match self.latest.clone() {
+            Some(tag) => self.install(&tag),
+            // Nothing newer. Saying so is the point: a silent no-op reads as a
+            // broken key.
+            None => self.current = true,
+        }
         true
     }
 
     pub(crate) fn finish(&mut self, exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
-        self.busy = false;
+        self.phase = Phase::Idle;
         if exit_code == Some(0) {
             self.latest = None;
             return true;
@@ -423,16 +483,33 @@ impl Update {
     }
 
     pub(crate) fn note(&self) -> Option<(String, bool)> {
-        if self.busy {
-            Some(("updating...".to_string(), false))
-        } else if let Some(err) = &self.error {
-            Some((format!("update failed: {}", err), true))
-        } else {
-            self.latest
-                .as_ref()
-                .map(|tag| (format!("update available: {} (press U)", tag), false))
+        match self.phase {
+            Phase::Checking => Some(("checking for updates...".to_string(), false)),
+            Phase::Installing => Some(("updating...".to_string(), false)),
+            Phase::Idle => {
+                if let Some(err) = &self.error {
+                    Some((format!("update failed: {}", err), true))
+                } else if let Some(tag) = &self.latest {
+                    Some((format!("update available: {} (press U)", tag), false))
+                } else if self.current {
+                    Some((format!("already on the latest release (v{})", CURRENT_VERSION), false))
+                } else {
+                    None
+                }
+            }
         }
     }
+}
+
+/// `latest=<tag>` from the installer, kept only when it is a real tag newer
+/// than what is running. A tag is interpolated into a shell command, so an
+/// unparseable one is dropped rather than passed along.
+fn parse_latest(exit_code: Option<i32>, stdout: &str) -> Option<String> {
+    if exit_code != Some(0) {
+        return None;
+    }
+    let tag = stdout.lines().find_map(|l| l.trim().strip_prefix("latest="))?.trim();
+    (valid_tag(tag) && version_gt(tag, CURRENT_VERSION)).then(|| tag.to_string())
 }
 
 fn valid_tag(t: &str) -> bool {
@@ -512,17 +589,70 @@ mod tests {
     }
 
     #[test]
-    fn begin_needs_a_known_update_and_is_single_flight() {
-        let mut u = Update::default();
-        assert!(!u.begin());
-        u.latest = Some("v999.0.0".to_string());
+    fn begin_installs_a_known_release_and_is_single_flight() {
+        let mut u = Update {
+            latest: Some("v999.0.0".to_string()),
+            ..Default::default()
+        };
         assert!(u.begin());
-        assert!(u.busy);
-        assert!(!u.begin());
+        assert_eq!(u.phase, Phase::Installing);
+        assert!(!u.begin(), "a second press must not launch a second installer");
         assert!(u.finish(Some(0), "", ""));
         assert!(u.latest.is_none());
-        assert!(!u.busy);
+        assert!(!u.busy());
         assert!(u.note().is_none());
+    }
+
+    /// The feature in one test: a panel that has never checked still updates on
+    /// the first press, because the press does the checking.
+    #[test]
+    fn begin_with_nothing_known_checks_then_installs() {
+        let mut u = Update::default();
+        assert!(u.begin());
+        assert_eq!(u.phase, Phase::Checking);
+        assert!(!u.begin(), "the check is single-flight too");
+
+        assert!(u.on_forced_check(Some(0), "latest=v999.0.0\n", ""));
+        assert_eq!(u.phase, Phase::Installing);
+        assert_eq!(u.latest.as_deref(), Some("v999.0.0"));
+    }
+
+    /// A key that appears to do nothing reads as a broken key.
+    #[test]
+    fn a_check_that_finds_nothing_says_so() {
+        let mut u = Update::default();
+        u.begin();
+        assert!(u.on_forced_check(Some(0), &format!("latest=v{}\n", CURRENT_VERSION), ""));
+        assert_eq!(u.phase, Phase::Idle);
+        assert!(u.latest.is_none());
+        let (msg, is_error) = u.note().expect("being current is still an answer");
+        assert!(msg.contains("latest") && msg.contains(CURRENT_VERSION), "{:?}", msg);
+        assert!(!is_error, "being up to date is not a failure");
+
+        // And the next press clears it rather than leaving a stale verdict.
+        u.begin();
+        assert!(!u.current);
+    }
+
+    #[test]
+    fn a_failed_check_reports_instead_of_installing() {
+        let mut u = Update::default();
+        u.begin();
+        assert!(u.on_forced_check(Some(1), "", "error: could not reach github"));
+        assert_eq!(u.phase, Phase::Idle, "a failed check must not leave the panel busy");
+        assert_eq!(u.error.as_deref(), Some("could not reach github"));
+        let (msg, is_error) = u.note().unwrap();
+        assert!(is_error && msg.contains("could not reach github"));
+    }
+
+    /// The periodic check runs without anyone asking, so it may report but must
+    /// never install.
+    #[test]
+    fn the_background_check_never_installs() {
+        let mut u = Update::default();
+        assert!(u.apply_check(Some(0), "latest=v999.0.0\n"));
+        assert_eq!(u.phase, Phase::Idle);
+        assert_eq!(u.available(), Some("v999.0.0"));
     }
 
     #[test]
@@ -550,9 +680,10 @@ mod tests {
         let (msg, is_error) = u.note().unwrap();
         assert!(msg.contains("v999.0.0") && msg.contains('U'));
         assert!(!is_error);
-        u.busy = true;
-        let (msg, _) = u.note().unwrap();
-        assert_eq!(msg, "updating...");
+        u.phase = Phase::Checking;
+        assert_eq!(u.note().unwrap().0, "checking for updates...");
+        u.phase = Phase::Installing;
+        assert_eq!(u.note().unwrap().0, "updating...");
     }
 
     #[test]

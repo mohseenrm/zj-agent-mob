@@ -174,6 +174,7 @@ running only one agent's hooks is supported.
 | <kbd>D</kbd> | Dismiss every `done` badge at once |
 | <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory (advertised in the empty state rather than the footer) |
 | <kbd>i</kbd> | Open the install screen |
+| <kbd>U</kbd> | Update the plugin to the latest release. See [Updating](#updating) |
 | <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel |
 
 ### Install screen
@@ -184,7 +185,35 @@ running only one agent's hooks is supported.
 | <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | Move selection |
 | <kbd>Enter</kbd> | Toggle the selected row |
 | <kbd>r</kbd> | Re-read install state |
+| <kbd>U</kbd> | Update the plugin to the latest release |
 | <kbd>i</kbd> / <kbd>q</kbd> / <kbd>Esc</kbd> | Back to the agent list |
+
+### Updating
+
+<kbd>U</kbd> updates the plugin. One press: it asks GitHub for the latest
+release, downloads it, installs it, and reloads the panel in place. Nothing to
+clone, no `init.sh` to re-run, no restart.
+
+The panel also checks quietly in the background - once per open, answered from a
+six-hour cache so it is not hammering the network - and puts a line in the footer
+when there is something newer:
+
+```
+update available: v0.14.0 (press U)
+```
+
+<kbd>U</kbd> works whether or not that line is there. With a release already
+known it goes straight to installing; with nothing known it does the check
+itself, ignoring the cache, and installs whatever it finds. If you are already
+current it says so rather than sitting silent.
+
+Turn the background check off and the key still works:
+
+```kdl
+zj-agent-mob location="file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
+    check_updates "false"
+}
+```
 
 ## Statuses
 

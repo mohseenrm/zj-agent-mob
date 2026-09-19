@@ -258,11 +258,19 @@ cross-session transport. Its status still reaches a panel in its own session.
 
 ## "update available" never appears / pressing <kbd>U</kbd> fails
 
-The check runs through `~/.config/zj-agent-mob/install.sh check-update`, so it needs that
-installer on disk (run `./init.sh` once if the install screen says "Installer not found") and one
-of `curl`, `wget` or `gh` to reach GitHub. The result is cached in
-`~/.config/zj-agent-mob/update-check` for six hours; delete that file to force a fresh check on
-the next plugin load. `check_updates false` in the plugin config disables the check entirely.
+Both the background check and <kbd>U</kbd> run through
+`~/.config/zj-agent-mob/install.sh check-update`, so they need that installer on disk (run
+`./init.sh` once if the install screen says "Installer not found") and one of `curl`, `wget` or
+`gh` to reach GitHub.
+
+The footer line is the background check, whose result is cached in
+`~/.config/zj-agent-mob/update-check` for six hours, so it can be up to six hours behind. It never
+gates the key: <kbd>U</kbd> passes `--force` and asks GitHub directly, which is also what to press
+when you know a release just landed. `check_updates false` stops the automatic check only.
+
+If <kbd>U</kbd> reports "already on the latest release" when you expect otherwise, the reply came
+from GitHub, not the cache - check the tag on the releases page. `install.sh check-update --force`
+from a shell prints the same answer with its error output visible.
 
 A failed update shows its first error line in the footer and leaves the running version in place;
 re-running `install.sh --version vX.Y.Z plugin` from a shell shows the full output. Only this

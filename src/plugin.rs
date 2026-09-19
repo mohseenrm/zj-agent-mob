@@ -139,6 +139,13 @@ impl ZellijPlugin for State {
                 if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::install::CTX_UPDATE_CHECK) {
                     return self.update.apply_check(exit_code, &out);
                 }
+                // The hand-fired check chains straight into the install, so it
+                // gets its own arm rather than sharing the passive one above.
+                if context.get(crate::install::CTX_KEY).map(String::as_str)
+                    == Some(crate::install::CTX_UPDATE_CHECK_NOW)
+                {
+                    return self.update.on_forced_check(exit_code, &out, &err);
+                }
                 if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::install::CTX_UPDATE_RUN) {
                     if self.update.finish(exit_code, &out, &err) {
                         host::reload_plugin_with_id(self.own_plugin_id);
@@ -718,6 +725,8 @@ impl State {
             ribbon::ASK_HINTS
         } else if self.can_reply_selected() {
             ribbon::REPLY_HINTS
+        } else if self.update.available().is_some() || self.update.busy() {
+            ribbon::LIST_HINTS_UPDATE
         } else {
             ribbon::LIST_HINTS
         };

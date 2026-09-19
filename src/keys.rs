@@ -604,23 +604,36 @@ mod tests {
         );
     }
 
+    /// The whole point of the key: one press with nothing known still ends in
+    /// an install, by checking first.
     #[test]
-    fn shift_u_starts_an_update_only_when_one_is_known() {
+    fn shift_u_checks_when_no_update_is_known() {
+        use crate::install::Phase;
         let mut s = state_with_one_agent();
-        assert!(!s.handle_key(key('U')));
-        assert!(!s.update.busy);
+        assert!(s.handle_key(key('U')));
+        assert_eq!(s.update.phase, Phase::Checking);
+
+        s.update.on_forced_check(Some(0), "latest=v999.0.0\n", "");
+        assert_eq!(s.update.phase, Phase::Installing, "a found release installs itself");
+    }
+
+    #[test]
+    fn shift_u_installs_a_release_already_known() {
+        use crate::install::Phase;
+        let mut s = state_with_one_agent();
         s.update.latest = Some("v999.0.0".to_string());
         assert!(s.handle_key(key('U')));
-        assert!(s.update.busy);
+        assert_eq!(s.update.phase, Phase::Installing, "no second round trip to check");
     }
 
     #[test]
     fn shift_u_works_on_the_install_screen_too() {
+        use crate::install::Phase;
         let mut s = state_with_one_agent();
         s.handle_key(key('i'));
         s.update.latest = Some("v999.0.0".to_string());
         assert!(s.handle_key(key('U')));
-        assert!(s.update.busy);
+        assert_eq!(s.update.phase, Phase::Installing);
         assert!(s.install.open, "updating must not close the screen");
     }
 
