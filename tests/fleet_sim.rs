@@ -459,8 +459,8 @@ fn the_selection_survives_rows_arriving_and_leaving() {
     }
 }
 
-/// A dead session's rows go `unknown` rather than vanishing, and nothing may
-/// then act on them.
+/// A dead session's rows read `gone` rather than vanishing, keep their last
+/// status for the record, and nothing may then act on them.
 #[test]
 fn a_dead_session_disables_the_actions_that_need_a_process() {
     let mut sim = Sim::new("mob", &["mob", "work"]);
@@ -473,8 +473,13 @@ fn a_dead_session_disables_the_actions_that_need_a_process() {
     ]));
     sim.select(0);
     sim.sessions(&["mob"]);
-
-    assert_eq!(sim.status_of(0), "unknown", "a dead session's row is unknowable");
+    assert!(
+        sim.session_alive(0),
+        "SessionUpdate never lists foreign sessions, so it cannot kill one"
+    );
+    sim.scanned_sessions(&["mob"]);
+    assert!(!sim.session_alive(0), "the scan can");
+    assert_eq!(sim.status_of(0), "waiting", "what it was doing is kept");
     let before = sim.agent_count();
     sim.press(key('x'));
     assert!(
@@ -570,9 +575,10 @@ fn the_spool_never_overwrites_a_home_row() {
     );
 }
 
-/// A working row claims active progress, and silence contradicts that.
+/// A working row claims active progress, and silence contradicts that. The
+/// label is kept - it is still the best guess - but marked as old.
 #[test]
-fn a_quiet_working_row_decays_to_unknown_and_recovers() {
+fn a_quiet_working_row_goes_stale_and_recovers() {
     let mut sim = Sim::new("mob", &["mob", "work"]);
     let kv = spool("working", "s1");
     sim.scan(&[("work", 1, "claude")], &[rec("work", 1, 1000.0, &kv)]);
@@ -581,15 +587,16 @@ fn a_quiet_working_row_decays_to_unknown_and_recovers() {
     while sim.now() < STALE_AFTER + 5.0 {
         sim.tick();
     }
-    assert_eq!(
-        sim.status_of(0),
-        "unknown",
+    assert_eq!(sim.status_of(0), "working", "the last known status stays");
+    assert!(
+        sim.is_stale(0),
         "a working row the panel can no longer vouch for must say so"
     );
 
     let fresh = spool("working", "s1");
     sim.scan(&[("work", 1, "claude")], &[rec("work", 1, 5000.0, &fresh)]);
-    assert_eq!(sim.status_of(0), "working", "a fresh record must bring the row back");
+    assert_eq!(sim.status_of(0), "working");
+    assert!(!sim.is_stale(0), "a fresh record must bring the row back");
 }
 
 /// A blocked agent writes nothing while it waits, so its record stops
@@ -650,10 +657,9 @@ fn a_frozen_epoch_still_ages() {
     for _ in 0..(STALE_AFTER * 3.0 / 0.25) as usize {
         sim.tick();
     }
-    assert_eq!(
-        sim.status_of(0),
-        "unknown",
-        "a working row must decay even though no newer record ever arrived"
+    assert!(
+        sim.is_stale(0),
+        "a working row must go stale even though no newer record ever arrived"
     );
 }
 
@@ -668,9 +674,8 @@ fn a_clock_jump_cannot_pin_a_row_as_current() {
     for _ in 0..(STALE_AFTER * 3.0 / 0.25) as usize {
         sim.tick();
     }
-    assert_eq!(
-        sim.status_of(0),
-        "unknown",
+    assert!(
+        sim.is_stale(0),
         "a record dated far in the future must still age on the panel's own clock"
     );
 }

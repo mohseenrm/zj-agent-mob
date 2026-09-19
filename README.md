@@ -198,10 +198,11 @@ running only one agent's hooks is supported.
 | `working` | Processing a turn | `UserPromptSubmit`, refreshed by `PreToolUse`/`PostToolUse` |
 | `idle` | Session open, nothing new | `SessionStart`, or `done` after you visit the pane |
 | `found` | Spotted by the process scan, but it has never fired a hook | - |
-| `unknown` | Running, but nothing has reported on it in a while ([stuck there?](docs/troubleshooting.md#a-row-in-another-session-says-unknown)) | - |
-| `gone` | Its Zellij session is gone, so its state is unknowable | - |
+| `gone` | Its Zellij session has exited; the detail line keeps what it was last doing | - |
 
 Rows sort in that order, so whatever needs you most is at the top. A `found` row is normal rather than broken: the agent was already running when hooks were installed, and it fills in the moment it next does anything.
+
+A row from another session that nothing has refreshed in a minute keeps its status but is dimmed, with `last seen 2m ago` on its detail line: the panel shows the last thing it knew rather than replacing it with a label that says nothing ([more](docs/troubleshooting.md#a-row-in-another-session-is-dimmed--says-last-seen)).
 
 ### Ordering and grouping
 

@@ -67,15 +67,34 @@ The panel reads the directory on the same `run_command` that already runs the pr
 polling costs one command rather than two.
 
 That scan runs on pane and session events, which is not enough on its own: an agent in another
-session can work for ten minutes without opening a pane, and meanwhile the row ages out. So while
-any foreign agent is on screen the panel also re-scans every `SPOOL_POLL_INTERVAL` (5s), well
-inside the 60s `STALE_AFTER` so a row gets many chances to refresh before it decays. The poll is
+session can work for ten minutes without opening a pane, and meanwhile the row ages. So while any
+foreign agent is on screen the panel also re-scans every `SPOOL_POLL_INTERVAL` (5s), well inside
+the 60s `STALE_AFTER` so a row gets many chances to refresh before it is marked stale. The poll is
 gated on a foreign row existing, so a single-session panel never pays for it, and on the session
 still being listed, since nothing can refresh a row whose session is gone.
 
 The panel's clock is what paces this, so a foreign row keeps the timer running whatever its status.
-An `unknown` row in particular must: it is the row the poll exists to recover, and a panel that
-stopped ticking once its rows decayed could never bring them back.
+A stale row in particular must: it is the row the poll exists to refresh, and a panel that stopped
+ticking once its rows aged could never bring them back.
+
+### Stale, not unknown
+
+A foreign row's status is a snapshot, and past `STALE_AFTER` the panel can no longer vouch for it.
+It does not replace it. `working` from a minute ago is still the best available guess, so the row
+keeps its label and its elapsed time, the spinner stops, the label dims, and the detail line leads
+with `last seen 1m03s ago`. The next record clears it. The same holds for a session that exits:
+the row reads `gone`, sorts last and drops out of the header counts, but its detail line keeps
+`(session exited · was done)`. Only a hook, the spool, or `ended` ever changes a status; the
+clock and the session list only annotate it.
+
+Liveness for a foreign session comes from the process scan alone. `SessionUpdate` names the
+panel's own session and nothing else, so read as a list of live sessions it would condemn every
+foreign row, including one a fan-out pipe created a moment ago. Until a scan has reported, no
+session is declared dead.
+
+Turns on a foreign row are counted from spool transitions into `working`, the same way the pipe
+counts them for a home row. Two turns inside one 5s poll read as one, so the count can run low,
+never high.
 
 ### Urgent transitions skip the poll
 
@@ -143,7 +162,7 @@ Four defences keep a stale record from showing wrong data:
 |---|---|
 | No process, no row | A record for an agent that has exited |
 | `session_id` must match, unless a newer record disagrees | A recycled pane id inheriting the previous agent's status, while still letting the pane's next agent take the row over |
-| `ts` older than `STALE_AFTER` is ignored | A record from a previous boot or a long-idle agent |
+| `ts` older than `STALE_AFTER` marks the row stale rather than refreshing it | A record from a long-idle agent being shown as current; the record is still applied, since it is the last thing known, and the row is born stale |
 | Filename must match the record's own `session`/`pane_id` | A malformed or mislabelled file |
 
 Records are dated relative to the newest one seen rather than against a wall clock: the plugin has

@@ -850,7 +850,7 @@ mod tests {
         let mut s = state_with(&[(3, "other", "waiting")]);
         s.selected = 0;
         assert!(s.can_reply_selected());
-        s.apply_sessions(vec!["mob".into()]);
+        s.apply_scanned_sessions(vec!["mob".into()]);
         assert!(!s.can_reply_selected(), "nothing is left to answer");
     }
 
