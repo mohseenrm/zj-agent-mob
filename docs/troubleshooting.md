@@ -11,7 +11,7 @@
 - [<kbd>y</kbd> / <kbd>m</kbd> do nothing](#y--m-do-nothing)
 - [No desktop notifications](#no-desktop-notifications)
 - [A row says `gone` / `(session exited)`](#a-row-says-gone--session-exited)
-- [A row in another session says `unknown`](#a-row-in-another-session-says-unknown)
+- [A row in another session is dimmed / says `last seen`](#a-row-in-another-session-is-dimmed--says-last-seen)
 - [The install screen says "Installer not found"](#the-install-screen-says-installer-not-found)
 - [The install screen shows `?` / "unknown" for everything](#the-install-screen-shows---unknown-for-everything)
 - [Zellij fails to load the plugin](#zellij-fails-to-load-the-plugin)
@@ -136,9 +136,9 @@ order:
    [the panel says "no agents"](#the-panel-says-no-agents-in-this-session) for whether the hook
    runs at all.
 3. **Is the record fresh?** A record older than 60s no longer refreshes a `working` row, which
-   decays to `unknown`. `cat` one and check its `ts=` against `date +%s`. A blocked or finished
-   agent is exempt: it writes nothing while it waits, so its unchanged record keeps re-confirming
-   `waiting` / `done` for as long as the process is alive.
+   keeps its label but dims and shows `last seen`. `cat` one and check its `ts=` against
+   `date +%s`. A blocked or finished agent is exempt: it writes nothing while it waits, so its
+   unchanged record keeps re-confirming `waiting` / `done` for as long as the process is alive.
 4. **Did the pane id get recycled?** A record whose `session_id` disagrees with the running agent
    is ignored on purpose - it belongs to a previous agent on that pane. The row follows the new
    agent as soon as that agent writes a record of its own, so quitting an agent and starting
@@ -166,7 +166,7 @@ Foreign rows are killed through the `zellij` binary rather than the plugin's own
 on the current session only. So this means one of:
 
 1. **The row's session has exited.** <kbd>x</kbd> is refused when there is no process left to
-   signal; the row reads `unknown` / `(session exited)`.
+   signal; the row reads `gone` / `(session exited)`.
 2. **`zellij` is not on the panel's `PATH`.** The plugin shells out to it for foreign rows. It is
    the same binary the hook needs, so this usually shows up as nothing reporting at all.
 
@@ -204,17 +204,23 @@ In order:
 
 ## A row says `gone` / `(session exited)`
 
-Its Zellij session is no longer running, so nothing can report on it and its real state is
-unknowable. The row is kept rather than dropped: an agent silently vanishing hides whether it
-finished, crashed, or was never there.
+Its Zellij session is no longer running, so nothing can report on it. The row is kept rather than
+dropped, with its last status on the detail line (`(session exited · was done)`): an agent
+silently vanishing hides whether it finished, crashed, or was never there.
 
 <kbd>Enter</kbd> on such a row attaches (resurrects) the session rather than focusing a pane - the
 pane no longer exists. <kbd>x</kbd> is refused: there is no process left to signal.
 
-## A row in another session says `unknown`
+## A row in another session is dimmed / says `last seen`
 
 The process scan can see the agent, so it is running, but no status has reached the panel in the
-last 60 seconds. This is distinct from `gone`, where the whole session has exited.
+last 60 seconds. The row keeps the last status it had and says how old it is; it is not replaced.
+This is distinct from `gone`, where the whole session has exited.
+
+An agent that is genuinely mid-turn and quiet - thinking, or inside one long tool call - looks
+exactly like this, and clears on its next hook event. Only `working` and `compact` age this way;
+a blocked or finished agent keeps re-confirming, since silence is what those states predict. If
+the row stays stale across several turns, the agent is not writing records:
 
 The panel re-reads the spool every 5 seconds, so a poll that is merely late is ruled out. Look at
 the agent's record - the filename is `<session>.<pane_id>`:
@@ -236,7 +242,7 @@ ts=1787407612,pane_id=2,session=dotfiles-new,tool=claude,status=,session_id=21cb
 This is a hook older than v0.5.1. Counter events (`SubagentStart`, `TaskCreated`) carry no status,
 and that hook wrote the empty value into the record anyway. The panel cannot parse a statusless
 record, so it skips it - and since nothing overwrites that file afterwards, every later poll skips
-it too and the row never recovers. An agent that spawns a subagent gets stuck this way.
+it too and the row never refreshes. An agent that spawns a subagent gets stuck this way.
 
 Fix it by updating the hook and clearing the record:
 
@@ -247,12 +253,8 @@ Fix it by updating the hook and clearing the record:
 Then restart that agent. Newer hooks inherit the previous status instead of blanking it, and skip
 the write entirely when there is nothing to inherit.
 
-Two benign cases also read `unknown`, both self-correcting:
-
-- `ZJ_AGENT_SPOOL=0` is set for that agent, which opts it out of the cross-session transport. Its
-  status still reaches a panel in its own session.
-- The agent is genuinely mid-turn and quiet. Only `working` and `compact` decay this way - a
-  blocked or finished agent keeps its status, since silence is what those states predict.
+One more benign case: `ZJ_AGENT_SPOOL=0` is set for that agent, which opts it out of the
+cross-session transport. Its status still reaches a panel in its own session.
 
 ## "update available" never appears / pressing <kbd>U</kbd> fails
 

@@ -125,6 +125,10 @@ pub(crate) struct Agent {
     pub(crate) tasks_done: u32,
     /// False once the agent's session stops being listed by Zellij.
     pub(crate) session_alive: bool,
+    /// A foreign row nothing has refreshed in `STALE_AFTER`. The status is
+    /// kept - it is the last thing known - and painted as old rather than
+    /// replaced with a label that says nothing.
+    pub(crate) stale: bool,
     /// Fired a notification since the panel was last focused.
     pub(crate) notified: bool,
     /// A follow-up is queued for delivery when this turn ends.
@@ -147,6 +151,14 @@ pub(crate) enum Block {
     Question,
     /// Nobody has typed anything in a while. Not blocked on a decision.
     Idle,
+}
+
+impl Agent {
+    /// Whether the row's spinner should move. A stale or dead row holds still:
+    /// motion claims progress the panel cannot vouch for.
+    pub(crate) fn spinning(&self) -> bool {
+        self.status.is_active() && !self.stale && self.session_alive
+    }
 }
 
 impl Block {
@@ -192,8 +204,10 @@ impl Agent {
         self.is_blocked() && !self.escalated(now)
     }
 
+    /// A dead session's row keeps `waiting` as its last known status, but
+    /// nothing is blocked behind it any more.
     fn is_blocked(&self) -> bool {
-        matches!(self.status, Status::Waiting | Status::IdleWait)
+        self.session_alive && matches!(self.status, Status::Waiting | Status::IdleWait)
     }
 
     /// A pane title the user set themselves, as opposed to Zellij's default
@@ -261,12 +275,12 @@ impl Agent {
         // Marks a row that notified since you last looked, so coming back from
         // a banner does not mean re-scanning the whole list.
         let bell = if self.notified { "!" } else { " " };
-        // `unknown` covers two situations the user acts on differently: the
-        // session is gone and the agent is unreachable, or the row simply aged
-        // out while its session is alive, which points at missing hooks there.
-        let label = match self.status {
-            Status::Unknown if !self.session_alive => "gone",
-            _ => self.status.label(),
+        // A dead session is the bigger fact than whatever the agent was last
+        // doing; the detail line keeps that. A row that merely aged out keeps
+        // its label and is dimmed instead: the status is still the best guess.
+        let label = match self.session_alive {
+            false => "gone",
+            true => self.status.label(),
         };
 
         // Ranges are tracked as the string is built, in CHARACTER offsets: both
@@ -348,7 +362,11 @@ impl Agent {
 
         let level = self.status.color_level();
         let mut text = Text::new(text);
-        if self.status.is_error() || self.escalated(now) {
+        if !self.session_alive || self.stale {
+            text = text
+                .color_range(DIM_LEVEL, icon_range)
+                .color_range(DIM_LEVEL, label_range);
+        } else if self.status.is_error() || self.escalated(now) {
             text = text.error_color_range(icon_range).error_color_range(label_range);
         } else {
             text = text.color_range(level, icon_range).color_range(level, label_range);
@@ -433,10 +451,23 @@ impl Agent {
             bits.push(format!("tab:{}", t + 1));
         }
         bits.push(format!("pane:{}", self.pane_id()));
-        if !self.session_alive {
-            bits.push("(session exited)".to_string());
+        // Leads the line rather than ending it: how far the row can be trusted
+        // matters more than what it was last doing, and the line truncates
+        // from the right. Only an armed kill outranks it.
+        let trust = if !self.session_alive {
+            Some(match self.status.is_reported() {
+                true => format!("(session exited \u{b7} was {})", self.status.label()),
+                false => "(session exited)".to_string(),
+            })
         } else if !self.alive {
-            bits.push("(pane gone)".to_string());
+            Some("(pane gone)".to_string())
+        } else if self.stale {
+            Some(format!("last seen {} ago", fmt_elapsed(now - self.last_report)))
+        } else {
+            None
+        };
+        if let Some(t) = trust {
+            bits.insert(usize::from(kill_armed).min(bits.len()), t);
         }
         // Indented under the row it belongs to, matching the documented layout.
         let text = truncate(&format!("      \u{2514} {}", bits.join(" \u{b7} ")), cols);
@@ -579,6 +610,7 @@ mod render_tests {
             tasks_total: 0,
             tasks_done: 0,
             session_alive: true,
+            stale: false,
             notified: false,
             block: None,
         }
@@ -1077,31 +1109,43 @@ mod render_tests {
     }
 
     #[test]
-    fn a_dead_session_row_says_so() {
+    fn a_gone_row_says_what_it_was() {
         let mut a = agent();
         a.session_alive = false;
-        a.status = Status::Unknown;
+        a.status = Status::Done;
         let row = item_text(&a.list_item(0, ctx(false, "?", 0.0, 110, true, "mob")));
         assert!(row.contains("gone"), "the list row is what you scan: {:?}", row);
-        assert!(
-            !row.contains("unknown"),
-            "a gone session is not merely stale: {:?}",
-            row
-        );
+        assert!(!row.contains("done"), "the session is the bigger fact: {:?}", row);
+        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        assert!(d.contains("(session exited \u{b7} was done)"), "{:?}", d);
+        assert!(!d.contains("(pane gone)"), "{:?}", d);
+        a.status = Status::Discovered;
         let d = item_text(&a.detail_item(false, 0.0, false, 110));
         assert!(d.contains("(session exited)"), "{:?}", d);
-        assert!(!d.contains("(pane gone)"), "the session is the bigger fact: {:?}", d);
+        assert!(!d.contains("was found"), "nothing was known, so nothing was: {:?}", d);
     }
 
-    /// The other half: a row that aged out while its session is still alive is
-    /// stale, not gone, and usually means hooks are missing over there.
+    /// The other half: a row that aged out while its session is still alive
+    /// keeps its label - the last thing known - and says how old it is.
     #[test]
-    fn a_stale_row_in_a_live_session_still_says_unknown() {
+    fn a_stale_row_renders_its_label_dimmed_with_last_seen() {
         let mut a = agent();
-        a.status = Status::Unknown;
-        let row = item_text(&a.list_item(0, ctx(false, "?", 0.0, 110, true, "mob")));
-        assert!(row.contains("unknown"), "{:?}", row);
-        assert!(!row.contains("gone"), "the session is alive: {:?}", row);
+        a.stale = true;
+        a.status_since = 0.0;
+        a.last_report = 30.0;
+        let row = item_text(&a.list_item(0, ctx(false, "\u{2827}", 150.0, 110, true, "mob")));
+        assert!(row.contains("working"), "the status is kept: {:?}", row);
+        assert!(!row.contains("gone") && !row.contains("unknown"), "{:?}", row);
+        assert!(
+            row.contains("2m30s"),
+            "elapsed keeps counting from the real change: {:?}",
+            row
+        );
+        let d = item_text(&a.detail_item(false, 150.0, true, 110));
+        assert!(d.contains("last seen 2m00s ago"), "{:?}", d);
+        a.stale = false;
+        let d = item_text(&a.detail_item(false, 150.0, true, 110));
+        assert!(!d.contains("last seen"), "a fresh row says nothing about age: {:?}", d);
     }
 
     /// The sort already puts a blocked agent on top; past a threshold the colour

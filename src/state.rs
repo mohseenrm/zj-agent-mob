@@ -162,7 +162,13 @@ impl State {
     }
 
     pub(crate) fn icon_for(&self, agent: &Agent) -> &'static str {
+        if !agent.session_alive {
+            return "?";
+        }
         match agent.status {
+            // A stale spinner holds still: motion would claim progress the
+            // panel has not heard of.
+            Status::Working | Status::Compact if agent.stale => SPINNER[0],
             Status::Working | Status::Compact => SPINNER[self.frame % SPINNER.len()],
             Status::Waiting => "\u{25cf}",
             Status::IdleWait => "\u{25d0}",
@@ -170,7 +176,6 @@ impl State {
             Status::Done => "\u{2713}",
             Status::Idle => "\u{25cb}",
             Status::Discovered => "\u{25cc}",
-            Status::Unknown => "?",
         }
     }
 
@@ -180,15 +185,17 @@ impl State {
     /// `Discovered` is counted as nothing, like `Idle`. Folding it into any
     /// bucket would state something the scan cannot know - it found a process,
     /// not a status - and the header is the one place that must not guess.
+    /// A row whose session exited keeps its last status for the detail line,
+    /// but there is no agent behind it to count.
     pub(crate) fn counts(&self) -> (usize, usize, usize, usize) {
         let mut c = (0, 0, 0, 0);
-        for a in &self.agents {
+        for a in self.agents.iter().filter(|a| a.session_alive) {
             match a.status {
                 Status::Failed => c.0 += 1,
                 Status::Waiting | Status::IdleWait => c.1 += 1,
                 Status::Working | Status::Compact => c.2 += 1,
                 Status::Done => c.3 += 1,
-                Status::Idle | Status::Discovered | Status::Unknown => {}
+                Status::Idle | Status::Discovered => {}
             }
         }
         c
@@ -214,9 +221,10 @@ impl State {
         // without the clock it would never reach its expiry and would keep
         // offering `a` for a hook that has already stopped listening.
         let needed = !self.asks.is_empty()
-            || self.agents.iter().any(|a| {
-                a.status.is_active() || (a.id.session != *home && a.session_alive) || a.escalation_pending(now)
-            });
+            || self
+                .agents
+                .iter()
+                .any(|a| a.spinning() || (a.id.session != *home && a.session_alive) || a.escalation_pending(now));
         if needed {
             self.timer_running = true;
             host::set_timeout(TICK);
@@ -335,7 +343,7 @@ impl State {
         self.apply_liveness()
     }
 
-    /// Rows whose session is gone go `unknown` rather than disappearing.
+    /// Rows whose session is gone read `gone` rather than disappearing.
     pub(crate) fn apply_sessions(&mut self, live: Vec<String>) -> bool {
         if live.is_empty() {
             return false;
@@ -344,20 +352,24 @@ impl State {
         self.apply_liveness()
     }
 
-    /// Re-derives liveness from both sources. Unioned here rather than in one
-    /// shared field so the order the two writers fire in does not matter.
+    /// Re-derives liveness. The process scan is the only source that can see a
+    /// foreign session's server: `SessionUpdate` names the panel's own session
+    /// and nothing else, so it is not consulted here at all - taken as a list
+    /// of live sessions it would condemn every foreign row, including one a
+    /// fan-out pipe created a moment ago. Until a scan has reported, nothing
+    /// is declared dead. The home session is alive by construction.
+    ///
+    /// The status is left alone either way. It is the last thing known, the
+    /// row renders `gone` from `session_alive`, and a session that reappears
+    /// gets its rows back without a second source having to say what they were.
     fn apply_liveness(&mut self) -> bool {
         // Cloned to sidestep the borrow against `iter_mut`; both are tiny.
-        let (reported, scanned) = (self.live_sessions.clone(), self.scanned_sessions.clone());
+        let (home, scanned) = (self.session_name.clone(), self.scanned_sessions.clone());
         let mut changed = false;
         for agent in self.agents.iter_mut() {
-            let alive = reported.contains(&agent.id.session) || scanned.contains(&agent.id.session);
+            let alive = agent.id.session == home || scanned.is_empty() || scanned.contains(&agent.id.session);
             if agent.session_alive != alive {
                 agent.session_alive = alive;
-                changed = true;
-            }
-            if !alive && agent.status != Status::Unknown {
-                agent.status = Status::Unknown;
                 changed = true;
             }
         }
@@ -387,25 +399,27 @@ impl State {
         } else {
             self.arm_timer();
         }
-        aged || self.agents.iter().any(|a| a.status.is_active())
+        // A spinner repaints every tick. Anything else the clock is running
+        // for - a stale row's elapsed, a blocked row's wait - moves once a
+        // second, which is as fast as the eye reads a counter.
+        aged || self.agents.iter().any(|a| a.spinning()) || self.frame.is_multiple_of(4)
     }
 
     /// A foreign row's status is a snapshot. Past `STALE_AFTER` with nothing
-    /// refreshing it, the panel says `unknown` rather than keeping a `working`
-    /// it can no longer vouch for. The spool poll is what refreshes it.
+    /// refreshing it, the row is marked stale: the status stays, since it is
+    /// still the best guess, and the row is painted as old instead. The spool
+    /// poll is what refreshes it. Home rows never age: the pipe is
+    /// authoritative there.
     pub(crate) fn age_foreign_rows(&mut self) -> bool {
         let (now, home) = (self.now, self.session_name.clone());
         let mut changed = false;
         for agent in self.agents.iter_mut() {
-            let stale = now - agent.last_report >= STALE_AFTER;
-            if agent.id.session != home && stale && agent.status.is_reported() {
-                agent.status = Status::Unknown;
-                agent.status_since = now;
+            let stale =
+                agent.id.session != home && agent.status.is_reported() && now - agent.last_report >= STALE_AFTER;
+            if agent.stale != stale {
+                agent.stale = stale;
                 changed = true;
             }
-        }
-        if changed {
-            self.sort_agents();
         }
         changed
     }
@@ -511,6 +525,7 @@ impl State {
             }
             agent.alive = true;
             agent.session_alive = true;
+            agent.stale = false;
             agent.last_report = now;
         } else {
             newly_waiting = status == Status::Waiting;
@@ -539,6 +554,7 @@ impl State {
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
+                stale: false,
                 notified: false,
                 followup_queued: false,
                 block: args.get("block").and_then(|b| Block::parse(b)),
@@ -735,7 +751,7 @@ impl State {
         let Some(agent) = self.agents.get(self.selected) else {
             return false;
         };
-        if !agent.session_alive || agent.status == Status::Unknown {
+        if !agent.session_alive {
             return false;
         }
         let id = agent.id.clone();
@@ -1029,6 +1045,7 @@ impl State {
                 tasks_total: 0,
                 tasks_done: 0,
                 session_alive: true,
+                stale: false,
                 notified: false,
                 block: None,
             });
@@ -1091,14 +1108,15 @@ impl State {
             // its record stops advancing and eventually ages past STALE_AFTER.
             // Re-reading it is still evidence: the process scan says the agent
             // is alive, and silence is exactly what these states predict. So a
-            // re-read re-confirms a status the row already holds - it can never
-            // change one. Without this a foreign `waiting` row decays to
-            // `unknown` while the agent is blocked on you, which is the one row
-            // the panel exists to show.
+            // re-read re-confirms a status the row already holds and keeps it
+            // fresh. `working` is not re-confirmed: silence argues against it,
+            // so the row is left to go stale, keeping the label.
+            //
+            // An old record that is *newer than anything the row has* is still
+            // applied below. It is the last thing known about the agent, and
+            // `last_report` is dated by its age, so the row is born stale
+            // rather than sitting at `found` with the answer on disk.
             let reconfirms = !restarted && agent.status == status && status.persists_while_quiet();
-            if age >= STALE_AFTER && !reconfirms {
-                continue;
-            }
             // The turn's fan-out, progress and summary all belonged to the
             // agent that just went away.
             if restarted {
@@ -1125,6 +1143,15 @@ impl State {
             agent.spool_ts = rec.ts;
             let mut transitioned = false;
             if agent.status != status {
+                // A new turn, counted here as the pipe path counts it. Two
+                // turns inside one poll interval read as one: the count can
+                // run low, never high.
+                if status == Status::Working {
+                    agent.turns += 1;
+                    agent.subagents.clear();
+                    agent.tasks_total = 0;
+                    agent.tasks_done = 0;
+                }
                 agent.status = status;
                 agent.status_since = seen_at;
                 changed = true;
@@ -1193,6 +1220,11 @@ impl State {
                 agent.session_id = rec_sid.to_string();
             }
             agent.last_report = seen_at;
+            let stale = age >= STALE_AFTER && !reconfirms;
+            if agent.stale != stale {
+                agent.stale = stale;
+                changed = true;
+            }
             if transitioned {
                 let task = agent.display_task().to_string();
                 transitions.push((id, status, task));
@@ -1299,12 +1331,21 @@ impl State {
         if grouping != Grouping::Urgency {
             for a in self.agents.iter() {
                 let k = a.group_key(grouping).to_string();
-                let r = a.status.rank();
+                let r = match a.session_alive {
+                    true => a.status.rank(),
+                    false => u8::MAX,
+                };
                 best.entry(k).and_modify(|e| *e = (*e).min(r)).or_insert(r);
             }
         }
+        // A dead session sorts after everything alive: there is nothing to do
+        // about it, whatever its last status was.
+        let rank = |a: &Agent| match a.session_alive {
+            true => a.status.rank(),
+            false => u8::MAX,
+        };
         self.agents.sort_by(|a, b| match grouping {
-            Grouping::Urgency => a.status.rank().cmp(&b.status.rank()).then(a.id.cmp(&b.id)),
+            Grouping::Urgency => rank(a).cmp(&rank(b)).then(a.id.cmp(&b.id)),
             _ => {
                 let (ka, kb) = (a.group_key(grouping), b.group_key(grouping));
                 let (ra, rb) = (
@@ -1313,7 +1354,7 @@ impl State {
                 );
                 ra.cmp(&rb)
                     .then_with(|| ka.cmp(kb))
-                    .then(a.status.rank().cmp(&b.status.rank()))
+                    .then(rank(a).cmp(&rank(b)))
                     .then(a.id.cmp(&b.id))
             }
         });
@@ -2880,14 +2921,40 @@ mod cross_session_tests {
         assert!(s.agents.iter().any(|a| a.session() == "other"));
     }
 
+    /// Only the scan can pronounce a foreign session dead: `SessionUpdate`
+    /// names the panel's own session and nothing else, so on its own it would
+    /// condemn a row a fan-out pipe created a moment ago.
     #[test]
-    fn a_dead_session_turns_its_rows_unknown_without_dropping_them() {
+    fn a_fanout_row_is_not_dead_before_the_first_scan() {
+        let mut s = State {
+            live_sessions: Vec::new(),
+            ..state()
+        };
+        s.apply_sessions(vec!["mob".into()]);
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "done")]));
+        assert!(!s.apply_sessions(vec!["mob".into()]), "nothing to change");
+        assert!(s.agents[0].session_alive, "no scan has spoken yet");
+        assert_eq!(s.agents[0].status, Status::Done);
+        s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
+        assert!(s.spool_poll_due(), "and the poll that would confirm it is still due");
+    }
+
+    #[test]
+    fn a_dead_session_keeps_its_last_status() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
-        assert!(s.apply_sessions(vec!["mob".into()]));
-        assert_eq!(s.agents.len(), 1, "the row persists");
-        assert_eq!(s.agents[0].status, Status::Unknown);
-        assert!(!s.agents[0].session_alive);
+        s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "idle")]));
+        assert!(s.apply_scanned_sessions(vec!["mob".into()]));
+        assert_eq!(s.agents.len(), 2, "the row persists");
+        let dead = s.agents.iter().find(|a| a.session() == "other").unwrap();
+        assert!(!dead.session_alive);
+        assert_eq!(
+            dead.status,
+            Status::Working,
+            "the last thing known is kept for the detail line"
+        );
+        assert_eq!(s.agents[1].session(), "other", "but it sorts after anything alive");
+        assert_eq!(s.counts(), (0, 0, 0, 0), "and is not counted as working");
     }
 
     /// An empty session list means Zellij told us nothing, not that every
@@ -2901,13 +2968,21 @@ mod cross_session_tests {
     }
 
     #[test]
-    fn a_session_coming_back_clears_unknown() {
+    fn a_session_that_reappears_gets_its_rows_back() {
         let mut s = state();
-        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
-        s.apply_sessions(vec!["mob".into()]);
-        assert_eq!(s.agents[0].status, Status::Unknown);
-        assert!(s.apply_sessions(vec!["mob".into(), "other".into()]));
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
+        s.apply_scanned_sessions(vec!["mob".into()]);
+        assert!(!s.agents[0].session_alive);
+        s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
+        assert!(!s.spool_poll_due(), "nothing to poll for while it is dead");
+        assert!(s.apply_scanned_sessions(vec!["mob".into(), "other".into()]));
         assert!(s.agents[0].session_alive);
+        assert_eq!(
+            s.agents[0].status,
+            Status::Waiting,
+            "no second source had to say what it was"
+        );
+        assert!(s.spool_poll_due(), "and the poll resumes");
     }
 
     /// Messages predating the `session=` arg must land on the panel's own
@@ -3016,7 +3091,7 @@ mod cross_session_tests {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
         s.selected = 0;
-        s.apply_sessions(vec!["mob".into()]);
+        s.apply_scanned_sessions(vec!["mob".into()]);
         assert!(!s.can_kill_selected(), "a dead session has no pane to close");
     }
 
@@ -3193,14 +3268,14 @@ mod cross_session_tests {
     }
 
     /// A dead session's processes are gone, so the scan cannot see them. The row
-    /// stays `unknown` rather than vanishing.
+    /// stays as `gone` rather than vanishing.
     #[test]
     fn a_scan_does_not_cull_a_row_whose_session_died() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
         s.apply_scan(found(&[("other", 3)]));
-        s.apply_sessions(vec!["mob".into()]);
-        assert_eq!(s.agents[0].status, Status::Unknown);
+        s.apply_scanned_sessions(vec!["mob".into()]);
+        assert!(!s.agents[0].session_alive);
 
         assert!(!s.apply_scan(Vec::new()));
         assert_eq!(s.agents.len(), 1, "the row persists to show the agent existed");
@@ -3215,10 +3290,12 @@ mod cross_session_tests {
         assert!(s.agents.is_empty());
     }
 
-    /// A foreign row's status is frozen the moment it arrives, so past the
-    /// threshold the panel stops asserting it.
+    /// A foreign row's status is frozen the moment it arrives. Past the
+    /// threshold the panel marks it old rather than replacing it: `working`
+    /// from a minute ago is still the best guess, and the moment it changed is
+    /// still when it changed.
     #[test]
-    fn a_stale_foreign_row_decays_to_unknown() {
+    fn a_silent_working_row_goes_stale_not_unknown() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
         s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
@@ -3228,10 +3305,17 @@ mod cross_session_tests {
 
         s.now = STALE_AFTER;
         assert!(s.age_foreign_rows());
+        assert!(!s.age_foreign_rows(), "reported once, at the crossing");
         let foreign = s.agents.iter().find(|a| a.session() == "other").unwrap();
-        assert_eq!(foreign.status, Status::Unknown);
+        assert!(foreign.stale);
+        assert_eq!(foreign.status, Status::Working, "the status is kept");
+        assert_eq!(foreign.status_since, 0.0, "and so is when it began");
+        assert!(!foreign.spinning(), "but the spinner holds still");
         let home = s.agents.iter().find(|a| a.session() == "mob").unwrap();
-        assert_eq!(home.status, Status::Working, "the home row is refreshed by its hook");
+        assert!(!home.stale, "the home row is refreshed by its hook");
+
+        s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "working")]));
+        assert!(!s.agents.iter().any(|a| a.stale), "a fresh report clears it");
     }
 
     /// A foreign agent that keeps heartbeating is not stale. `status_since` only
@@ -3285,11 +3369,10 @@ mod cross_session_tests {
         assert!(!s.timer_running, "already escalated: nothing left to wait for");
     }
 
-    /// A decayed foreign row must keep ticking: the clock is what paces the
-    /// spool poll, and that poll is the only thing that can bring the row back.
-    /// Stopping here is what stranded foreign rows on `unknown`.
+    /// A stale foreign row must keep ticking: the clock is what paces the
+    /// spool poll, and that poll is the only thing that can refresh the row.
     #[test]
-    fn a_decayed_foreign_row_keeps_the_clock_running() {
+    fn a_stale_foreign_row_keeps_the_clock_running() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
         s.timer_running = false;
@@ -3298,10 +3381,10 @@ mod cross_session_tests {
 
         s.now = STALE_AFTER;
         assert!(s.age_foreign_rows());
-        assert_eq!(s.agents[0].status, Status::Unknown);
+        assert!(s.agents[0].stale);
         s.timer_running = false;
         s.arm_timer();
-        assert!(s.timer_running, "the poll still needs ticks to recover it");
+        assert!(s.timer_running, "the poll still needs ticks to refresh it");
     }
 
     /// The permanent-wakeup guard, rehomed onto the condition that actually
@@ -3311,7 +3394,7 @@ mod cross_session_tests {
     fn a_dead_sessions_row_does_not_hold_the_clock_open() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "other"), ("status", "waiting")]));
-        s.apply_sessions(vec!["mob".to_string()]);
+        s.apply_scanned_sessions(vec!["mob".to_string()]);
         assert!(!s.agents[0].session_alive);
 
         s.now = STALE_AFTER;
@@ -3562,9 +3645,10 @@ mod cross_session_tests {
         assert!(s.agents[0].task.is_none());
     }
 
-    /// A week-old file must never render, even if its row still exists.
+    /// A week-old file is still the last thing known about the agent behind a
+    /// live process, so it renders - marked stale, dated by its age.
     #[test]
-    fn a_record_older_than_the_stale_threshold_is_ignored() {
+    fn a_record_older_than_the_stale_threshold_is_applied_as_stale() {
         let mut s = state();
         s.apply_scan(found(&[("other", 3)]));
         s.apply_scan_result(scan_with(
@@ -3584,10 +3668,12 @@ mod cross_session_tests {
                 ]),
             ],
         ));
-        assert_eq!(
-            s.agents.iter().find(|a| a.pane_id() == 3).unwrap().status,
-            Status::Discovered,
-            "an ancient record must not be applied"
+        let a = s.agents.iter().find(|a| a.pane_id() == 3).unwrap();
+        assert_eq!(a.status, Status::Failed, "the last thing known is shown");
+        assert!(a.stale, "but not as current");
+        assert!(
+            s.now - a.last_report >= STALE_AFTER,
+            "dated by the record's age, not the read"
         );
     }
 
@@ -3962,13 +4048,13 @@ mod cross_session_tests {
         assert!(s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()])));
         assert_eq!(s.agents[0].status, Status::Working);
 
-        s.agents[0].status = Status::Unknown;
+        s.agents[0].status = Status::Idle;
         s.now += STALE_AFTER;
         assert!(
             !s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()])),
             "a record that has not moved in STALE_AFTER is stale, epoch frozen or not"
         );
-        assert_eq!(s.agents[0].status, Status::Unknown);
+        assert_eq!(s.agents[0].status, Status::Idle);
     }
 
     /// A blocked agent writes nothing while it waits, so its record never
@@ -3999,9 +4085,10 @@ mod cross_session_tests {
     }
 
     /// The other half of the rule: `working` claims active progress, and an
-    /// unchanging record is evidence against it rather than for it.
+    /// unchanging record is evidence against it rather than for it. The label
+    /// stays, since nothing better is known, but the row is marked old.
     #[test]
-    fn a_quiet_working_foreign_row_still_decays() {
+    fn a_quiet_working_foreign_row_still_goes_stale() {
         let mut s = state();
         s.apply_scan(found(&[("other", 3)]));
         let rec = || {
@@ -4020,7 +4107,8 @@ mod cross_session_tests {
             s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
             s.age_foreign_rows();
         }
-        assert_eq!(s.agents[0].status, Status::Unknown);
+        assert_eq!(s.agents[0].status, Status::Working);
+        assert!(s.agents[0].stale);
     }
 
     #[test]
@@ -4050,13 +4138,13 @@ mod cross_session_tests {
         s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
         assert!(s.spool_poll_due());
 
-        s.apply_sessions(vec!["mob".to_string()]);
+        s.apply_scanned_sessions(vec!["mob".to_string()]);
         assert!(!s.spool_poll_due(), "the session is gone");
     }
 
-    /// The re-confirm rule must not undo `apply_sessions`. A dead session's
+    /// The re-confirm rule must not undo the scan's verdict. A dead session's
     /// processes are gone, so the scan drops the row and no record can reach
-    /// it - but a leftover file plus a surviving row must not read `waiting`.
+    /// it - but a leftover file plus a surviving row must not read as alive.
     #[test]
     fn a_reconfirm_cannot_revive_a_dead_sessions_row() {
         let mut s = state();
@@ -4072,14 +4160,14 @@ mod cross_session_tests {
         s.apply_scan_result(scan_with(found(&[("other", 3)]), vec![rec()]));
         assert_eq!(s.agents[0].status, Status::Waiting);
 
-        s.apply_sessions(vec!["mob".to_string()]);
-        assert_eq!(s.agents[0].status, Status::Unknown);
+        s.apply_scanned_sessions(vec!["mob".to_string()]);
+        assert!(!s.agents[0].session_alive);
 
         s.now += STALE_AFTER;
         s.apply_scan_result(scan_with(Vec::new(), vec![rec()]));
         assert!(
-            s.agents.is_empty() || s.agents[0].status == Status::Unknown,
-            "a dead session's row never comes back as waiting"
+            s.agents.is_empty() || !s.agents[0].session_alive,
+            "a dead session's row never comes back alive"
         );
     }
 
@@ -4149,5 +4237,151 @@ mod cross_session_tests {
         s.handle_status(&args(&[("pane_id", "1"), ("status", "working")]));
         s.handle_status(&args(&[("pane_id", "1"), ("status", "waiting")]));
         assert!(!s.agents[0].notified);
+    }
+}
+
+#[cfg(test)]
+mod last_known_status_tests {
+    use super::*;
+    use crate::agent::AgentId;
+
+    fn state() -> State {
+        State {
+            permissions_granted: true,
+            popup_on_waiting: false,
+            session_name: "mob".into(),
+            discover: true,
+            ..Default::default()
+        }
+    }
+
+    fn found(session: &str, pane: u32) -> Vec<crate::discover::Found> {
+        vec![crate::discover::Found {
+            session: session.into(),
+            pane_id: pane,
+            tool: "claude".into(),
+        }]
+    }
+
+    fn rec(session: &str, pane: u32, ts: f64, status: &str) -> crate::discover::Spooled {
+        let args: BTreeMap<String, String> = [
+            ("pane_id", pane.to_string()),
+            ("session", session.to_string()),
+            ("status", status.to_string()),
+            ("session_id", "sid-1".to_string()),
+            ("tool", "claude".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        crate::discover::Spooled {
+            session: session.into(),
+            pane_id: pane,
+            ts,
+            args,
+        }
+    }
+
+    fn scan(found: Vec<crate::discover::Found>, spooled: Vec<crate::discover::Spooled>) -> crate::discover::Scan {
+        crate::discover::Scan {
+            found,
+            spooled,
+            complete: true,
+            live: vec!["mob".into(), "other".into()],
+        }
+    }
+
+    fn row(s: &State) -> &Agent {
+        let id = AgentId {
+            session: "other".into(),
+            pane_id: 7,
+        };
+        s.agents.iter().find(|a| a.id == id).unwrap()
+    }
+
+    /// The reported chain, end to end: a row learned by fan-out, a
+    /// `SessionUpdate` before any scan, then a scan whose record is old. This
+    /// used to read `gone`, then `unknown` forever with `done` on disk.
+    #[test]
+    fn a_fanout_row_survives_a_session_update_and_takes_an_old_record() {
+        let mut s = state();
+        s.apply_sessions(vec!["mob".into()]);
+        let args: BTreeMap<String, String> = [("pane_id", "7"), ("session", "other"), ("status", "done")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.handle_status(&args);
+        s.apply_sessions(vec!["mob".into()]);
+        assert!(row(&s).session_alive, "SessionUpdate alone cannot kill a foreign row");
+        s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
+        assert!(s.spool_poll_due(), "so the poll still runs");
+
+        s.now = 700.0;
+        s.apply_scan_result(scan(
+            found("other", 7),
+            vec![rec("other", 7, 100.0, "done"), rec("mob", 2, 700.0, "working")],
+        ));
+        assert!(row(&s).session_alive);
+        assert_eq!(row(&s).status, Status::Done, "the record on disk is what the row says");
+    }
+
+    /// A fresh panel meets an agent whose last record is ten minutes old. The
+    /// record is the last thing known, so it is shown - as old.
+    #[test]
+    fn an_old_record_is_applied_and_born_stale() {
+        let mut s = state();
+        s.apply_scan_result(scan(
+            found("other", 7),
+            vec![rec("other", 7, 100.0, "done"), rec("mob", 2, 700.0, "working")],
+        ));
+        let a = row(&s);
+        assert_eq!(a.status, Status::Done, "not `found`");
+        assert!(a.stale, "but not claimed fresh");
+        assert!(
+            (s.now - a.last_report - 600.0).abs() < 1e-6,
+            "dated by the record's age"
+        );
+        assert_eq!(a.session_id, "sid-1");
+
+        // The agent starts a new turn: a fresh record replaces the old one.
+        s.now += 5.0;
+        s.apply_scan_result(scan(
+            found("other", 7),
+            vec![rec("other", 7, 705.0, "working"), rec("mob", 2, 700.0, "working")],
+        ));
+        let a = row(&s);
+        assert_eq!(a.status, Status::Working);
+        assert!(!a.stale, "a fresh record clears it");
+        assert_eq!(a.turns, 1);
+    }
+
+    /// An old record is still not allowed to colour a recycled pane whose
+    /// current agent the row already knows.
+    #[test]
+    fn an_old_record_from_a_previous_agent_is_still_rejected() {
+        let mut s = state();
+        s.apply_scan_result(scan(found("other", 7), vec![rec("other", 7, 700.0, "working")]));
+        assert_eq!(row(&s).status, Status::Working);
+        let mut old = rec("other", 7, 100.0, "failed");
+        old.args.insert("session_id".into(), "sid-0".into());
+        s.now += 5.0;
+        assert!(!s.apply_scan_result(scan(found("other", 7), vec![old])));
+        assert_eq!(row(&s).status, Status::Working);
+        assert_eq!(row(&s).turns, 1, "born working counts as its first turn");
+    }
+
+    /// Foreign turns are counted the way the pipe counts them: once per entry
+    /// into `working`.
+    #[test]
+    fn a_spool_turn_is_counted() {
+        let mut s = state();
+        let mut ts = 100.0;
+        for status in ["idle", "working", "done", "working", "working", "done"] {
+            ts += 5.0;
+            s.now += 5.0;
+            s.apply_scan_result(scan(found("other", 7), vec![rec("other", 7, ts, status)]));
+        }
+        assert_eq!(row(&s).turns, 2);
+        assert_eq!(row(&s).status, Status::Done);
     }
 }

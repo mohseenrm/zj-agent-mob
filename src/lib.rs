@@ -29,7 +29,7 @@ pub(crate) const SPINNER: [&str; 10] = [
 
 pub(crate) const TICK: f64 = 0.25;
 
-/// How long a foreign row's status is trusted before it decays to `unknown`.
+/// How long a foreign row's status is shown as current before it is marked stale.
 pub(crate) const STALE_AFTER: f64 = 60.0;
 
 /// How often the spool is re-read while any foreign agent is on screen. Well
@@ -161,6 +161,21 @@ pub mod testing {
 
         pub fn status_of(&self, i: usize) -> &'static str {
             self.state.agents[i].status.label()
+        }
+
+        pub fn is_stale(&self, i: usize) -> bool {
+            self.state.agents[i].stale
+        }
+
+        pub fn session_alive(&self, i: usize) -> bool {
+            self.state.agents[i].session_alive
+        }
+
+        /// Liveness as the process scan reports it, which is the only source
+        /// that can speak for a foreign session.
+        pub fn scanned_sessions(&mut self, live: &[&str]) -> bool {
+            self.state
+                .apply_scanned_sessions(live.iter().map(|s| s.to_string()).collect())
         }
 
         pub fn counters(&self) -> Vec<((String, u32), u32, u32, u32)> {
