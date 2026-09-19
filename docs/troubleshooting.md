@@ -286,7 +286,7 @@ The usual cause is a partial install: the wasm was copied into `~/.config/zellij
 Re-run the installer to bootstrap it:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.12.1/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.13.0/init.sh | sh
 ```
 
 or `./init.sh` from a clone. Then press <kbd>r</kbd> on the install screen to re-read state.

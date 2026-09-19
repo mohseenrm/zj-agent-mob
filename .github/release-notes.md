@@ -1,45 +1,60 @@
-Rows from other sessions used to read `unknown` far more often than they should have, and `gone` when the session was demonstrably running. Both labels threw away something the panel already knew. A row now keeps the last status it was told and says how old that is:
+<kbd>U</kbd> updates the plugin. One press: it asks GitHub for the latest release, downloads it, installs it, and reloads the panel in place. No clone, no re-running `init.sh`, no restart.
 
-```
-   2 ⠋ claude  working    1m18s  api  [bypassPermi…]
-     └ last seen 1m03s ago · Bash cargo test --release
-```
-
-Dimmed, spinner stopped, elapsed still counting. The status is a minute old, and the row says so rather than pretending it knows nothing.
-
-## What was going wrong
-
-Three separate things, all of which looked like the same bug from the outside.
-
-**A quiet minute read as unknown.** Hooks fire around tool calls. An agent thinking, or inside one long `cargo build`, sends nothing, and after 60 seconds the row was overwritten with `unknown` and its elapsed reset to `0s`. The turn's duration was lost, and the row flapped back the moment the tool returned.
-
-**Rows could get stuck at `gone` forever.** Urgent transitions are pushed straight to other panels, and that pipe creates the row. The panel then asked Zellij which sessions were live -- except `SessionUpdate` only ever names the session its own server owns, so the answer was always "just this one" and the new row was pronounced dead. Dead rows stop polling. By the time a process scan proved the session alive, the status had already been replaced, and the record on disk couldn't undo it. The row sat at `unknown` while the file next to it said `done`.
-
-Attaching to a session to look at its panel is exactly what triggered this.
-
-**Fresh panels ignored what was already on disk.** Open a panel after an agent finished and it showed `found` -- "there's a process here, no idea what it's doing" -- while a `done` record from ten minutes ago sat unread. Old records were dropped rather than shown as old.
+The key existed in v0.12.0 but only did something in a narrow window. It installed the release a background check had already found, and the background check runs once per panel load off a six-hour cache. Press <kbd>U</kbd> any other time - a panel opened this morning, a release that landed an hour ago, `check_updates false` - and nothing happened. No error, no feedback. A key that silently does nothing is a key you stop trusting.
 
 ## What changed
 
-A foreign row keeps its status until something newer arrives. Nothing else may overwrite it -- not the clock, not the session list.
+<kbd>U</kbd> now does its own checking when it has to.
 
-- Past 60 seconds a row is marked **stale**: same label, same elapsed, dimmed, spinner frozen, `last seen 2m ago` leading the detail line.
-- Session liveness comes from the process scan alone, which is the only source that can actually see another session's server. Until a scan has reported, nothing is declared dead.
-- A row whose session really did exit reads `gone`, sorts to the bottom, leaves the header counts, and keeps what it was doing: `(session exited · was done)`.
-- Old records are applied and marked stale, instead of being thrown away.
-- Turns are now counted for agents in other sessions too.
-- `unknown` is gone as a status. Nothing produces it any more.
+- **Nothing known?** It runs the check itself with `--force`, going past the cache to ask GitHub directly, then installs whatever comes back.
+- **Release already known?** Straight to installing, no second round trip.
+- **Already current?** It says so, rather than leaving you staring at an unchanged screen.
 
-The panel repaints once a second while its clock is running, so a stale row's elapsed keeps ticking after its spinner stops.
+```
+checking for updates...
+update available: v0.14.0 (press U)
+updating...
+```
+
+or
+
+```
+already on the latest release (v0.13.0)
+```
+
+The background check is unchanged and still optional. It is a nudge now, not a prerequisite - `check_updates "false"` stops the automatic check, and <kbd>U</kbd> keeps working.
+
+## The key is on screen now
+
+The list footer is at its 84-column budget, so `U update` could not simply be added to it. While an update is waiting, `g goto` and `d clear` step aside for it:
+
+```
+↵ jump   / find   x kill   s sort   i install   U update   q hide
+```
+
+Both keys still work, and neither is what you came to the panel for with a release sitting there unread. The install screen (<kbd>i</kbd>) advertises <kbd>U</kbd> unconditionally, since there it always acts.
+
+## Under the hood
+
+`init.sh check-update` takes a `--force` flag that skips the cache:
+
+```sh
+./init.sh check-update          # cached, six hours
+./init.sh check-update --force  # asks GitHub now
+```
+
+The two checks stay separate on purpose. The background one may report but never installs - it runs without anyone asking, and acting on it would update the panel out from under whoever is using it. Only the hand-fired check chains into an install.
+
+A tag from the network is interpolated into a shell command, so an unparseable one is dropped rather than passed along. That was true before and still is.
 
 ## Upgrading
 
-Press <kbd>U</kbd> in the panel, or:
+From v0.12.x, press <kbd>U</kbd> - the old narrow path is enough to get you here if the footer is showing an offer. Otherwise:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.12.1/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.13.0/init.sh | sh
 ```
 
-The hook script is unchanged from v0.12.0, so running agents don't need restarting. Panels in other sessions keep the old code until they reload.
+The hook script is unchanged from v0.12.1, so running agents don't need restarting. Panels in other sessions keep the old code until they reload.
 
-**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.12.0...v0.12.1
+**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.12.1...v0.13.0
