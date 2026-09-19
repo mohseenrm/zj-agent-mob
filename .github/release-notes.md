@@ -1,57 +1,45 @@
-The panel now updates itself. When a newer release is out, a line shows up in the footer:
+Rows from other sessions used to read `unknown` far more often than they should have, and `gone` when the session was demonstrably running. Both labels threw away something the panel already knew. A row now keeps the last status it was told and says how old that is:
 
 ```
-update available: v0.12.0 (press U)
+   2 ⠋ claude  working    1m18s  api  [bypassPermi…]
+     └ last seen 1m03s ago · Bash cargo test --release
 ```
 
-Press <kbd>U</kbd> and the panel downloads the release, swaps the wasm, hook script and installer into place, and reloads itself. No shell, no reinstall, no leaving Zellij. This should be the last release you install by hand.
+Dimmed, spinner stopped, elapsed still counting. The status is a minute old, and the row says so rather than pretending it knows nothing.
 
-## How it works
+## What was going wrong
 
-On load the panel asks the installed `install.sh` for the latest tag:
+Three separate things, all of which looked like the same bug from the outside.
 
-```sh
-~/.config/zj-agent-mob/install.sh check-update
-```
+**A quiet minute read as unknown.** Hooks fire around tool calls. An agent thinking, or inside one long `cargo build`, sends nothing, and after 60 seconds the row was overwritten with `unknown` and its elapsed reset to `0s`. The turn's duration was lost, and the row flapped back the moment the tool returned.
 
-The answer is cached for six hours in `~/.config/zj-agent-mob/update-check`, so ten sessions starting at once make one request. <kbd>U</kbd> then runs `install.sh --version <tag> plugin` and reloads the plugin once it exits cleanly. A failed update leaves the running version alone and prints the first error line in the footer; <kbd>U</kbd> retries.
+**Rows could get stuck at `gone` forever.** Urgent transitions are pushed straight to other panels, and that pipe creates the row. The panel then asked Zellij which sessions were live -- except `SessionUpdate` only ever names the session its own server owns, so the answer was always "just this one" and the new row was pronounced dead. Dead rows stop polling. By the time a process scan proved the session alive, the status had already been replaced, and the record on disk couldn't undo it. The row sat at `unknown` while the file next to it said `done`.
 
-Some details worth knowing:
+Attaching to a session to look at its panel is exactly what triggered this.
 
-- Updates never touch your agent hook settings. If you deliberately hooked only Claude or only Codex, it stays that way.
-- Other Zellij sessions keep the old code until they reload. Their next <kbd>U</kbd> finds the files already current and just reloads.
-- The install screen (<kbd>i</kbd>) now shows the running version in its header.
-- Rather not have the panel phone GitHub? Turn it off in the plugin config:
+**Fresh panels ignored what was already on disk.** Open a panel after an agent finished and it showed `found` -- "there's a process here, no idea what it's doing" -- while a `done` record from ten minutes ago sat unread. Old records were dropped rather than shown as old.
 
-```kdl
-LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
-    floating true
-    check_updates false
-}
-```
+## What changed
 
-## Installer fixes
+A foreign row keeps its status until something newer arrives. Nothing else may overwrite it -- not the clock, not the session list.
 
-Two `init.sh` bugs the update path would have tripped over, fixed for manual installs too:
+- Past 60 seconds a row is marked **stale**: same label, same elapsed, dimmed, spinner frozen, `last seen 2m ago` leading the detail line.
+- Session liveness comes from the process scan alone, which is the only source that can actually see another session's server. Until a scan has reported, nothing is declared dead.
+- A row whose session really did exit reads `gone`, sorts to the bottom, leaves the header counts, and keeps what it was doing: `(session exited · was done)`.
+- Old records are applied and marked stale, instead of being thrown away.
+- Turns are now counted for agents in other sessions too.
+- `unknown` is gone as a status. Nothing produces it any more.
 
-- A from-release run used to copy its stale self over `~/.config/zj-agent-mob/install.sh` forever; it now fetches the installer from the release like everything else.
-- The wasm is swapped in with a rename instead of a plain `cp`, so a reload can never catch it half-written and two sessions updating at once cannot race.
+The panel repaints once a second while its clock is running, so a stale row's elapsed keeps ticking after its spinner stops.
 
 ## Upgrading
 
-One last time by hand:
+Press <kbd>U</kbd> in the panel, or:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.12.0/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.12.1/init.sh | sh
 ```
 
-Then reload the plugin, since Zellij caches compiled builds:
+The hook script is unchanged from v0.12.0, so running agents don't need restarting. Panels in other sessions keep the old code until they reload.
 
-```sh
-zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
-  "file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
-```
-
-The hook script is unchanged from v0.11.x, so running agents don't need restarting.
-
-**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.11.1...v0.12.0
+**Full changelog:** https://github.com/mohseenrm/zj-agent-mob/compare/v0.12.0...v0.12.1
