@@ -122,6 +122,11 @@ pub struct State {
     pub(crate) subs_open: Option<AgentId>,
     /// First visible row, kept so the selection stays on screen.
     pub(crate) scroll: usize,
+    /// Pane width for the chrome: rules and the key hints, which span the pane
+    /// rather than stopping at `MAX_WIDTH` like the text does. Set on every
+    /// render; zero until the first one, which reads as "fall back to the text
+    /// width" so a test that calls a render fn directly needs no setup.
+    pub(crate) chrome: usize,
     /// The last cross-session action that failed. Those run through the `zellij`
     /// binary, so a failure is otherwise invisible: the row would vanish while
     /// the agent kept running.

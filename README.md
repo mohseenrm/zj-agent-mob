@@ -170,7 +170,7 @@ running only one agent's hooks is supported.
 | <kbd>y</kbd> | Answer a blocked agent with `y` (only shown while it is waiting) |
 | <kbd>m</kbd> | Type a one-line reply to a blocked agent; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> cancels |
 | <kbd>o</kbd> | Expand the selected row's subagents into one line each; press again to collapse |
-| <kbd>d</kbd> | Dismiss a `done` badge |
+| <kbd>d</kbd> | Dismiss a `done` badge (works, but not in the footer - its slot went to <kbd>U</kbd>) |
 | <kbd>D</kbd> | Dismiss every `done` badge at once |
 | <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory (advertised in the empty state rather than the footer) |
 | <kbd>i</kbd> | Open the install screen |
@@ -194,16 +194,20 @@ running only one agent's hooks is supported.
 release, downloads it, installs it, and reloads the panel in place. Nothing to
 clone, no `init.sh` to re-run, no restart.
 
+It is in the footer at all times, because it works at all times - there is no
+state where pressing it does nothing. The version you are running is shown in
+the top right of the panel.
+
 The panel also checks quietly in the background - once per open, answered from a
-six-hour cache so it is not hammering the network - and puts a line in the footer
-when there is something newer:
+six-hour cache so it is not hammering the network - and adds a line when there
+is something newer:
 
 ```
 update available: v0.14.0 (press U)
 ```
 
-<kbd>U</kbd> works whether or not that line is there. With a release already
-known it goes straight to installing; with nothing known it does the check
+That line is a nudge, not a prerequisite. With a release already known
+<kbd>U</kbd> goes straight to installing; with nothing known it does the check
 itself, ignoring the cache, and installs whatever it finds. If you are already
 current it says so rather than sitting silent.
 

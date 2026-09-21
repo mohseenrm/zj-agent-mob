@@ -214,8 +214,7 @@ never touched by an update.
 The panel also checks quietly on load, asking the installed
 `~/.config/zj-agent-mob/install.sh` for the latest tag (cached for six hours, so
 many sessions loading at once make one request). When there is something newer a
-dim footer line appears, and the footer swaps `g goto` and `d clear` for
-`U update` so the key is on screen:
+dim line appears under the list:
 
 ```
 update available: v0.14.0 (press U)

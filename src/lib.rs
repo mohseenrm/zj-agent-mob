@@ -60,12 +60,21 @@ pub(crate) const WAITING_ESCALATE_AFTER: f64 = 120.0;
 pub(crate) const DEFAULT_APPROVE_TIMEOUT: f64 = 30.0;
 
 /// Stops a very wide pane from stretching a task summary across the screen.
+/// Applies to text only: the rules and the footer follow the pane, so a wide
+/// float reads as one panel rather than a column with a ragged edge down it.
 pub(crate) const MAX_WIDTH: usize = 120;
 
-/// The width every element lays out against, deliberately one column short of
-/// the pane: a line that exactly fills it wraps and eats the row below.
+/// The width text lays out against, deliberately one column short of the pane:
+/// a line that exactly fills it wraps and eats the row below.
 pub(crate) fn content_width(cols: usize) -> usize {
     cols.saturating_sub(1).clamp(1, MAX_WIDTH)
+}
+
+/// The width the chrome lays out against: the header rule, the footer rule and
+/// the key hints. Same one-column margin, but uncapped, so they span the pane
+/// on a screen wider than `MAX_WIDTH` instead of stopping mid-air.
+pub(crate) fn chrome_width(cols: usize) -> usize {
+    cols.saturating_sub(1).max(1)
 }
 
 /// A facade over `State` for the integration suite, which lives outside the

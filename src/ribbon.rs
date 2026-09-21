@@ -26,27 +26,16 @@ impl Hint {
     }
 }
 
-/// Exactly at the 84-column ribbon budget. `/ find` was paid for by tightening
+/// Within the 84-column ribbon budget. `/ find` was paid for by tightening
 /// three labels: the digit fast path lost its slot because every row prints its
 /// own number, so `g` is the only goto spelling that needs advertising.
+///
+/// `d clear` gave up its slot to `U update`. Dismissing a `done` badge is
+/// bookkeeping you can also do by visiting the pane, where updating is a key
+/// you cannot guess and cannot discover anywhere else on this screen.
 pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("\u{21b5}", "jump"),
     Hint::new("g", "goto"),
-    Hint::new("/", "find"),
-    Hint::new("x", "kill"),
-    Hint::new("d", "clear"),
-    Hint::new("s", "sort"),
-    Hint::new("i", "install"),
-    Hint::new("q", "hide"),
-];
-
-/// The list footer while an update is waiting, so the key that installs it is
-/// on screen at the one moment it does something. `U update` costs twelve
-/// columns, which is more than the 84-column ribbon budget has spare: `g goto`
-/// and `d clear` step aside for it. Both are still reachable, and neither is
-/// what you came to the panel for while a release is sitting there unread.
-pub(crate) const LIST_HINTS_UPDATE: &[Hint] = &[
-    Hint::new("\u{21b5}", "jump"),
     Hint::new("/", "find"),
     Hint::new("x", "kill"),
     Hint::new("s", "sort"),
@@ -134,7 +123,6 @@ mod tests {
     fn key_range_covers_the_key_only() {
         for h in LIST_HINTS
             .iter()
-            .chain(LIST_HINTS_UPDATE)
             .chain(INSTALL_HINTS)
             .chain(SETUP_HINTS)
             .chain(ASK_HINTS)
@@ -157,14 +145,7 @@ mod tests {
 
     #[test]
     fn every_hint_has_a_distinct_key() {
-        for set in [
-            LIST_HINTS,
-            LIST_HINTS_UPDATE,
-            INSTALL_HINTS,
-            ASK_HINTS,
-            REPLY_HINTS,
-            REPLY_EDIT_HINTS,
-        ] {
+        for set in [LIST_HINTS, INSTALL_HINTS, ASK_HINTS, REPLY_HINTS, REPLY_EDIT_HINTS] {
             let mut keys: Vec<&str> = set.iter().map(|h| h.key).collect();
             keys.sort_unstable();
             let before = keys.len();
@@ -177,7 +158,7 @@ mod tests {
     /// narrower than the ribbons it replaces and still name every key.
     #[test]
     fn plain_fallback_is_narrower_and_keeps_every_key() {
-        for set in [LIST_HINTS, LIST_HINTS_UPDATE, SETUP_HINTS, INSTALL_HINTS] {
+        for set in [LIST_HINTS, SETUP_HINTS, INSTALL_HINTS] {
             let plain = plain_line(set);
             assert!(
                 plain.chars().count() < ribbon_width(set),
@@ -197,9 +178,14 @@ mod tests {
     fn list_footer_matches_the_documented_row() {
         assert_eq!(
             plain_line(LIST_HINTS),
-            " \u{21b5} jump  g goto  / find  x kill  d clear  s sort  i install  q hide"
+            " \u{21b5} jump  g goto  / find  x kill  s sort  i install  U update  q hide"
         );
     }
+
+    /// The width a floating panel can be counted on to have. Anything wider
+    /// falls back to plain text rather than silently losing a whole segment,
+    /// so this is the line between "renders as ribbons" and "still readable".
+    const RIBBON_BUDGET: usize = 88;
 
     /// Dropping the angle brackets bought back two columns per hint, which is
     /// what lets the full list footer render as ribbons in a typical floating
@@ -208,7 +194,6 @@ mod tests {
     fn every_hint_row_fits_a_typical_pane_as_ribbons() {
         for (name, set) in [
             ("list", LIST_HINTS),
-            ("list-update", LIST_HINTS_UPDATE),
             ("setup", SETUP_HINTS),
             ("install", INSTALL_HINTS),
             ("ask", ASK_HINTS),
@@ -217,7 +202,7 @@ mod tests {
             ("followup-edit", FOLLOWUP_EDIT_HINTS),
         ] {
             assert!(
-                ribbon_width(set) <= 84,
+                ribbon_width(set) <= RIBBON_BUDGET,
                 "{} hints need {} columns; Zellij would silently drop one",
                 name,
                 ribbon_width(set)
@@ -227,25 +212,24 @@ mod tests {
 
     /// The footer is the only discoverability surface for these keys, so every
     /// key the list screen handles should appear in it.
-    /// The key is only worth a footer slot if pressing it does something, and
-    /// the update footer only replaces the default one while it does.
+    /// `U` works whether or not an update is pending - it does its own
+    /// checking - so it is advertised unconditionally. Gating the hint on a
+    /// pending update hid the key in exactly the state you would press it.
     #[test]
-    fn the_update_footer_advertises_u_and_keeps_the_essentials() {
-        let keys: Vec<&str> = LIST_HINTS_UPDATE.iter().map(|h| h.key).collect();
-        assert!(keys.contains(&"U"), "the update footer must name the update key");
-        for essential in ["\u{21b5}", "x", "i", "q"] {
-            assert!(keys.contains(&essential), "dropped {:?} to fit U", essential);
+    fn the_update_key_is_always_advertised() {
+        for (name, set) in [("list", LIST_HINTS), ("install", INSTALL_HINTS)] {
+            assert!(
+                set.iter().any(|h| h.key == "U"),
+                "{} footer must name the update key",
+                name
+            );
         }
-        assert!(
-            INSTALL_HINTS.iter().any(|h| h.key == "U"),
-            "the install screen advertises U unconditionally: there it always acts"
-        );
     }
 
     #[test]
     fn list_hints_cover_the_documented_keys() {
         let keys: Vec<&str> = LIST_HINTS.iter().map(|h| h.key).collect();
-        for expect in ["x", "d", "s", "i", "q", "g", "/"] {
+        for expect in ["x", "s", "i", "q", "g", "/", "U"] {
             assert!(keys.contains(&expect), "missing hint for {:?}", expect);
         }
     }
@@ -268,12 +252,18 @@ mod tests {
         // The digit fast path is excused because every row prints its own
         // number, which advertises it better than a footer chip could.
         let shift_or_motion = ["D", "G", "g", "j", "k"];
+        // `d` gave up its slot to `U update`. Dismissing a `done` badge is
+        // bookkeeping that also happens by visiting the pane, and `D` clears
+        // the whole fleet; updating is a key you can neither guess nor find
+        // anywhere else on this screen. Documented in the README key table.
+        let traded_away = ["d"];
 
         for key in [
             "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "o", "i", "q", "/",
         ] {
             let in_footer = LIST_HINTS.iter().any(|h| h.key == key);
-            let excused = contextual.contains(&key) || shift_or_motion.contains(&key) || key == "n";
+            let excused =
+                contextual.contains(&key) || shift_or_motion.contains(&key) || traded_away.contains(&key) || key == "n";
             assert!(
                 in_footer || excused,
                 "list key {:?} has no discoverability surface: put it in LIST_HINTS \

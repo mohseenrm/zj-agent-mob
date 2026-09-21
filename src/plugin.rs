@@ -216,6 +216,7 @@ impl ZellijPlugin for State {
         }
 
         let width = content_width(cols);
+        self.chrome = crate::chrome_width(cols);
 
         if self.install.open {
             self.render_install(rows, width);
@@ -357,6 +358,15 @@ struct Head {
     text: String,
     ranges: Vec<(usize, bool, std::ops::Range<usize>)>,
     group_range: Option<std::ops::Range<usize>>,
+}
+
+/// Where the version chip starts, or `None` when the header already reaches it.
+/// Dropped rather than truncated: half a version number is worse than none, and
+/// the install screen always carries it in full.
+fn version_column(head: usize, tag: usize, chrome: usize) -> Option<usize> {
+    let at = chrome.checked_sub(tag)?;
+    // Two columns of breathing room, so the counts and the version never touch.
+    (at >= head + 2).then_some(at)
 }
 
 /// A group heading, carrying its member count so a collapsed-looking group is
@@ -523,6 +533,7 @@ impl State {
             ranges,
             group_range,
         } = self.build_head(width);
+        let head_text = text.clone();
         let head = ranges.into_iter().fold(Text::new(text), |t, (level, is_err, r)| {
             if is_err {
                 t.error_color_range(r)
@@ -535,6 +546,7 @@ impl State {
             None => head,
         };
         print_text_with_coordinates(head, 0, 0, None, None);
+        self.render_version(&head_text, width);
         // The rules are the first chrome to go in a pane too short for all of
         // it: they separate, where the header and the hints carry information.
         // Without this the fixed chrome overruns a short pane and the terminal
@@ -725,8 +737,6 @@ impl State {
             ribbon::ASK_HINTS
         } else if self.can_reply_selected() {
             ribbon::REPLY_HINTS
-        } else if self.update.available().is_some() || self.update.busy() {
-            ribbon::LIST_HINTS_UPDATE
         } else {
             ribbon::LIST_HINTS
         };
@@ -756,9 +766,32 @@ impl State {
         self.render_rule(1, width)
     }
 
+    /// The running version, right-aligned on the header row. Its own element
+    /// rather than part of `build_head`, which also feeds the status-bar
+    /// summary where a version would just be noise.
+    ///
+    /// Dropped rather than truncated when the header already reaches it: half a
+    /// version number is worse than none, and the install screen always has it.
+    fn render_version(&self, head_text: &str, width: usize) {
+        let tag = format!("v{}", crate::install::CURRENT_VERSION);
+        let Some(at) = version_column(chars(head_text), chars(&tag), self.chrome_or(width)) else {
+            return;
+        };
+        print_text_with_coordinates(Text::new(tag).color_range(DIM_LEVEL, ..), at, 0, None, None);
+    }
+
+    /// The chrome width, falling back to the text width before the first
+    /// render has set one.
+    fn chrome_or(&self, width: usize) -> usize {
+        match self.chrome {
+            0 => width,
+            c => c.max(width),
+        }
+    }
+
     /// Returns the next free `y`.
     fn render_rule(&self, y: usize, width: usize) -> usize {
-        let rule = "\u{2500}".repeat(width);
+        let rule = "\u{2500}".repeat(self.chrome_or(width));
         print_text_with_coordinates(Text::new(rule).color_range(DIM_LEVEL, ..), 0, y, None, None);
         y + 1
     }
@@ -781,6 +814,7 @@ impl State {
     }
 
     fn render_hints(&self, hints: &[ribbon::Hint], y: usize, width: usize) {
+        let width = self.chrome_or(width);
         // Overflowing ribbons lose whole segments rather than truncating, so a
         // narrow pane would silently drop a key. Plain text keeps them all.
         if ribbon::ribbon_width(hints) > width {
@@ -1122,6 +1156,70 @@ mod viewport_tests {
         for rows in [6usize, 10, 20] {
             assert!(s.render_list(rows, 100) <= rows, "rows={}", rows);
         }
+    }
+}
+
+/// The rules and the footer follow the pane; the text stops at `MAX_WIDTH`.
+/// On a wide screen those are different numbers, which is the whole point.
+#[cfg(test)]
+mod version_chip_tests {
+    use super::version_column;
+
+    #[test]
+    fn it_sits_flush_against_the_right_edge() {
+        assert_eq!(version_column(20, 8, 100), Some(92));
+    }
+
+    /// A wide pane is exactly where this is worth showing, so it must survive
+    /// the cap that stops the text at MAX_WIDTH.
+    #[test]
+    fn a_wide_pane_still_places_it() {
+        assert_eq!(version_column(40, 8, 199), Some(191));
+    }
+
+    #[test]
+    fn it_is_dropped_rather_than_overlapped() {
+        // The header runs right up to where the tag would start.
+        assert_eq!(version_column(92, 8, 100), None, "no room for the gap");
+        assert_eq!(version_column(90, 8, 100), Some(92), "exactly the gap is enough");
+        assert_eq!(version_column(91, 8, 100), None, "one short of the gap");
+    }
+
+    #[test]
+    fn a_pane_narrower_than_the_tag_drops_it() {
+        assert_eq!(version_column(0, 8, 4), None);
+        assert_eq!(version_column(0, 8, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod chrome_width_tests {
+    use crate::{chrome_width, content_width, MAX_WIDTH};
+
+    #[test]
+    fn text_is_capped_but_chrome_follows_the_pane() {
+        let wide = 200;
+        assert_eq!(content_width(wide), MAX_WIDTH, "text stays readable");
+        assert_eq!(chrome_width(wide), wide - 1, "chrome spans the pane");
+    }
+
+    /// Below the cap the two agree, so a normal pane renders exactly as before.
+    #[test]
+    fn the_two_agree_on_an_ordinary_pane() {
+        for cols in [20usize, 80, 100, MAX_WIDTH, MAX_WIDTH + 1] {
+            assert_eq!(content_width(cols), chrome_width(cols).min(MAX_WIDTH), "cols={}", cols);
+        }
+    }
+
+    /// One column short of the pane, always: a line that exactly fills it wraps
+    /// and eats the row below, which is what the rule would land on.
+    #[test]
+    fn chrome_leaves_the_trailing_column() {
+        for cols in [2usize, 50, 121, 300] {
+            assert!(chrome_width(cols) < cols, "cols={}", cols);
+        }
+        assert_eq!(chrome_width(0), 1, "a zero-width pane must not underflow");
+        assert_eq!(chrome_width(1), 1);
     }
 }
 
