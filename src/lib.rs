@@ -12,6 +12,8 @@ mod ribbon;
 mod state;
 mod status;
 mod style;
+#[cfg(test)]
+mod tour;
 mod util;
 
 pub use state::State;

@@ -36,9 +36,39 @@ FONT_BOLD = os.path.join(FONT_DIR, "JetBrainsMonoNerdFontMono-Bold.ttf")
 FONT_FALLBACK = "/System/Library/Fonts/Menlo.ttc"
 FALLBACK_CHARS = set("↵")
 
+# Apple Symbols is the only font here with the idle-wait half-disc. It has the
+# fan-out badge too, but draws it at roughly half a cell, which reads as a
+# stray mark next to full-height text - so that one is drawn as a shape below,
+# the same treatment the spinner and the media glyphs already get.
+FONT_SYMBOLS = "/System/Library/Fonts/Apple Symbols.ttf"
+SYMBOL_CHARS = set("\u25d0")
+
 # Drawn, not typeset: no font on this machine has these in its cmap, so they
 # came out as .notdef boxes. A disc, a triangle and two bars.
 MEDIA_CHARS = set("⏺⏵⏸")
+
+# The subagent fan-out badge, drawn as the fork it depicts: one stem that splits
+# into two. Typeset from Apple Symbols it lands at half a cell and reads as a
+# speck beside the row it belongs to.
+FORK_CHAR = "\u2442"
+
+# A caption line, marked by the frame generator rather than guessed at. It is
+# the tour's own narration, not panel output, so it is pinned to the bottom of
+# the canvas: the panel's height changes as rows come and go, and a caption that
+# followed the last row would bob up and down between scenes.
+CAPTION_MARK = "\u2063"
+
+
+def draw_fork(d, x, y, cw, lh, fill):
+    """Draw the fan-out badge: a stem rising into two branches."""
+    cx = x + cw / 2
+    top, bot = y + lh * 0.24, y + lh * 0.78
+    mid = y + lh * 0.52
+    w = max(1, int(cw * 0.12))
+    span = cw * 0.30
+    d.line([(cx, bot), (cx, mid)], fill=fill, width=w)
+    d.line([(cx, mid), (cx - span, top)], fill=fill, width=w)
+    d.line([(cx, mid), (cx + span, top)], fill=fill, width=w)
 
 
 def draw_media(d, ch, x, y, cw, lh, fill):
@@ -130,6 +160,8 @@ DIM = (86, 95, 137)
 ACCENT = (158, 206, 106)
 HEADER_NAME = (125, 207, 255)
 SEL_BG = (41, 46, 66)
+# The narration sits below the panel and must not compete with it.
+CAPTION_FG = (122, 162, 247)
 
 ANSI = re.compile(r"\x1b\[([0-9;]*)m")
 # Everything else that can appear in a dump and must not become glyphs:
@@ -215,6 +247,23 @@ def spans(ln):
     # Box drawing: separators, the permission-prompt frame, detail elbows.
     if set(stripped) <= set("─│┌┐└┘ "):
         return [(ln, DIM, False)]
+    # Inside the permission-prompt box: dim frame, and the line being decided
+    # about painted like the panel paints it. The key row stays chrome.
+    if stripped.startswith("│") and stripped.endswith("│"):
+        body = stripped[1:-1].strip()
+        i = ln.index("│")
+        j = ln.rindex("│")
+        if body.startswith(("a approve", "r reject")):
+            colour = DIM
+        elif " " in body and not body.isidentifier():
+            colour = STATUS_COLORS["failed"]
+        else:
+            colour = FG
+        return [
+            (ln[: i + 1], DIM, False),
+            (ln[i + 1 : j], colour, False),
+            (ln[j:], DIM, False),
+        ]
     # Header: "zj-agent-mob  1 failed · 2 working"
     if stripped.startswith("zj-agent-mob"):
         out, i = [], ln.index("zj-agent-mob")
@@ -231,8 +280,12 @@ def spans(ln):
             pos = m.end()
         out.append((rest[pos:], FG, False))
         return out
-    # Detail line, always under a row and always secondary.
+    # Detail line, always under a row and always secondary - except an armed
+    # kill, which the panel paints with the error colour for the same reason it
+    # does in the pane: a pending destructive action must not read as chrome.
     if stripped.startswith("└"):
+        if "press x again" in ln:
+            return [(ln, STATUS_COLORS["failed"], False)]
         return [(ln, DIM, False)]
     # Footer ribbon: "↵ jump  g goto  / find" - key then label.
     if stripped.startswith("↵") or " esc " in ln or stripped.startswith("/"):
@@ -268,6 +321,7 @@ def render(path, size):
     reg = ImageFont.truetype(FONT_REG, FONT_SIZE)
     bold = ImageFont.truetype(FONT_BOLD, FONT_SIZE)
     fb = ImageFont.truetype(FONT_FALLBACK, FONT_SIZE)
+    sym = ImageFont.truetype(FONT_SYMBOLS, FONT_SIZE)
     cw = reg.getlength("M")
     ch = FONT_SIZE + 6
 
@@ -284,6 +338,11 @@ def render(path, size):
     # drift the view. Only the jump frame - the agent's pane, half as tall -
     # centres. Keyed on the header rather than height, for the same reason.
     y = WINDOW_BAR + PAD
+    caption = None
+    if lines and lines[-1].startswith(CAPTION_MARK):
+        caption = lines.pop()[len(CAPTION_MARK):]
+        while lines and not lines[-1].strip():
+            lines.pop()
     is_panel = any(ln.lstrip().startswith("zj-agent-mob") for ln in lines)
     if not is_panel:
         slack = (size[1] - WINDOW_BAR - PAD * 2) // ch - len(lines)
@@ -305,14 +364,38 @@ def render(path, size):
                 if cell != " ":
                     if cell in BRAILLE_CHARS:
                         draw_braille(d, cell, x, y, cw, ch, fg)
+                    elif cell == FORK_CHAR:
+                        draw_fork(d, x, y, cw, ch, fg)
                     elif cell in MEDIA_CHARS:
                         draw_media(d, cell, x, y, cw, ch, fg)
                     else:
-                        f = fb if cell in FALLBACK_CHARS else (bold if is_bold else reg)
+                        if cell in SYMBOL_CHARS:
+                            f = sym
+                        elif cell in FALLBACK_CHARS:
+                            f = fb
+                        else:
+                            f = bold if is_bold else reg
                         d.text((x, y), cell, font=f, fill=fg)
                 x += cw
         y += ch
+    if caption is not None:
+        draw_caption(d, caption, size, reg, cw, ch, y)
     return img
+
+
+def draw_caption(d, text, size, font, cw, ch, content_end):
+    """The tour's narration, pinned to the bottom edge of the canvas.
+
+    Never closer than one blank row to the panel above it: the tallest frames
+    reach far enough down that a fixed bottom position would otherwise sit
+    directly against the footer ribbon.
+    """
+    y = max(size[1] - PAD - ch, content_end + ch)
+    x = PAD
+    for cell in text:
+        if cell != " ":
+            d.text((x, y), cell, font=font, fill=CAPTION_FG)
+        x += cw
 
 
 def main():
@@ -333,9 +416,14 @@ def main():
         ls = [STRIP.sub("", x).rstrip() for x in body.split("\n")]
         while ls and not ls[-1].strip():
             ls.pop()
+        # The caption is drawn at a fixed spot, so it sizes the canvas by its
+        # width only; its row is already accounted for by the bottom padding.
+        ls = [x[len(CAPTION_MARK):] if x.startswith(CAPTION_MARK) else x for x in ls]
         cols = max(cols, max((len(x) for x in ls), default=0))
         rows = max(rows, len(ls))
-    size = (int(cw * cols) + PAD * 2, int(ch * rows) + WINDOW_BAR + PAD * 2)
+    # Plus a row for the caption, which is drawn below the panel rather than
+    # counted among its lines.
+    size = (int(cw * cols) + PAD * 2, int(ch * (rows + 2)) + WINDOW_BAR + PAD * 2)
 
     frames, holds = [], []
     for n in names:
