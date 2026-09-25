@@ -199,6 +199,7 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 | `notify_cooldown` | `60` | Seconds before the same agent may notify again, so a flapping row cannot spam you |
 | `notify_sound` | `false` | Play a sound with the notification |
 | `summary_file` | unset | Write the fleet summary here on every change, for a status bar to render. Also writes `<path>.kv` for parsing. Unset means nothing is published. See [the fleet summary](#the-fleet-summary-in-your-status-bar) |
+| `icons` | `nerd` | Which glyph set the panel draws. `nerd` needs a [Nerd Font](https://www.nerdfonts.com); `unicode` falls back to plain symbols any font has |
 | `check_updates` | `true` | Check GitHub for a newer release on load, via the installed `install.sh`. Set `false` to stop the automatic check; <kbd>U</kbd> still checks and installs on demand. See [updating](#updating) |
 
 ## Updating

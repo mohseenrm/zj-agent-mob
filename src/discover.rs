@@ -91,6 +91,28 @@ pub(crate) fn beacon_script() -> &'static str {
      [ -n \"$1\" ] && printf '%s' \"$2\" > \"$d/panel.$1\" 2>/dev/null || true"
 }
 
+/// Publishes the pin set for every panel to read, atomically: a scan reading
+/// mid-write would otherwise see a truncated list and drop pins from it.
+///
+/// The body is one `session pane` per line, bound as a positional so a session
+/// name can never reach the shell as code.
+pub(crate) fn publish_pins(body: &str) {
+    let mut ctx = BTreeMap::new();
+    ctx.insert(crate::install::CTX_KEY.to_string(), "pins".to_string());
+    host::run_command(
+        &[
+            "sh",
+            "-c",
+            "d=\"${ZJ_AGENT_SPOOL_DIR:-${TMPDIR:-/tmp}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}\"; \
+             [ -d \"$d\" ] || { mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; }; \
+             printf '%s' \"$1\" > \"$d/pins.tmp\" 2>/dev/null && mv -f \"$d/pins.tmp\" \"$d/pins\" 2>/dev/null || true",
+            "sh",
+            body,
+        ],
+        ctx,
+    );
+}
+
 pub(crate) fn announce_panel(sanitized: &str, real: &str) {
     if sanitized.is_empty() {
         return;
@@ -126,6 +148,10 @@ pub(crate) struct Scan {
     /// The script ran to completion. Without this a truncated read looks like
     /// "no agents anywhere" and would cull every foreign row.
     pub(crate) complete: bool,
+    /// Pinned rows, as `(sanitized session, pane id)`. Shared by every panel:
+    /// a pin set in one session is a pin everywhere. `None` means the file was
+    /// absent from this scan, which is different from "it is empty".
+    pub(crate) pins: Option<Vec<(String, u32)>>,
 }
 
 /// Splits `key=value,key=value` the way the pipe args arrive, so a spool record
@@ -193,6 +219,22 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 // Panel beacons and per-pane caches share the directory but
                 // are not agent records.
                 if name.starts_with("panel.") || name.starts_with("inflight.") || name.starts_with("git.") {
+                    continue;
+                }
+                // The shared pin set, not an agent record. One `session pane`
+                // per line, so unlike a status file it is read whole.
+                if name == "pins" {
+                    let pins = scan.pins.get_or_insert_with(Vec::new);
+                    // Split from the right: a session name may contain spaces,
+                    // and the pane id is the one field that never does.
+                    if let Some((session, pane)) = record.trim_end().rsplit_once(' ') {
+                        if let Ok(pane) = pane.parse::<u32>() {
+                            let entry = (crate::agent::sanitize_session(session), pane);
+                            if !pins.contains(&entry) {
+                                pins.push(entry);
+                            }
+                        }
+                    }
                     continue;
                 }
                 // First line wins: a file with more is malformed, and later
@@ -587,5 +629,54 @@ mod tests {
             assert_eq!(scan.spooled.len(), 1, "tmp skipped, extra line ignored: {:?}", out);
             assert_eq!(scan.spooled[0].pane_id, 3);
         }
+    }
+}
+
+#[cfg(test)]
+mod pin_file_tests {
+    use super::*;
+
+    fn scan_of(lines: &str) -> Scan {
+        parse(lines)
+    }
+
+    #[test]
+    fn the_pins_file_is_not_parsed_as_an_agent_record() {
+        let s = scan_of("SPOOL /tmp/s/pins:mob 3\n");
+        assert!(s.spooled.is_empty(), "a pin line is not a status record");
+        assert_eq!(s.pins.as_deref(), Some(&[("mob".to_string(), 3u32)][..]));
+    }
+
+    #[test]
+    fn every_pin_line_is_read_not_just_the_first() {
+        let s = scan_of("SPOOL /tmp/s/pins:mob 3\nSPOOL /tmp/s/pins:other 7\n");
+        let pins = s.pins.expect("pins");
+        assert_eq!(pins.len(), 2, "{:?}", pins);
+        assert!(pins.contains(&("other".to_string(), 7)));
+    }
+
+    #[test]
+    fn a_pin_session_is_sanitized_the_way_a_row_key_is() {
+        let s = scan_of("SPOOL /tmp/s/pins:my session 3\n");
+        assert_eq!(
+            s.pins.as_deref(),
+            Some(&[(crate::agent::sanitize_session("my session"), 3u32)][..]),
+            "the key must match the one a row carries"
+        );
+    }
+
+    #[test]
+    fn an_absent_pins_file_is_not_an_empty_pin_set() {
+        let s = scan_of("SPOOL /tmp/s/mob.3:ts=1,pane_id=3,session=mob,status=idle\n");
+        assert!(
+            s.pins.is_none(),
+            "absent means 'unknown', which must not unpin anything"
+        );
+    }
+
+    #[test]
+    fn a_malformed_pin_line_is_skipped_rather_than_guessed() {
+        let s = scan_of("SPOOL /tmp/s/pins:mob notanumber\nSPOOL /tmp/s/pins:mob 4\n");
+        assert_eq!(s.pins.as_deref(), Some(&[("mob".to_string(), 4u32)][..]));
     }
 }

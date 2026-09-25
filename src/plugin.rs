@@ -27,6 +27,7 @@ impl ZellijPlugin for State {
         self.notifier.sound = configuration.get("notify_sound").map(|v| v == "true").unwrap_or(false);
         self.summary_path = configuration.get("summary_file").cloned().unwrap_or_default();
         self.check_updates = configuration.get("check_updates").map(|v| v != "false").unwrap_or(true);
+        self.icons = crate::icons::from_config(configuration.get("icons"));
 
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -394,7 +395,7 @@ impl State {
 
     fn render_install(&self, rows: usize, width: usize) {
         let mut y = self.render_header(&format!("install \u{00b7} v{}", crate::install::CURRENT_VERSION), width);
-        y = self.render_rows(self.install.list_items(), y);
+        y = self.render_rows(self.install.list_items(self.icons), y);
         let note = self.install.notes().or_else(|| self.update.note());
         y = footer_start(y, rows, 2 + usize::from(note.is_some()));
         y = self.render_rule(y, width);
@@ -416,7 +417,7 @@ impl State {
             None,
         );
         y += 2;
-        y = self.render_rows(self.install.setup_items(), y);
+        y = self.render_rows(self.install.setup_items(self.icons), y);
         let note = self.install.notes();
         y = footer_start(y, rows, 2 + usize::from(note.is_some()));
         y = self.render_rule(y, width);
@@ -592,17 +593,7 @@ impl State {
         // Only the first row of a run gets a heading, so a group of six costs
         // one header row rather than six. Suppressed while finding: match order
         // is score order, and a heading over a re-sorted subset would lie.
-        let mut group_of: BTreeMap<usize, String> = BTreeMap::new();
-        if self.grouping != Grouping::Urgency && !finding {
-            let mut prev: Option<&str> = None;
-            for (i, a) in self.agents.iter().enumerate() {
-                let k = a.group_key(self.grouping);
-                if prev != Some(k) {
-                    group_of.insert(i, k.to_string());
-                    prev = Some(k);
-                }
-            }
-        }
+        let (group_of, pinned_n) = self.headings(finding);
 
         // One group per agent: its row plus whatever renders underneath it. The
         // viewport pages by group so a selected agent's prompt box is never cut
@@ -615,11 +606,16 @@ impl State {
                 // The heading rides on its first member's group, so the
                 // viewport keeps paging by group and never orphans a header.
                 if let Some(key) = group_of.get(&i) {
-                    let n = self
-                        .agents
-                        .iter()
-                        .filter(|a| a.group_key(self.grouping) == *key)
-                        .count();
+                    // A pinned member has left its project, so counting it there
+                    // would print a heading whose number exceeds its own rows.
+                    let n = match i < pinned_n {
+                        true => pinned_n,
+                        false => self
+                            .agents
+                            .iter()
+                            .filter(|a| !self.is_pinned(&a.id) && a.group_key(self.grouping) == *key)
+                            .count(),
+                    };
                     g.push(group_header(key, n, width));
                 }
                 // Rows keep their real list position, so the number shown is
@@ -634,14 +630,22 @@ impl State {
                         show_cwd,
                         id_width,
                         home: &self.session_name,
+                        pinned: self.is_pinned(&agent.id),
+                        icons: self.icons,
                     },
                 ));
                 let foreign = !self.session_name.is_empty() && agent.session() != self.session_name;
                 if detail_lines {
-                    g.push(agent.detail_item(self.kill_armed.as_ref() == Some(&agent.id), self.now, foreign, width));
+                    g.push(agent.detail_item(
+                        self.kill_armed.as_ref() == Some(&agent.id),
+                        self.now,
+                        foreign,
+                        width,
+                        self.icons,
+                    ));
                 }
                 if detail_lines && self.subs_open.as_ref() == Some(&agent.id) {
-                    g.extend(agent.subagent_rows(self.now, width));
+                    g.extend(agent.subagent_rows(self.now, width, self.icons));
                 }
                 // The prompt belongs to one agent, so it renders under that
                 // row. Not while finding: ask and reply act on the selection,
@@ -742,6 +746,56 @@ impl State {
         };
         self.render_hints(hints, y, width);
         y + 1
+    }
+
+    /// Which rows start a heading, and how many rows the pinned block holds.
+    ///
+    /// The pinned block is group zero: it heads its own run in every mode,
+    /// urgency included, because rows lifted out of rank order with nothing to
+    /// explain them read as a sort fault rather than as a feature. Group
+    /// headings then walk the unpinned remainder, so the first unpinned row
+    /// always opens its own group.
+    fn headings(&self, finding: bool) -> (BTreeMap<usize, String>, usize) {
+        let mut group_of: BTreeMap<usize, String> = BTreeMap::new();
+        let pinned_n = self.agents.iter().filter(|a| self.is_pinned(&a.id)).count();
+        if finding {
+            return (group_of, pinned_n);
+        }
+        if pinned_n > 0 {
+            group_of.insert(0, "pinned".to_string());
+        }
+        if self.grouping != Grouping::Urgency {
+            let mut prev: Option<&str> = None;
+            for (i, a) in self.agents.iter().enumerate().skip(pinned_n) {
+                let k = a.group_key(self.grouping);
+                if prev != Some(k) {
+                    group_of.insert(i, k.to_string());
+                    prev = Some(k);
+                }
+            }
+        }
+        (group_of, pinned_n)
+    }
+
+    /// The heading rows the list would draw, for tests that assert on chrome
+    /// rather than on the host-printed frame.
+    #[cfg(test)]
+    pub(crate) fn head_rows(&self, width: usize) -> Vec<String> {
+        let (group_of, pinned_n) = self.headings(self.find.is_some());
+        group_of
+            .iter()
+            .map(|(i, key)| {
+                let n = match *i < pinned_n {
+                    true => pinned_n,
+                    false => self
+                        .agents
+                        .iter()
+                        .filter(|a| !self.is_pinned(&a.id) && a.group_key(self.grouping) == *key)
+                        .count(),
+                };
+                crate::util::testing::item_text(&group_header(key, n, width))
+            })
+            .collect()
     }
 
     /// One row per `Text`, each at its own `y`. Returns the next free row.
@@ -1447,8 +1501,182 @@ mod find_render_tests {
                 show_cwd: false,
                 id_width: 10,
                 home: "mob",
+                pinned: false,
+                icons: &crate::icons::UNICODE,
             },
         ));
         assert!(row.contains(&format!("{} ", real + 1)), "{:?}", row);
+    }
+}
+
+/// The pinned block's chrome: its heading appears in every mode, and no group
+/// heading may count a member that has left it for the block.
+#[cfg(test)]
+mod pin_render_tests {
+    use crate::state::{Grouping, State};
+    use crate::util::testing::item_text;
+    use std::collections::BTreeMap;
+
+    fn fleet(specs: &[(&str, &str, &str)]) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for (pane, repo, status) in specs {
+            let args: BTreeMap<String, String> = [
+                ("pane_id", *pane),
+                ("status", *status),
+                ("repo", *repo),
+                ("cwd", &format!("/w/{}", repo) as &str),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    fn pin(s: &mut State, pane: u32) {
+        s.selected = s.agents.iter().position(|a| a.id.pane_id == pane).expect("row");
+        s.toggle_pin_selected();
+    }
+
+    /// Urgency mode has no headings at all today, so this is the one heading it
+    /// gains: without it, a pinned row above a more urgent one reads as a fault.
+    #[test]
+    fn the_pinned_heading_shows_in_urgency_mode() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "api", "failed")]);
+        assert!(!s.head_rows(80).iter().any(|r| r.contains("pinned")));
+        pin(&mut s, 1);
+        let rows = s.head_rows(80);
+        assert!(rows.iter().any(|r| r.contains("pinned (1)")), "{:?}", rows);
+    }
+
+    #[test]
+    fn the_pinned_heading_counts_only_pinned_rows() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "api", "idle"), ("3", "web", "idle")]);
+        pin(&mut s, 1);
+        pin(&mut s, 3);
+        let rows = s.head_rows(80);
+        assert!(rows.iter().any(|r| r.contains("pinned (2)")), "{:?}", rows);
+    }
+
+    /// A heading whose number exceeds the rows beneath it is the bug this
+    /// guards: the pinned member has left the project it used to be counted in.
+    #[test]
+    fn a_project_heading_does_not_count_a_pinned_member() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "api", "idle"), ("3", "web", "idle")]);
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        assert!(s.head_rows(80).iter().any(|r| r.contains("api (2)")));
+        pin(&mut s, 1);
+        let rows = s.head_rows(80);
+        assert!(
+            rows.iter().any(|r| r.contains("api (1)")),
+            "api lost a member: {:?}",
+            rows
+        );
+        assert!(!rows.iter().any(|r| r.contains("api (2)")), "{:?}", rows);
+    }
+
+    #[test]
+    fn a_group_whose_every_member_is_pinned_emits_no_heading() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "web", "idle")]);
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        pin(&mut s, 2);
+        let rows = s.head_rows(80);
+        assert!(!rows.iter().any(|r| r.contains("web")), "web is empty now: {:?}", rows);
+        assert!(rows.iter().any(|r| r.contains("api (1)")), "{:?}", rows);
+    }
+
+    /// The heading walk restarts at the first unpinned row, so the group that
+    /// happens to match the last pinned row still gets its own heading.
+    #[test]
+    fn the_first_unpinned_row_always_gets_its_heading() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "api", "waiting")]);
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        pin(&mut s, 2);
+        let rows = s.head_rows(80);
+        assert!(rows.iter().any(|r| r.contains("api (1)")), "{:?}", rows);
+    }
+
+    #[test]
+    fn finding_hides_the_pinned_heading() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "web", "idle")]);
+        pin(&mut s, 1);
+        assert!(s.head_rows(80).iter().any(|r| r.contains("pinned")));
+        s.find = Some(crate::state::Find {
+            query: "api".into(),
+            cursor: None,
+        });
+        assert!(
+            !s.head_rows(80).iter().any(|r| r.contains("pinned")),
+            "match order is score order, so the block would lie"
+        );
+    }
+
+    /// Group headings and the pinned heading both add rows the viewport did not
+    /// budget for, so the clipping contract is re-asserted with pins in play.
+    #[test]
+    fn pinned_rows_never_push_the_list_past_the_pane() {
+        for grouping in [Grouping::Urgency, Grouping::Project, Grouping::Session] {
+            for rows in [6usize, 8, 10, 14, 20] {
+                for n in [1usize, 3, 9, 20] {
+                    let specs: Vec<(String, String, String)> = (0..n)
+                        .map(|i| (i.to_string(), format!("r{}", i % 3), "idle".to_string()))
+                        .collect();
+                    let refs: Vec<(&str, &str, &str)> = specs
+                        .iter()
+                        .map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str()))
+                        .collect();
+                    let mut s = fleet(&refs);
+                    s.grouping = grouping;
+                    s.sort_agents();
+                    for pane in 0..n.min(3) as u32 {
+                        pin(&mut s, pane);
+                    }
+                    for sel in [0, n / 2, n - 1] {
+                        s.selected = sel;
+                        let emitted = s.render_list(rows, 100);
+                        assert!(
+                            emitted <= rows,
+                            "grouping={:?} rows={} n={} sel={} emitted {}",
+                            grouping,
+                            rows,
+                            n,
+                            sel,
+                            emitted
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_row_carries_a_gutter_mark() {
+        let mut s = fleet(&[("1", "api", "idle"), ("2", "api", "idle")]);
+        pin(&mut s, 1);
+        let icons = s.icons;
+        let marked = item_text(&s.agents[0].list_item(
+            0,
+            crate::agent::RowCtx {
+                selected: false,
+                icon: icons.idle,
+                now: 0.0,
+                cols: 110,
+                show_cwd: true,
+                id_width: 10,
+                home: "mob",
+                pinned: true,
+                icons,
+            },
+        ));
+        assert!(marked.contains(icons.pinned), "{:?}", marked);
     }
 }

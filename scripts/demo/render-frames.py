@@ -411,6 +411,7 @@ def main():
     reg = ImageFont.truetype(FONT_REG, FONT_SIZE)
     cw, ch = reg.getlength("M"), FONT_SIZE + 6
     cols = rows = 0
+    captioned = False
     for n in names:
         body = open(os.path.join(src, n), encoding="utf-8", errors="replace").read()
         ls = [STRIP.sub("", x).rstrip() for x in body.split("\n")]
@@ -418,12 +419,15 @@ def main():
             ls.pop()
         # The caption is drawn at a fixed spot, so it sizes the canvas by its
         # width only; its row is already accounted for by the bottom padding.
+        if any(x.startswith(CAPTION_MARK) for x in ls):
+            captioned = True
         ls = [x[len(CAPTION_MARK):] if x.startswith(CAPTION_MARK) else x for x in ls]
         cols = max(cols, max((len(x) for x in ls), default=0))
         rows = max(rows, len(ls))
     # Plus a row for the caption, which is drawn below the panel rather than
-    # counted among its lines.
-    size = (int(cw * cols) + PAD * 2, int(ch * (rows + 2)) + WINDOW_BAR + PAD * 2)
+    # counted among its lines. No captions anywhere means no reserved space, or
+    # the GIF carries a band of empty pixels along its bottom edge.
+    size = (int(cw * cols) + PAD * 2, int(ch * (rows + 2 * captioned)) + WINDOW_BAR + PAD * 2)
 
     frames, holds = [], []
     for n in names:
@@ -437,11 +441,14 @@ def main():
                 pass
         holds.append(hold)
 
-    # 10 fps: fast enough that typing reads as typing, slow enough that the GIF
-    # stays small. Durations are per-frame, so a held frame is one frame with a
-    # long duration rather than N copies - which is most of why this file is a
-    # few hundred KB rather than a few MB.
-    durations = [h * 100 for h in holds]
+    # One hold unit in milliseconds: 22ms is ~45fps. GIF stores delays in
+    # hundredths of a second and browsers clamp anything under 20ms up to 100ms,
+    # so 20ms is the floor below which a "faster" value renders five times
+    # SLOWER. Durations are per-frame, so a held frame is one frame with a long
+    # duration rather than N copies - which is most of why this file is a few
+    # hundred KB rather than a few MB.
+    unit = int(os.environ.get("ZJ_FRAME_MS", "22"))
+    durations = [max(20, h * unit) for h in holds]
 
     # One palette for the whole GIF, from the frame with the widest vocabulary.
     # RGB frames get a private palette each: bigger, and the same colour can

@@ -500,6 +500,10 @@ impl State {
                 self.kill_armed = None;
                 true
             }
+            // Lifts the selected row into the pinned block at the top, so the
+            // agents you are watching keep a stable row number while the rest
+            // of the fleet re-sorts underneath them.
+            BareKey::Char('p') => self.toggle_pin_selected(),
             // Expands the selected row's subagents into one line each. Toggled
             // per agent: the expansion follows the id, not the row index.
             BareKey::Char('o') => {
@@ -1432,5 +1436,84 @@ mod find_tests {
             s.find.as_ref().unwrap().cursor.is_none(),
             "a narrower query invalidates the pinned row"
         );
+    }
+}
+
+#[cfg(test)]
+mod pin_key_tests {
+    use crate::state::State;
+    use std::collections::BTreeMap;
+    use zellij_tile::prelude::{BareKey, KeyWithModifier};
+
+    fn key(c: char) -> KeyWithModifier {
+        KeyWithModifier::new(BareKey::Char(c))
+    }
+
+    fn fleet() -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            ..Default::default()
+        };
+        for (pane, status) in [("1", "idle"), ("2", "waiting"), ("3", "failed")] {
+            let args: BTreeMap<String, String> = [("pane_id", pane), ("status", status), ("cwd", "/w/api")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    #[test]
+    fn p_pins_and_the_cursor_follows_the_agent() {
+        let mut s = fleet();
+        s.selected = 2;
+        let before = s.agents[2].id.clone();
+        assert!(s.handle_key(key('p')));
+        assert_eq!(s.agents[s.selected].id, before, "the cursor must follow the agent");
+        assert_eq!(s.agents[0].id, before, "and that agent is now on top");
+    }
+
+    #[test]
+    fn p_again_unpins() {
+        let mut s = fleet();
+        s.selected = 2;
+        let target = s.agents[2].id.clone();
+        s.handle_key(key('p'));
+        assert!(s.is_pinned(&target));
+        s.handle_key(key('p'));
+        assert!(!s.is_pinned(&target), "a second press is the inverse of the first");
+        assert_eq!(s.agents[s.selected].id, target, "the cursor still follows it");
+    }
+
+    #[test]
+    fn p_disarms_a_pending_kill() {
+        let mut s = fleet();
+        s.kill_armed = Some(s.agents[0].id.clone());
+        s.handle_key(key('p'));
+        assert!(s.kill_armed.is_none(), "a re-sort must not leave a kill armed");
+    }
+
+    #[test]
+    fn p_is_text_while_a_reply_is_open() {
+        let mut s = fleet();
+        s.selected = s.agents.iter().position(|a| a.status.label() == "waiting").unwrap();
+        assert!(s.begin_reply(), "the waiting row accepts a reply");
+        s.handle_key(key('p'));
+        assert!(s.pinned.is_empty(), "the editor owns the keyboard");
+        assert_eq!(s.reply.as_ref().map(|r| r.text.as_str()), Some("p"));
+    }
+
+    #[test]
+    fn p_on_an_empty_list_is_inert() {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            ..Default::default()
+        };
+        assert!(!s.handle_key(key('p')));
+        assert!(s.pinned.is_empty());
     }
 }

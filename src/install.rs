@@ -122,12 +122,12 @@ pub(crate) enum InstallState {
 }
 
 impl InstallState {
-    fn icon(self) -> &'static str {
+    fn icon(self, icons: &'static crate::icons::Icons) -> &'static str {
         match self {
-            InstallState::Installed => "\u{2713}",
-            InstallState::Absent => "\u{25cb}",
-            InstallState::Busy => "\u{2219}",
-            InstallState::Unknown => "?",
+            InstallState::Installed => icons.installed,
+            InstallState::Absent => icons.absent,
+            InstallState::Busy => icons.busy,
+            InstallState::Unknown => icons.gone,
         }
     }
 
@@ -242,12 +242,12 @@ impl Install {
         true
     }
 
-    pub(crate) fn setup_items(&self) -> Vec<Text> {
+    pub(crate) fn setup_items(&self, icons: &'static crate::icons::Icons) -> Vec<Text> {
         SetupAction::ALL
             .into_iter()
             .enumerate()
             .map(|(i, a)| {
-                let marker = if i == self.setup_selected { "\u{25b6}" } else { " " };
+                let marker = if i == self.setup_selected { icons.marker } else { " " };
                 let text = format!("{} {}  {}", marker, a.hotkey(), a.label());
                 // Character offset: the cursor marker is multi-byte.
                 let at = chars(marker) + 1;
@@ -333,19 +333,19 @@ impl Install {
         }
     }
 
-    pub(crate) fn list_items(&self) -> Vec<Text> {
+    pub(crate) fn list_items(&self, icons: &'static crate::icons::Icons) -> Vec<Text> {
         Target::ALL
             .into_iter()
             .enumerate()
             .map(|(i, t)| {
                 let st = self.state(t);
-                let marker = if i == self.selected { "\u{25b6}" } else { " " };
+                let marker = if i == self.selected { icons.marker } else { " " };
                 let text = format!(
                     "{} {}  {:<20} {} {}",
                     marker,
                     t.hotkey(),
                     t.label(),
-                    st.icon(),
+                    st.icon(icons),
                     st.text()
                 );
                 // Character offsets: the cursor marker is multi-byte.
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn setup_screen_renders_four_numbered_actions() {
         let i = Install::default();
-        let texts: Vec<String> = i.setup_items().iter().map(item_text).collect();
+        let texts: Vec<String> = i.setup_items(&crate::icons::UNICODE).iter().map(item_text).collect();
         assert_eq!(
             texts,
             vec![
@@ -892,7 +892,7 @@ mod tests {
         let mut i = Install::default();
         for want in 0..SetupAction::ALL.len() {
             i.setup_selected = want;
-            let flags: Vec<bool> = i.setup_items().iter().map(is_selected).collect();
+            let flags: Vec<bool> = i.setup_items(&crate::icons::UNICODE).iter().map(is_selected).collect();
             assert_eq!(
                 flags.iter().filter(|f| **f).count(),
                 1,
@@ -911,7 +911,7 @@ mod tests {
             "",
             &ctx_of(CTX_STATUS),
         );
-        let texts: Vec<String> = i.list_items().iter().map(item_text).collect();
+        let texts: Vec<String> = i.list_items(&crate::icons::UNICODE).iter().map(item_text).collect();
         assert_eq!(texts.len(), Target::ALL.len());
         assert!(texts[0].contains("Claude Code hooks") && texts[0].contains("installed"));
         assert!(texts[1].contains("Codex hooks") && texts[1].contains("not installed"));
@@ -952,7 +952,11 @@ mod tests {
             "",
             &ctx_of(CTX_STATUS),
         );
-        for item in i.list_items().iter().chain(i.setup_items().iter()) {
+        for item in i
+            .list_items(&crate::icons::UNICODE)
+            .iter()
+            .chain(i.setup_items(&crate::icons::UNICODE).iter())
+        {
             assert!(!item_text(item).contains('\n'));
         }
     }
