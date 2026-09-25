@@ -18,6 +18,8 @@ by urgency, so whatever needs you most sits at the top.
 - **Jump to any pane** with <kbd>Enter</kbd>, across tabs *and* sessions.
 - **Fuzzy find** with <kbd>/</kbd>: a few characters of a task, worktree, or
   session narrows the list to it.
+- **Pin the ones you are watching** with <kbd>p</kbd>: they sit in a block at
+  the top with stable row numbers, in every session's panel.
 - **Told when you are away**: a desktop notification the moment an agent blocks or fails.
 - **Answer in place**: <kbd>a</kbd> / <kbd>r</kbd> for permission prompts, <kbd>A</kbd> to always allow a tool,
   <kbd>y</kbd> / <kbd>m</kbd> to reply.
@@ -37,6 +39,7 @@ by urgency, so whatever needs you most sits at the top.
 | Requirement | Why |
 |---|---|
 | Zellij 0.44+ | Plugin API (`LaunchOrFocusPlugin`, pipes, `RunCommandResult`) |
+| A [Nerd Font](https://www.nerdfonts.com) | The status icons. Set `icons "unicode"` for the old glyph set if you would rather not |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
 
 ## Quick start
@@ -48,7 +51,7 @@ Three steps: install, bind a key, restart your agents.
 No clone and no Rust toolchain required:
 
 ```sh
-curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.13.1/init.sh | sh
+curl -fsSL https://github.com/mohseenrm/zj-agent-mob/releases/download/v1.0.0/init.sh | sh
 ```
 
 This downloads the plugin and hook script for that release, wires up whichever of Claude Code and Codex you have, and leaves an installer at `~/.config/zj-agent-mob/install.sh` so the in-panel install screen works from then on.
@@ -56,7 +59,7 @@ This downloads the plugin and hook script for that release, wires up whichever o
 Prefer to read before running? Same thing in two steps:
 
 ```sh
-curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v0.13.1/init.sh
+curl -fsSL -O https://github.com/mohseenrm/zj-agent-mob/releases/download/v1.0.0/init.sh
 less init.sh && sh init.sh
 ```
 
@@ -162,6 +165,7 @@ running only one agent's hooks is supported.
 | <kbd>g</kbd> <var>N</var> <kbd>Enter</kbd> | Jump to any row by number, including past 9. <kbd>g</kbd> opens a count, <kbd>Enter</kbd> or <kbd>G</kbd> closes it: `g25`<kbd>Enter</kbd>, or `g25G` for the vim spelling |
 | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd> | First row / last row |
 | <kbd>/</kbd> | Fuzzy find: type to narrow the list (task, worktree, path, session, tool, status), <kbd>Ctrl</kbd>+<kbd>j</kbd>/<kbd>k</kbd> or <kbd>↓</kbd>/<kbd>↑</kbd> to pick a match, <kbd>Enter</kbd> jumps to it, <kbd>Esc</kbd> cancels. Smartcase, like vim |
+| <kbd>p</kbd> | Pin the selected row to the top; press again to unpin. Pinned rows form a block above everything else, keep stable numbers for <kbd>1</kbd>-<kbd>9</kbd> and <kbd>g</kbd>, and are shared by every panel |
 | <kbd>s</kbd> | Cycle the ordering: urgency (default) -> grouped by project (the git repo, so worktrees group together) -> grouped by session |
 | <kbd>x</kbd> | Send SIGINT to the agent; press again to close the pane (any session) |
 | <kbd>a</kbd> / <kbd>r</kbd> | Approve / reject a parked permission prompt |
@@ -175,7 +179,7 @@ running only one agent's hooks is supported.
 | <kbd>n</kbd> | Open a new agent in a floating pane, in the selected row's directory (advertised in the empty state rather than the footer) |
 | <kbd>i</kbd> | Open the install screen |
 | <kbd>U</kbd> | Update the plugin to the latest release. See [Updating](#updating) |
-| <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel |
+| <kbd>q</kbd> / <kbd>Esc</kbd> | Hide the panel (works, but not in the footer - its slot went to <kbd>p</kbd>) |
 
 ### Install screen
 
