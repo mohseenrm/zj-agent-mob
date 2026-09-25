@@ -20,7 +20,9 @@
 - [Hooks landed in my dotfiles repo](#hooks-landed-in-my-dotfiles-repo)
 - [The panel is cramped or columns are missing](#the-panel-is-cramped-or-columns-are-missing)
 - [The list says `↓ N more` and I cannot see every agent](#the-list-says--n-more-and-i-cannot-see-every-agent)
+- [The icon column shows boxes, blanks or question marks](#the-icon-column-shows-boxes-blanks-or-question-marks)
 - [A row has a `!` next to it](#a-row-has-a--next-to-it)
+- [A row is pinned and I want it back in rank order](#a-row-is-pinned-and-i-want-it-back-in-rank-order)
 - [Rows are grouped and I want the flat list back](#rows-are-grouped-and-i-want-the-flat-list-back)
 - [A row says `wants: plan` / `wants: question` and <kbd>a</kbd> does nothing](#a-row-says-wants-plan--wants-question-and-a-does-nothing)
 
@@ -361,6 +363,32 @@ To see more at once, make the floating pane taller (`height` in the layout).
 Under about two rows per agent the per-agent detail line is dropped first, which
 roughly doubles how many rows fit.
 
+## The icon column shows boxes, blanks or question marks
+
+The panel draws its status icons from a [Nerd Font](https://www.nerdfonts.com),
+and your terminal font is not a patched one. A font without those glyphs renders
+them as a tofu box, a blank, or a fallback glyph.
+
+Two ways out. Install a patched font and point your terminal at it, which also
+fixes Zellij's own status bar:
+
+```sh
+brew install --cask font-jetbrains-mono-nerd-font
+```
+
+Or keep your font and switch the panel back to the plain symbols any font has,
+in the plugin's KDL block:
+
+```kdl
+LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
+    floating true
+    icons "unicode"
+}
+```
+
+The columns line up either way: every glyph in both sets is exactly one cell
+wide, which the build asserts.
+
 ## A row has a `!` next to it
 
 That agent fired a desktop notification since you last had the panel focused. It
@@ -374,6 +402,19 @@ it points at the Zellij session rather than the plugin.
 
 No markers ever appearing is the normal state when notifications are off. See
 [no desktop notifications](#no-desktop-notifications).
+
+## A row is pinned and I want it back in rank order
+
+<kbd>p</kbd> toggles the pin on the selected row. Pinned rows form a block at the
+top under a `pinned (n)` heading, above even a failed agent, so that a row you
+are watching keeps a stable number.
+
+The pin set is shared: it lives in a file next to the status records, so a row
+you pin in one session is pinned in every panel, and it survives a plugin reload.
+A pin is dropped when its row goes away, so a recycled pane id never inherits one.
+
+<kbd>/</kbd> ignores pins entirely - match order is score order - so a search is
+the quickest way to see the fleet in pure rank order without unpinning anything.
 
 ## Rows are grouped and I want the flat list back
 

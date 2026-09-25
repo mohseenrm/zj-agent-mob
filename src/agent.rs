@@ -77,6 +77,8 @@ pub(crate) struct RowCtx<'a> {
     /// on screen so `zj-agent-mob` is not clipped to fit a ten-char default.
     pub(crate) id_width: usize,
     pub(crate) home: &'a str,
+    pub(crate) pinned: bool,
+    pub(crate) icons: &'static crate::icons::Icons,
 }
 
 /// One subagent spawned by an agent this turn. Finished entries are kept until
@@ -270,11 +272,19 @@ impl Agent {
             show_cwd,
             id_width,
             home,
+            pinned,
+            icons,
         } = ctx;
-        let marker = if selected { "\u{25b6}" } else { " " };
+        let marker = if selected { icons.marker } else { " " };
         // Marks a row that notified since you last looked, so coming back from
-        // a banner does not mean re-scanning the whole list.
-        let bell = if self.notified { "!" } else { " " };
+        // a banner does not mean re-scanning the whole list. A pin is permanent
+        // where a notification is cleared on the next focus, so the bell wins
+        // the column while both apply.
+        let bell = match (self.notified, pinned) {
+            (true, _) => icons.notified,
+            (false, true) => icons.pinned,
+            _ => " ",
+        };
         // A dead session is the bigger fact than whatever the agent was last
         // doing; the detail line keeps that. A row that merely aged out keeps
         // its label and is dimmed instead: the status is still the best guess.
@@ -343,8 +353,8 @@ impl Agent {
         let live = self.subagents_live();
         let sub_badge = match (live, self.subagents.is_empty()) {
             (0, true) => String::new(),
-            (0, false) => "\u{2442}\u{2713}".to_string(),
-            (n, _) => format!("\u{2442}{}", n),
+            (0, false) => format!("{}{}", icons.subagent, icons.done),
+            (n, _) => format!("{}{}", icons.subagent, n),
         };
         let sub_range = if !sub_badge.is_empty() && text.chars().count() + 2 + chars(&sub_badge) <= cols {
             text.push_str("  ");
@@ -391,7 +401,14 @@ impl Agent {
     }
 
     /// The dimmed second line under an agent's row.
-    pub(crate) fn detail_item(&self, kill_armed: bool, now: f64, foreign: bool, cols: usize) -> Text {
+    pub(crate) fn detail_item(
+        &self,
+        kill_armed: bool,
+        now: f64,
+        foreign: bool,
+        cols: usize,
+        icons: &'static crate::icons::Icons,
+    ) -> Text {
         let mut bits: Vec<String> = Vec::new();
         if kill_armed {
             bits.push("press x again to close pane".to_string());
@@ -426,7 +443,7 @@ impl Agent {
             }
         }
         if !self.subagents.is_empty() {
-            bits.push(self.subagent_summary(now));
+            bits.push(self.subagent_summary(now, icons));
         }
         // Native task counts are a real progress signal; turns are a proxy.
         if self.tasks_total > 0 {
@@ -482,7 +499,7 @@ impl Agent {
 
     /// The fan-out in one phrase: who is running and for how long, then how
     /// many finished. `o` expands this into one row per subagent.
-    fn subagent_summary(&self, now: f64) -> String {
+    fn subagent_summary(&self, now: f64, icons: &'static crate::icons::Icons) -> String {
         let live: Vec<&Subagent> = self.subagents.iter().filter(|s| s.done.is_none()).collect();
         let done = self.subagents.len() - live.len();
         let named: Vec<String> = live
@@ -497,7 +514,7 @@ impl Agent {
             })
             .collect();
         let extra = live.len().saturating_sub(3);
-        let mut out = String::from("\u{2442} ");
+        let mut out = format!("{} ", icons.subagent);
         if !live.is_empty() {
             out.push_str(&format!("{} running ({}", live.len(), named.join(", ")));
             if extra > 0 {
@@ -520,7 +537,7 @@ impl Agent {
     /// One row per subagent, shown under the agent while `o` has it expanded.
     /// A finished entry shows its total runtime rather than a still-running
     /// clock.
-    pub(crate) fn subagent_rows(&self, now: f64, cols: usize) -> Vec<Text> {
+    pub(crate) fn subagent_rows(&self, now: f64, cols: usize, icons: &'static crate::icons::Icons) -> Vec<Text> {
         self.subagents
             .iter()
             .map(|s| {
@@ -532,17 +549,13 @@ impl Agent {
                     Some(at) => ("done", fmt_elapsed(at - s.started)),
                     None => ("running", fmt_elapsed(now - s.started)),
                 };
-                let line = format!(
-                    "        \u{2442} {:<14} {:<8} {:>6}",
-                    truncate(kind, 14),
-                    label,
-                    elapsed
-                );
+                let indent = format!("        {} ", icons.subagent);
+                let line = format!("{}{:<14} {:<8} {:>6}", indent, truncate(kind, 14), label, elapsed);
                 let text = Text::new(truncate(&line, cols));
                 match s.done {
                     Some(_) => text.color_range(DIM_LEVEL, ..),
                     None => {
-                        let start = chars("        \u{2442} ") + 15;
+                        let start = chars(&indent) + 15;
                         let end = (start + chars(label)).min(cols);
                         match start < end {
                             true => text.color_range(Status::Working.color_level(), start..end),
@@ -625,6 +638,8 @@ mod render_tests {
             show_cwd,
             id_width: 10,
             home,
+            pinned: false,
+            icons: &crate::icons::UNICODE,
         }
     }
 
@@ -717,7 +732,7 @@ mod render_tests {
 
     #[test]
     fn detail_line_lists_activity_turns_tab_and_pane() {
-        let d = item_text(&agent().detail_item(false, 0.0, false, 110));
+        let d = item_text(&agent().detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("Edit src/webhook.rs"));
         assert!(d.contains("4 turns"));
         assert!(
@@ -730,7 +745,7 @@ mod render_tests {
 
     #[test]
     fn kill_armed_replaces_activity_with_confirmation() {
-        let d = item_text(&agent().detail_item(true, 0.0, false, 110));
+        let d = item_text(&agent().detail_item(true, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("press x again"), "{:?}", d);
         assert!(!d.contains("Edit src/webhook.rs"));
     }
@@ -768,7 +783,7 @@ mod render_tests {
     fn detail_line_summarizes_the_fan_out() {
         let mut a = agent();
         a.subagents = vec![sub("a", "Explore", 0.0, None), sub("b", "Plan", 48.0, None)];
-        let d = item_text(&a.detail_item(false, 60.0, false, 110));
+        let d = item_text(&a.detail_item(false, 60.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("\u{2442} 2 running (Explore 1m00s, Plan 12s)"), "{:?}", d);
     }
 
@@ -776,12 +791,12 @@ mod render_tests {
     fn finished_subagents_stay_counted_until_the_next_turn() {
         let mut a = agent();
         a.subagents = vec![sub("a", "Explore", 0.0, Some(30.0)), sub("b", "Plan", 0.0, None)];
-        let d = item_text(&a.detail_item(false, 60.0, false, 110));
+        let d = item_text(&a.detail_item(false, 60.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("1 running"), "{:?}", d);
         assert!(d.contains("1 done"), "{:?}", d);
 
         a.subagents = vec![sub("a", "Explore", 0.0, Some(30.0))];
-        let d = item_text(&a.detail_item(false, 60.0, false, 110));
+        let d = item_text(&a.detail_item(false, 60.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("\u{2442} 1 done (Explore)"), "{:?}", d);
     }
 
@@ -809,7 +824,11 @@ mod render_tests {
     fn expanded_subagent_rows_show_state_and_elapsed() {
         let mut a = agent();
         a.subagents = vec![sub("a", "Explore", 0.0, None), sub("b", "Plan", 10.0, Some(55.0))];
-        let rows: Vec<String> = a.subagent_rows(70.0, 110).iter().map(item_text).collect();
+        let rows: Vec<String> = a
+            .subagent_rows(70.0, 110, &crate::icons::UNICODE)
+            .iter()
+            .map(item_text)
+            .collect();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains("Explore") && rows[0].contains("running") && rows[0].contains("1m10s"));
         assert!(rows[1].contains("Plan") && rows[1].contains("done") && rows[1].contains("45s"));
@@ -824,7 +843,7 @@ mod render_tests {
         let mut a = agent();
         a.tasks_total = 7;
         a.tasks_done = 4;
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("4/7 tasks"), "{:?}", d);
         assert!(!d.contains("4 turns"), "native counts win over the proxy: {:?}", d);
     }
@@ -883,7 +902,7 @@ mod render_tests {
         let mut a = agent();
         a.detail = Some("Bash rm -rf node_modules".into());
         a.block = Some(Block::Plan);
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("wants: plan"), "{:?}", d);
     }
 
@@ -894,7 +913,7 @@ mod render_tests {
         let mut a = agent();
         a.detail = Some("needs approval: git push".into());
         a.block = Some(Block::Tool);
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert_eq!(
             d.matches("permission").count(),
             0,
@@ -911,7 +930,7 @@ mod render_tests {
         let mut a = agent();
         a.detail = Some("needs approval: ExitPlanMode".into());
         a.block = Some(Block::Plan);
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("wants: plan"), "{:?}", d);
     }
 
@@ -921,7 +940,7 @@ mod render_tests {
             let mut a = agent();
             a.block = Some(Block::Question);
             a.detail = Some("x".repeat(200));
-            let d = item_text(&a.detail_item(false, 0.0, false, cols));
+            let d = item_text(&a.detail_item(false, 0.0, false, cols, &crate::icons::UNICODE));
             assert!(d.chars().count() <= cols, "cols={} produced {:?}", cols, d);
         }
     }
@@ -932,7 +951,7 @@ mod render_tests {
         a.status = Status::Discovered;
         a.detail = None;
         a.turns = 0;
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("no report yet"), "{:?}", d);
         assert!(d.contains("pane:3"), "{:?}", d);
     }
@@ -953,13 +972,13 @@ mod render_tests {
     fn dead_pane_is_flagged() {
         let mut a = agent();
         a.alive = false;
-        assert!(item_text(&a.detail_item(false, 0.0, false, 110)).contains("(pane gone)"));
+        assert!(item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE)).contains("(pane gone)"));
     }
 
     #[test]
     fn detail_line_respects_cols() {
         for cols in [30usize, 60, 110] {
-            let d = item_text(&agent().detail_item(false, 0.0, false, cols));
+            let d = item_text(&agent().detail_item(false, 0.0, false, cols, &crate::icons::UNICODE));
             assert!(d.chars().count() <= cols, "cols={} got {:?}", cols, d);
         }
     }
@@ -1003,7 +1022,7 @@ mod render_tests {
         let mut a = agent();
         a.pane_title = "fix webhook retries".into();
         assert_eq!(a.display_task(), "fix webhook retries");
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("Add retry to webhook client"), "{:?}", d);
     }
 
@@ -1068,7 +1087,7 @@ mod render_tests {
         let r = item_text(&a.list_item(0, c));
         assert!(r.contains("zj-agent-mob/fuzzy-find"), "{:?}", r);
         assert!(!r.contains("mob "), "session leaves the main row: {:?}", r);
-        let d = item_text(&a.detail_item(false, 0.0, true, 110));
+        let d = item_text(&a.detail_item(false, 0.0, true, 110, &crate::icons::UNICODE));
         assert!(d.contains("session:mob"), "{:?}", d);
     }
 
@@ -1078,9 +1097,9 @@ mod render_tests {
         a.repo = "zj-agent-mob".into();
         a.wt = "fuzzy-find".into();
         a.branch = "fuzzy-find".into();
-        assert!(!item_text(&a.detail_item(false, 0.0, false, 110)).contains("branch:"));
+        assert!(!item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE)).contains("branch:"));
         a.branch = "feat/fuzzy".into();
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("branch:feat/fuzzy"), "{:?}", d);
     }
 
@@ -1116,11 +1135,11 @@ mod render_tests {
         let row = item_text(&a.list_item(0, ctx(false, "?", 0.0, 110, true, "mob")));
         assert!(row.contains("gone"), "the list row is what you scan: {:?}", row);
         assert!(!row.contains("done"), "the session is the bigger fact: {:?}", row);
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("(session exited \u{b7} was done)"), "{:?}", d);
         assert!(!d.contains("(pane gone)"), "{:?}", d);
         a.status = Status::Discovered;
-        let d = item_text(&a.detail_item(false, 0.0, false, 110));
+        let d = item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE));
         assert!(d.contains("(session exited)"), "{:?}", d);
         assert!(!d.contains("was found"), "nothing was known, so nothing was: {:?}", d);
     }
@@ -1141,10 +1160,10 @@ mod render_tests {
             "elapsed keeps counting from the real change: {:?}",
             row
         );
-        let d = item_text(&a.detail_item(false, 150.0, true, 110));
+        let d = item_text(&a.detail_item(false, 150.0, true, 110, &crate::icons::UNICODE));
         assert!(d.contains("last seen 2m00s ago"), "{:?}", d);
         a.stale = false;
-        let d = item_text(&a.detail_item(false, 150.0, true, 110));
+        let d = item_text(&a.detail_item(false, 150.0, true, 110, &crate::icons::UNICODE));
         assert!(!d.contains("last seen"), "a fresh row says nothing about age: {:?}", d);
     }
 
@@ -1181,7 +1200,7 @@ mod render_tests {
     fn rows_contain_no_embedded_newlines() {
         let a = agent();
         assert!(!row(&a, 0, true, "\u{280b}", 10.0, 110, true).contains('\n'));
-        assert!(!item_text(&a.detail_item(false, 0.0, false, 110)).contains('\n'));
+        assert!(!item_text(&a.detail_item(false, 0.0, false, 110, &crate::icons::UNICODE)).contains('\n'));
     }
 
     /// Coming back from a banner should not mean re-scanning the whole list.
@@ -1208,6 +1227,48 @@ mod render_tests {
         assert_eq!(plain.chars().count(), marked.chars().count());
         let tail = |s: &str| s.chars().skip(2).collect::<String>();
         assert_eq!(tail(&plain), tail(&marked), "only the gutter column differs");
+    }
+
+    fn pinned_row(notified: bool) -> String {
+        let mut c = ctx(false, "\u{25cf}", 0.0, 110, true, "mob");
+        c.pinned = true;
+        let mut a = agent();
+        a.notified = notified;
+        item_text(&a.list_item(0, c))
+    }
+
+    #[test]
+    fn a_pinned_row_carries_a_gutter_mark() {
+        let marked = pinned_row(false);
+        assert!(
+            marked.starts_with(&format!(" {} 1", crate::icons::UNICODE.pinned)),
+            "{:?}",
+            marked
+        );
+    }
+
+    /// A notification is cleared the next time you focus the panel; a pin is
+    /// not. The transient fact is the one worth the column while both apply.
+    #[test]
+    fn the_notified_mark_wins_over_the_pin_mark() {
+        let both = pinned_row(true);
+        assert!(
+            both.starts_with(&format!(" {} 1", crate::icons::UNICODE.notified)),
+            "{:?}",
+            both
+        );
+    }
+
+    /// The gutter is one column whatever occupies it, so the colour ranges
+    /// computed from later offsets stay put.
+    #[test]
+    fn the_pin_mark_does_not_shift_the_columns() {
+        let plain = row(&agent(), 0, false, "\u{25cf}", 0.0, 110, true);
+        for marked in [pinned_row(false), pinned_row(true)] {
+            assert_eq!(plain.chars().count(), marked.chars().count());
+            let tail = |s: &str| s.chars().skip(2).collect::<String>();
+            assert_eq!(tail(&plain), tail(&marked), "only the gutter column differs");
+        }
     }
 
     /// Rows past 9 are numbered too: `G` reaches them, so the number is not a
@@ -1256,14 +1317,14 @@ mod model_tests {
     fn the_model_appears_on_the_detail_line() {
         let mut a = super::render_tests::agent();
         a.model = "claude-sonnet-4-5-20250929".into();
-        let line = crate::util::testing::item_text(&a.detail_item(false, 0.0, false, 200));
+        let line = crate::util::testing::item_text(&a.detail_item(false, 0.0, false, 200, &crate::icons::UNICODE));
         assert!(line.contains("sonnet-4-5"), "{:?}", line);
     }
 
     #[test]
     fn no_model_adds_nothing_to_the_line() {
         let a = super::render_tests::agent();
-        let line = crate::util::testing::item_text(&a.detail_item(false, 0.0, false, 200));
+        let line = crate::util::testing::item_text(&a.detail_item(false, 0.0, false, 200, &crate::icons::UNICODE));
         assert!(!line.contains("sonnet"), "{:?}", line);
     }
 }

@@ -10,6 +10,7 @@
 - [Task summaries](#task-summaries)
 - [Counter events](#counter-events)
 - [Answering permission prompts](#answering-permission-prompts)
+- [Pinned rows](#pinned-rows)
 - [The install screen](#the-install-screen)
 
 ## Status transport
@@ -371,6 +372,40 @@ The path is passed to `sh -c` as a positional argument rather than interpolated 
 ```sh
 zellij pipe --name agent-label --args "pane_id=3,label=whatever you want"
 ```
+
+## Pinned rows
+
+<kbd>p</kbd> lifts a row into a block at the top of the list, above every other
+row whatever its status. Inside the block the usual urgency order applies, so
+pinning decides *which* rows are up top, not how they rank among themselves. The
+block carries a `pinned (n)` heading in every grouping mode, urgency included -
+the one mode that otherwise has no headings at all - because rows lifted out of
+rank order with nothing to explain them read as a sort fault.
+
+A pinned row leaves the group it would otherwise sit in, and its project or
+session heading stops counting it. A heading whose number exceeds the rows
+beneath it would be worse than no heading. Group rank is computed from unpinned
+members only, so pinning a group's only blocked agent lets that group fall back
+to where its remaining members put it.
+
+`/` ignores pins entirely. Match order is score order, and a block lifted over a
+re-sorted subset would lie about the ranking, the same reason find suppresses
+group headings.
+
+**The pin set is shared and outlives the panel.** It is one file, `pins`, next to
+the status records, holding `<session> <pane>` per line. A panel writes it on
+every toggle, atomically through a `.tmp` and a rename, and every panel picks it
+up on its next scan. So a row pinned in one session is pinned in all of them, and
+pins survive a plugin reload.
+
+Two rules keep a pin attached to the agent you gave it to rather than to a row
+position. A pin is dropped when its row goes away, so a recycled pane id never
+inherits one. But that prune only applies to sessions this panel can see: pruning
+a row another panel is watching would unpin it for everyone on the next write.
+
+The file is written with the *real* session name, not the sanitized spool key,
+and re-sanitized on read - the same split the beacon uses, since a name like
+`my session` keys as `my_session` and addresses nothing.
 
 ## The install screen
 

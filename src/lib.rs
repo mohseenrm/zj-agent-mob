@@ -4,6 +4,7 @@ mod agent;
 mod discover;
 mod find;
 mod host;
+mod icons;
 mod install;
 mod keys;
 mod notify;

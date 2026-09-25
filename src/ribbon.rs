@@ -33,15 +33,19 @@ impl Hint {
 /// `d clear` gave up its slot to `U update`. Dismissing a `done` badge is
 /// bookkeeping you can also do by visiting the pane, where updating is a key
 /// you cannot guess and cannot discover anywhere else on this screen.
+///
+/// `q hide` gave up its slot to `p pin`. Esc hides too, and it is the key every
+/// user tries unprompted; pinning is neither guessable nor advertised anywhere
+/// else on this screen.
 pub(crate) const LIST_HINTS: &[Hint] = &[
     Hint::new("\u{21b5}", "jump"),
     Hint::new("g", "goto"),
     Hint::new("/", "find"),
+    Hint::new("p", "pin"),
     Hint::new("x", "kill"),
     Hint::new("s", "sort"),
     Hint::new("i", "install"),
     Hint::new("U", "update"),
-    Hint::new("q", "hide"),
 ];
 
 /// Shown while the selected agent is blocked on you, so the keys that type into
@@ -178,7 +182,7 @@ mod tests {
     fn list_footer_matches_the_documented_row() {
         assert_eq!(
             plain_line(LIST_HINTS),
-            " \u{21b5} jump  g goto  / find  x kill  s sort  i install  U update  q hide"
+            " \u{21b5} jump  g goto  / find  p pin  x kill  s sort  i install  U update"
         );
     }
 
@@ -229,7 +233,7 @@ mod tests {
     #[test]
     fn list_hints_cover_the_documented_keys() {
         let keys: Vec<&str> = LIST_HINTS.iter().map(|h| h.key).collect();
-        for expect in ["x", "s", "i", "q", "g", "/", "U"] {
+        for expect in ["x", "s", "i", "p", "g", "/", "U"] {
             assert!(keys.contains(&expect), "missing hint for {:?}", expect);
         }
     }
@@ -256,10 +260,13 @@ mod tests {
         // bookkeeping that also happens by visiting the pane, and `D` clears
         // the whole fleet; updating is a key you can neither guess nor find
         // anywhere else on this screen. Documented in the README key table.
-        let traded_away = ["d"];
+        // `q` gave up its slot to `p pin`. Esc hides the panel too and is the
+        // key everyone reaches for unprompted, where a pin is neither guessable
+        // nor advertised anywhere else. Documented in the README key table.
+        let traded_away = ["d", "q"];
 
         for key in [
-            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "o", "i", "q", "/",
+            "j", "k", "g", "G", "s", "x", "a", "r", "d", "D", "y", "m", "n", "o", "i", "p", "q", "/",
         ] {
             let in_footer = LIST_HINTS.iter().any(|h| h.key == key);
             let excused =

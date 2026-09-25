@@ -7,7 +7,7 @@ use crate::agent::{Agent, AgentId, Block};
 use crate::host;
 use crate::install::Install;
 use crate::status::Status;
-use crate::{SIGINT_BYTE, SPINNER, STALE_AFTER, TICK};
+use crate::{SIGINT_BYTE, STALE_AFTER, TICK};
 
 /// A permission prompt parked by a blocked hook, waiting on a verdict.
 pub(crate) struct Ask {
@@ -132,6 +132,12 @@ pub struct State {
     /// the agent kept running.
     pub(crate) action_error: Option<String>,
     pub(crate) grouping: Grouping,
+    /// Rows the user pinned to the top. Keyed by id, not index: pipes re-sort
+    /// the list under a fixed index, and the pin must never be inherited by the
+    /// next agent that gets the same pane id.
+    pub(crate) pinned: Vec<AgentId>,
+    /// Which glyph table the panel draws from, chosen once in `load`.
+    pub(crate) icons: &'static crate::icons::Icons,
     pub(crate) own_plugin_id: u32,
     /// Set once this instance has asked the host to close it as a duplicate.
     /// `close_self` is a request, not a guarantee: the pane survives until the
@@ -167,20 +173,22 @@ impl State {
     }
 
     pub(crate) fn icon_for(&self, agent: &Agent) -> &'static str {
+        let i = self.icons;
         if !agent.session_alive {
-            return "?";
+            return i.gone;
         }
         match agent.status {
             // A stale spinner holds still: motion would claim progress the
             // panel has not heard of.
-            Status::Working | Status::Compact if agent.stale => SPINNER[0],
-            Status::Working | Status::Compact => SPINNER[self.frame % SPINNER.len()],
-            Status::Waiting => "\u{25cf}",
-            Status::IdleWait => "\u{25d0}",
-            Status::Failed => "\u{2717}",
-            Status::Done => "\u{2713}",
-            Status::Idle => "\u{25cb}",
-            Status::Discovered => "\u{25cc}",
+            Status::Working | Status::Compact if agent.stale => i.spinner[0],
+            Status::Working => i.spinner[self.frame % i.spinner.len()],
+            Status::Compact => i.compact,
+            Status::Waiting => i.waiting,
+            Status::IdleWait => i.idle_wait,
+            Status::Failed => i.failed,
+            Status::Done => i.done,
+            Status::Idle => i.idle,
+            Status::Discovered => i.discovered,
         }
     }
 
@@ -990,6 +998,10 @@ impl State {
         let mut changed = self.apply_scanned_sessions(scan.live);
         changed |= self.merge_found(scan.found);
         changed |= self.apply_spool(scan.spooled);
+        // After the rows exist, so a pin lands on a row this scan just created.
+        if let Some(pins) = scan.pins {
+            changed |= self.apply_pins(pins);
+        }
         if changed {
             self.clamp_selection();
             self.sort_agents();
@@ -1328,13 +1340,67 @@ impl State {
         self.sort_agents();
     }
 
+    pub(crate) fn is_pinned(&self, id: &AgentId) -> bool {
+        self.pinned.contains(id)
+    }
+
+    /// Toggles the pin on the selected row and keeps the cursor on that agent
+    /// across the re-sort, so pressing `p` twice is visibly a no-op rather than
+    /// a jump onto whatever landed under the cursor.
+    /// The pin set as the spool file holds it: one `session pane` per line.
+    fn pins_body(&self) -> String {
+        self.pinned
+            .iter()
+            .map(|id| format!("{} {}\n", self.real_session(&id.session), id.pane_id))
+            .collect()
+    }
+
+    /// Adopts the shared pin set a scan read off disk. Pins for rows this panel
+    /// cannot see are kept: another session's panel can see them, and dropping
+    /// them here would unpin that row for everyone on the next write.
+    pub(crate) fn apply_pins(&mut self, pins: Vec<(String, u32)>) -> bool {
+        let next: Vec<AgentId> = pins
+            .into_iter()
+            .map(|(session, pane_id)| AgentId { session, pane_id })
+            .collect();
+        if next == self.pinned {
+            return false;
+        }
+        self.pinned = next;
+        self.sort_agents();
+        true
+    }
+
+    pub(crate) fn toggle_pin_selected(&mut self) -> bool {
+        let Some(id) = self.agents.get(self.selected).map(|a| a.id.clone()) else {
+            return false;
+        };
+        match self.pinned.iter().position(|p| *p == id) {
+            Some(at) => {
+                self.pinned.remove(at);
+            }
+            None => self.pinned.push(id.clone()),
+        }
+        self.kill_armed = None;
+        self.sort_agents();
+        if let Some(i) = self.agents.iter().position(|a| a.id == id) {
+            self.selected = i;
+        }
+        crate::discover::publish_pins(&self.pins_body());
+        true
+    }
+
     pub(crate) fn sort_agents(&mut self) {
         let grouping = self.grouping;
+        let pins = self.pinned.clone();
+        let is_pinned = |a: &Agent| pins.contains(&a.id);
         // The group's own rank is its most urgent member, so grouping never
         // buries a blocked agent under a quiet project that sorts earlier.
+        // Pinned rows are excluded: they have left the group, so a group must
+        // not keep its place on the strength of a member that is no longer in it.
         let mut best: BTreeMap<String, u8> = BTreeMap::new();
         if grouping != Grouping::Urgency {
-            for a in self.agents.iter() {
+            for a in self.agents.iter().filter(|a| !is_pinned(a)) {
                 let k = a.group_key(grouping).to_string();
                 let r = match a.session_alive {
                     true => a.status.rank(),
@@ -1350,7 +1416,14 @@ impl State {
             false => u8::MAX,
         };
         self.agents.sort_by(|a, b| match grouping {
-            Grouping::Urgency => rank(a).cmp(&rank(b)).then(a.id.cmp(&b.id)),
+            Grouping::Urgency => (!is_pinned(a))
+                .cmp(&!is_pinned(b))
+                .then(rank(a).cmp(&rank(b)))
+                .then(a.id.cmp(&b.id)),
+            _ if is_pinned(a) || is_pinned(b) => (!is_pinned(a))
+                .cmp(&!is_pinned(b))
+                .then(rank(a).cmp(&rank(b)))
+                .then(a.id.cmp(&b.id)),
             _ => {
                 let (ka, kb) = (a.group_key(grouping), b.group_key(grouping));
                 let (ra, rb) = (
@@ -1366,6 +1439,19 @@ impl State {
         self.clamp_selection();
         let agents = &self.agents;
         self.notifier.retain_known(|id| agents.iter().any(|a| &a.id == id));
+        // A pin dies with its row, because pane ids are recycled and a pin that
+        // outlived its agent would be inherited by whoever gets that pane next.
+        // Only for sessions this panel can actually see, though: the set is
+        // shared, and pruning a row another panel is watching would unpin it
+        // for everyone on the next write.
+        let known: Vec<&str> = self
+            .live_sessions
+            .iter()
+            .chain(self.scanned_sessions.iter())
+            .map(|s| s.as_str())
+            .collect();
+        self.pinned
+            .retain(|id| !known.contains(&id.session.as_str()) || agents.iter().any(|a| &a.id == id));
         // A reply loses its target when that agent's row goes away.
         if let Some(r) = &self.reply {
             let id = r.id.clone();
@@ -3140,6 +3226,8 @@ mod cross_session_tests {
                         show_cwd: true,
                         id_width: 10,
                         home: &s.session_name,
+                        pinned: false,
+                        icons: s.icons,
                     },
                 ))
             })
@@ -3437,6 +3525,7 @@ mod cross_session_tests {
             spooled,
             live: live.iter().map(|s| s.to_string()).collect(),
             complete: true,
+            pins: None,
         }
     }
 
@@ -3974,6 +4063,8 @@ mod cross_session_tests {
                         show_cwd: true,
                         id_width: 10,
                         home: &s.session_name,
+                        pinned: false,
+                        icons: s.icons,
                     },
                 ))
             })
@@ -4293,6 +4384,7 @@ mod last_known_status_tests {
             spooled,
             complete: true,
             live: vec!["mob".into(), "other".into()],
+            pins: None,
         }
     }
 
@@ -4388,5 +4480,273 @@ mod last_known_status_tests {
         }
         assert_eq!(row(&s).turns, 2);
         assert_eq!(row(&s).status, Status::Done);
+    }
+}
+
+/// Pinning: the block at the top, and the rules that keep a pin attached to the
+/// agent you gave it to rather than to a row position.
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use crate::agent::{sanitize_session, AgentId};
+
+    fn fleet(specs: &[(&str, &str, &str, &str)]) -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "mob".into(),
+            live_sessions: vec!["mob".into()],
+            scanned_sessions: vec!["mob".into(), sanitize_session("other")],
+            scan_completed: true,
+            ..Default::default()
+        };
+        for (session, pane, repo, status) in specs {
+            let args: BTreeMap<String, String> = [
+                ("session", *session),
+                ("pane_id", *pane),
+                ("status", *status),
+                ("repo", *repo),
+                ("cwd", &format!("/w/{}", repo) as &str),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            s.handle_status(&args);
+        }
+        s
+    }
+
+    fn id(session: &str, pane: u32) -> AgentId {
+        AgentId {
+            session: sanitize_session(session),
+            pane_id: pane,
+        }
+    }
+
+    fn pin(s: &mut State, session: &str, pane: u32) {
+        let target = id(session, pane);
+        s.selected = s.agents.iter().position(|a| a.id == target).expect("row exists");
+        assert!(s.toggle_pin_selected());
+    }
+
+    fn order(s: &State) -> Vec<(String, u32)> {
+        s.agents.iter().map(|a| (a.id.session.clone(), a.id.pane_id)).collect()
+    }
+
+    #[test]
+    fn a_pinned_row_sorts_above_a_blocked_one() {
+        let mut s = fleet(&[("mob", "1", "api", "idle"), ("mob", "2", "api", "waiting")]);
+        assert_eq!(order(&s)[0].1, 2, "waiting leads on urgency alone");
+        pin(&mut s, "mob", 1);
+        assert_eq!(order(&s)[0].1, 1, "the pin outranks urgency");
+    }
+
+    #[test]
+    fn pinned_rows_keep_urgency_order_among_themselves() {
+        let mut s = fleet(&[
+            ("mob", "1", "api", "idle"),
+            ("mob", "2", "api", "waiting"),
+            ("mob", "3", "api", "failed"),
+        ]);
+        pin(&mut s, "mob", 1);
+        pin(&mut s, "mob", 2);
+        let o = order(&s);
+        assert_eq!(
+            (o[0].1, o[1].1),
+            (2, 1),
+            "inside the block, waiting still beats idle: {:?}",
+            o
+        );
+        assert_eq!(o[2].1, 3, "the unpinned failure sorts below the whole block");
+    }
+
+    #[test]
+    fn a_pinned_foreign_row_outranks_every_home_row() {
+        let mut s = fleet(&[("mob", "1", "api", "failed"), ("other", "1", "web", "idle")]);
+        pin(&mut s, "other", 1);
+        assert_eq!(order(&s)[0].0, sanitize_session("other"));
+    }
+
+    #[test]
+    fn a_pinned_dead_session_row_stays_pinned() {
+        let mut s = fleet(&[("mob", "1", "api", "working"), ("other", "1", "web", "done")]);
+        pin(&mut s, "other", 1);
+        s.scanned_sessions = vec!["mob".into()];
+        s.apply_sessions(vec!["mob".into()]);
+        assert!(!s.agents[0].session_alive, "the session is gone");
+        assert_eq!(order(&s)[0].0, sanitize_session("other"), "and it holds its place");
+    }
+
+    #[test]
+    fn pinning_under_project_grouping_lifts_the_row_out_of_its_group() {
+        let mut s = fleet(&[
+            ("mob", "1", "api", "failed"),
+            ("mob", "2", "api", "idle"),
+            ("mob", "3", "web", "idle"),
+        ]);
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        pin(&mut s, "mob", 3);
+        let o = order(&s);
+        assert_eq!(o[0].1, 3, "the web row leads despite api holding the failure");
+        assert_eq!((o[1].1, o[2].1), (1, 2), "api keeps its own internal order: {:?}", o);
+    }
+
+    /// The bug a fleet with a spare urgent member hides: a group must not keep
+    /// its rank on the strength of a member that has left it for the pinned block.
+    #[test]
+    fn a_pinned_row_does_not_drag_its_group_to_the_top() {
+        let mut s = fleet(&[
+            ("mob", "1", "api", "failed"),
+            ("mob", "2", "api", "idle"),
+            ("mob", "3", "web", "waiting"),
+        ]);
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        assert_eq!(order(&s)[0].1, 1, "api leads, holding the only failure");
+        pin(&mut s, "mob", 1);
+        let o = order(&s);
+        assert_eq!(o[0].1, 1, "the pinned row is on top");
+        assert_eq!(
+            o[1].1, 3,
+            "web now leads the unpinned groups: api's remaining member is only idle, {:?}",
+            o
+        );
+    }
+
+    #[test]
+    fn pinning_every_row_is_the_urgency_order_under_one_heading() {
+        let mut s = fleet(&[
+            ("mob", "1", "api", "idle"),
+            ("mob", "2", "api", "failed"),
+            ("mob", "3", "web", "waiting"),
+        ]);
+        s.grouping = Grouping::Project;
+        s.sort_agents();
+        for pane in [1, 2, 3] {
+            pin(&mut s, "mob", pane);
+        }
+        let o = order(&s);
+        assert_eq!(
+            o.iter().map(|r| r.1).collect::<Vec<_>>(),
+            vec![2, 3, 1],
+            "failed, waiting, idle: {:?}",
+            o
+        );
+    }
+
+    #[test]
+    fn the_pinned_block_spans_sessions_under_session_grouping() {
+        let mut s = fleet(&[
+            ("mob", "1", "api", "idle"),
+            ("other", "1", "web", "idle"),
+            ("other", "2", "web", "failed"),
+        ]);
+        s.grouping = Grouping::Session;
+        s.sort_agents();
+        pin(&mut s, "mob", 1);
+        pin(&mut s, "other", 1);
+        let o = order(&s);
+        assert_ne!(o[0].0, o[1].0, "two sessions sit adjacent in the block: {:?}", o);
+        assert_eq!(o[2].1, 2, "the unpinned failure is below the block");
+    }
+
+    #[test]
+    fn ended_drops_the_pin() {
+        let mut s = fleet(&[("mob", "1", "api", "idle"), ("mob", "2", "api", "idle")]);
+        pin(&mut s, "mob", 1);
+        assert_eq!(s.pinned.len(), 1);
+        let args: BTreeMap<String, String> = [("pane_id", "1"), ("status", "ended")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.handle_status(&args);
+        s.sort_agents();
+        assert!(s.pinned.is_empty(), "the pin died with its row");
+    }
+
+    /// Pane ids are recycled, so a pin that outlived its agent would silently
+    /// transfer to whoever takes that pane next.
+    #[test]
+    fn a_recycled_pane_id_does_not_inherit_a_pin() {
+        let mut s = fleet(&[("mob", "1", "api", "idle")]);
+        pin(&mut s, "mob", 1);
+        let args: BTreeMap<String, String> = [("pane_id", "1"), ("status", "ended")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.handle_status(&args);
+        s.sort_agents();
+        let reborn: BTreeMap<String, String> = [("pane_id", "1"), ("status", "working"), ("cwd", "/w/other")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.handle_status(&reborn);
+        assert_eq!(s.agents.len(), 1);
+        assert!(!s.is_pinned(&s.agents[0].id), "the new agent is not pinned");
+    }
+
+    #[test]
+    fn a_scan_cull_drops_the_pin() {
+        let mut s = fleet(&[("mob", "1", "api", "idle"), ("other", "1", "web", "idle")]);
+        pin(&mut s, "other", 1);
+        assert_eq!(s.pinned.len(), 1);
+        s.apply_scan(vec![crate::discover::Found {
+            session: "mob".into(),
+            pane_id: 1,
+            tool: "claude".into(),
+        }]);
+        assert!(
+            !s.agents.iter().any(|a| a.id.session == sanitize_session("other")),
+            "the foreign row was culled"
+        );
+        assert!(s.pinned.is_empty(), "and its pin went with it");
+    }
+
+    /// What one panel writes, another must read back as the same pin. The body
+    /// carries the real session name, so it round-trips through the hook's own
+    /// sanitizing rather than through a key that cannot address a session.
+    #[test]
+    fn a_published_pin_set_round_trips_through_the_parser() {
+        let mut s = fleet(&[("mob", "1", "api", "idle"), ("other", "2", "web", "idle")]);
+        pin(&mut s, "other", 2);
+        let body = s.pins_body();
+        assert_eq!(body, "other 2\n", "{:?}", body);
+
+        let lines: String = body.lines().map(|l| format!("SPOOL /tmp/s/pins:{}\n", l)).collect();
+        let parsed = crate::discover::parse(&lines).pins.expect("pins");
+        let mut other = fleet(&[("mob", "1", "api", "idle"), ("other", "2", "web", "idle")]);
+        assert!(other.apply_pins(parsed));
+        assert!(other.is_pinned(&id("other", 2)), "the pin landed on the same row");
+        assert_eq!(order(&other)[0], (sanitize_session("other"), 2));
+    }
+
+    /// A panel only sees rows for sessions it knows about. Dropping a pin whose
+    /// row is not on screen would unpin it for every other panel on the next write.
+    #[test]
+    fn a_pin_for_a_row_this_panel_cannot_see_survives() {
+        let mut s = fleet(&[("mob", "1", "api", "idle")]);
+        assert!(s.apply_pins(vec![("mob".into(), 1), (sanitize_session("elsewhere"), 9)]));
+        assert_eq!(s.pinned.len(), 2, "the unseen pin is kept");
+        assert_eq!(s.pins_body().lines().count(), 2, "and is written back out");
+    }
+
+    /// The pin set is shared, so adopting it must not fight the `retain` that
+    /// drops pins whose rows died in this panel.
+    #[test]
+    fn adopting_the_same_set_twice_is_a_no_op() {
+        let mut s = fleet(&[("mob", "1", "api", "idle")]);
+        let pins = vec![("mob".to_string(), 1u32)];
+        assert!(s.apply_pins(pins.clone()), "the first adoption changes something");
+        assert!(!s.apply_pins(pins), "the second does not");
+    }
+
+    #[test]
+    fn unpinning_restores_the_plain_order() {
+        let mut s = fleet(&[("mob", "1", "api", "idle"), ("mob", "2", "api", "waiting")]);
+        pin(&mut s, "mob", 1);
+        assert_eq!(order(&s)[0].1, 1);
+        pin(&mut s, "mob", 1);
+        assert!(s.pinned.is_empty());
+        assert_eq!(order(&s)[0].1, 2, "waiting leads again");
     }
 }
