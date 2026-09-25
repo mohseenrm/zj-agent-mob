@@ -39,7 +39,7 @@ by urgency, so whatever needs you most sits at the top.
 | Requirement | Why |
 |---|---|
 | Zellij 0.44+ | Plugin API (`LaunchOrFocusPlugin`, pipes, `RunCommandResult`) |
-| A [Nerd Font](https://www.nerdfonts.com) | The status icons. Set `icons "unicode"` for the old glyph set if you would rather not |
+| [Nerd Font](https://www.nerdfonts.com) | The status icons. Set `icons "unicode"` for the old glyph set |
 | Rust + `wasm32-wasip1` target | Only to build from source; not needed if you download a release |
 
 ## Quick start
@@ -282,7 +282,7 @@ parks in the panel and <kbd>a</kbd> / <kbd>r</kbd> approve or reject it without 
         ┌──────────────────────────────────────────┐
         │ Bash                                     │
         │ rm -rf node_modules                      │
-        │ a approve  r reject  A always  ↵ pane   │
+        │ a approve  r reject  A always  ↵ pane    │
         └──────────────────────────────────────────┘
 ```
 
