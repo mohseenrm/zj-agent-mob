@@ -299,6 +299,39 @@ fn events_map_to_statuses() {
     }
 }
 
+#[test]
+fn configured_goal_panels_receive_the_status_pipe_with_matching_configuration() {
+    let hook = Hook::new();
+    let run = hook
+        .env("ZJ_AGENT_PLUGIN_CONFIG", "goal_display=inline")
+        .run(&ev("Stop"));
+    assert_eq!(run.field("status"), "done");
+    let capture = fs::read_to_string(hook.path("capture")).unwrap();
+    assert!(capture.contains("--plugin-configuration goal_display=inline"));
+}
+
+#[test]
+fn the_status_snapshot_is_published_before_pipe_delivery_with_the_same_timestamp() {
+    let hook = Hook::new();
+    let stub = hook.path("bin/zellij");
+    fs::write(&stub,"#!/bin/sh\n[ ! -f \"$ZJ_AGENT_SPOOL_DIR/ordered.3\" ] || printf ready > \"$ZJ_AGENT_SPOOL_DIR/published-first\"\nprintf '%s\\n' \"$*\" >> \"$ZJ_TEST_CAPTURE\"\n").unwrap();
+    fs::set_permissions(stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = hook.env("ZELLIJ_SESSION_NAME", "ordered").run(&ev("Stop"));
+    assert_eq!(run.field("status"), "done");
+    assert!(hook.path("spool/published-first").exists());
+    let record = fs::read_to_string(hook.path("spool/ordered.3")).unwrap();
+    assert_eq!(parse_args(record.trim()).unwrap()["ts"], run.field("ts"));
+}
+
+#[test]
+fn a_failed_question_tool_resumes_work_even_with_heartbeats_disabled() {
+    let r = Hook::new()
+        .env("ZJ_AGENT_HEARTBEAT", "0")
+        .run(r#"{"hook_event_name":"PostToolUseFailure","tool_name":"functions.request_user_input","session_id":"s"}"#);
+    assert_eq!(r.field("status"), "working");
+    assert_eq!(r.field("block"), "");
+}
+
 // ---------------------------------------------------------------------------
 // events that must stay silent
 // ---------------------------------------------------------------------------
@@ -927,6 +960,148 @@ fn a_free_text_notification_reports_a_question_block() {
     let r = run(&json);
     assert_eq!(r.field("block"), "question");
     assert_eq!(r.field("status"), "waiting");
+}
+
+#[test]
+fn codex_question_tools_report_waiting_even_without_heartbeats() {
+    for tool in [
+        "request_user_input",
+        "functions.request_user_input",
+        "mcp__codex__request_user_input",
+    ] {
+        let json = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": {"questions": [{"question": "Which environment can I deploy to?"}]},
+        })
+        .to_string();
+        let r = Hook::new()
+            .env("ZJ_AGENT_TOOL", "codex")
+            .env("ZJ_AGENT_HEARTBEAT", "0")
+            .run(&json);
+        assert_eq!(r.field("status"), "waiting", "{tool}");
+        assert_eq!(r.field("block"), "question", "{tool}");
+        assert_eq!(r.field("detail"), "Which environment can I deploy to?");
+        assert!(r.ask_pipe().is_none(), "a question is not a permission verdict");
+    }
+}
+
+#[test]
+fn codex_question_answers_resume_work_even_without_heartbeats() {
+    let json = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "functions.request_user_input",
+        "tool_response": {"answers": {"environment": {"answers": ["Staging"]}}},
+    })
+    .to_string();
+    let r = Hook::new()
+        .env("ZJ_AGENT_TOOL", "codex")
+        .env("ZJ_AGENT_HEARTBEAT", "0")
+        .run(&json);
+    assert_eq!(r.field("status"), "working");
+    assert_eq!(r.field("block"), "");
+}
+
+#[test]
+fn codex_closing_questions_are_not_reported_as_done() {
+    for message in [
+        "Which environment can I deploy to?",
+        "I found two safe choices. Should I use staging or production?",
+        "The fix is ready.\n\nCan you provide the failing session name?",
+        "**Which option do you prefer?**",
+    ] {
+        let json = serde_json::json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": message,
+        })
+        .to_string();
+        let r = Hook::new().env("ZJ_AGENT_TOOL", "codex").run(&json);
+        assert_eq!(r.field("status"), "waiting", "{message}");
+        assert_eq!(r.field("block"), "question", "{message}");
+    }
+}
+
+#[test]
+fn codex_completed_answers_and_quoted_questions_stay_done() {
+    for message in [
+        "Fixed the parser. All tests pass.",
+        "The parser now handles `what?`",
+        "The example is:\n```text\nWhich environment?\n```",
+        "Why? Because the original session name was stale.",
+        "The documentation contains \"Which environment?\"",
+        "If you want, I can add another test.",
+    ] {
+        let json = serde_json::json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": message,
+        })
+        .to_string();
+        let r = Hook::new().env("ZJ_AGENT_TOOL", "codex").run(&json);
+        assert_eq!(r.field("status"), "done", "{message}");
+        assert_eq!(r.field("block"), "", "{message}");
+    }
+}
+
+#[test]
+fn the_codex_closing_question_fallback_can_be_disabled() {
+    let r = Hook::new()
+        .env("ZJ_AGENT_TOOL", "codex")
+        .env("ZJ_AGENT_CODEX_QUESTIONS", "0")
+        .run(r#"{"hook_event_name":"Stop","last_assistant_message":"Which environment?"}"#);
+    assert_eq!(r.field("status"), "done");
+}
+
+#[test]
+fn codex_question_status_reaches_the_cross_session_spool() {
+    let h = Hook::new();
+    let r = h
+        .env("ZJ_AGENT_TOOL", "codex")
+        .env("ZELLIJ_SESSION_NAME", "mob")
+        .run(r#"{"hook_event_name":"Stop","session_id":"sid","last_assistant_message":"Which environment?"}"#);
+    assert_eq!(r.field("status"), "waiting");
+    let record = fs::read_to_string(h.path("spool/mob.3")).unwrap();
+    let args = parse_args(record.trim()).unwrap();
+    assert_eq!(args.get("status").map(String::as_str), Some("waiting"));
+    assert_eq!(args.get("block").map(String::as_str), Some("question"));
+}
+
+fn write_server_stub(h: &Hook) {
+    let ps = h.path("bin/ps");
+    fs::write(&ps, "#!/bin/sh\nif [ \"$1\" = -p ]; then printf 'Fri Oct 30 10:00:00 2026\\n'; else /bin/ps ax -o pid= | awk '{print $1, 99999999, \"sh\"} END {print 99999999, 1, \"zellij\"}'; fi\n").unwrap();
+    fs::set_permissions(&ps, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn an_existing_shell_uses_the_current_name_from_its_server_route() {
+    let h = Hook::new();
+    write_server_stub(&h);
+    fs::create_dir_all(h.path("spool")).unwrap();
+    fs::write(
+        h.path("spool/server.99999999"),
+        "Fri Oct 30 10:00:00 2026\tmy renamed session\n",
+    )
+    .unwrap();
+    let r = h.env("ZELLIJ_SESSION_NAME", "original").run(&ev("Stop"));
+    assert_eq!(r.field("server_pid"), "99999999");
+    assert_eq!(r.status_pipe().unwrap().session, "my renamed session");
+    let key = zj_agent_mob::sanitize_session_for_test("my renamed session");
+    assert_eq!(r.field("session"), key);
+    assert!(h.path(&format!("spool/{key}.3")).exists());
+    assert!(!h.path("spool/original.3").exists());
+}
+
+#[test]
+fn a_reused_server_pid_does_not_inherit_an_old_route() {
+    let h = Hook::new();
+    write_server_stub(&h);
+    fs::create_dir_all(h.path("spool")).unwrap();
+    fs::write(
+        h.path("spool/server.99999999"),
+        "Thu Oct 29 10:00:00 2026\twrong session\n",
+    )
+    .unwrap();
+    let r = h.env("ZELLIJ_SESSION_NAME", "original").run(&ev("Stop"));
+    assert_eq!(r.field("session"), "original");
 }
 
 #[test]

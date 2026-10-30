@@ -9,6 +9,7 @@
 #   ZJ_AGENT_TOOL        claude | codex   (default: claude)
 #   ZJ_AGENT_HEARTBEAT   0 disables PreToolUse/PostToolUse status refresh
 #   ZJ_AGENT_PLUGIN      override plugin path
+#   ZJ_AGENT_PLUGIN_CONFIG  match a configured panel (for example goal_display=inline)
 #   ZJ_AGENT_DEBUG       1 logs to ~/.cache/zj-agent-mob/hook.log
 #   ZJ_AGENT_APPROVE     0 disables answering permission prompts from the panel
 #   ZJ_AGENT_APPROVE_TIMEOUT  seconds to wait for a verdict (default 30)
@@ -18,6 +19,7 @@
 #   ZJ_AGENT_SPOOL       0 disables the cross-session status spool
 #   ZJ_AGENT_SPOOL_DIR   override spool location
 #   ZJ_AGENT_FANOUT      0 disables piping urgent transitions to other sessions
+#   ZJ_AGENT_CODEX_QUESTIONS  0 disables the closing-question fallback for Codex
 
 # SC2154: event, session_id, cwd, transcript and tool_name are all assigned by
 # the `eval` of jq's @sh output below, which shellcheck cannot follow.
@@ -39,6 +41,37 @@ command -v zellij >/dev/null 2>&1 || exit 0
 
 PLUGIN="${ZJ_AGENT_PLUGIN:-file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm}"
 TOOL="${ZJ_AGENT_TOOL:-claude}"
+PIPE_SESSION=''
+bounded_zellij() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1 4 zellij "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 1 4 zellij "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm 4; exec @ARGV or exit 127' zellij "$@"
+  else
+    return 0
+  fi
+}
+plugin_pipe() {
+  _pipe_args=$1
+  shift
+  if [ "$1" = pipe ] && [ -n "${server_pid:-}" ]; then
+    if IFS="$(printf '\t')" read -r _pipe_started _pipe_name < "$(spool_dir)/server.$server_pid" 2>/dev/null; then
+      if [ "$_pipe_started" = "$server_started" ] && [ -n "$_pipe_name" ] && [ "$_pipe_name" != "${ZELLIJ_SESSION_NAME:-}" ]; then
+        PIPE_SESSION=$_pipe_name
+      fi
+    fi
+  fi
+  if [ "$1" = pipe ] && [ -n "$PIPE_SESSION" ]; then
+    set -- --session "$PIPE_SESSION" "$@"
+  fi
+  if [ -n "${ZJ_AGENT_PLUGIN_CONFIG:-}" ]; then
+    bounded_zellij "$@" --plugin "$PLUGIN" --plugin-configuration "$ZJ_AGENT_PLUGIN_CONFIG" --args "$_pipe_args"
+  else
+    bounded_zellij "$@" --plugin "$PLUGIN" --args "$_pipe_args"
+  fi
+}
 # Pane ids are only unique within a session, so identity is (session, pane).
 # LC_ALL=C and the explicit class keep this byte-wise and locale-independent;
 # src/agent.rs::sanitize_session must fold identically.
@@ -76,6 +109,7 @@ SESSION=$(printf '%s' "${ZELLIJ_SESSION_NAME:-}" | LC_ALL=C tr -c 'a-zA-Z0-9._-'
 if [ -n "${ZELLIJ_SESSION_NAME:-}" ] && [ "$SESSION" != "$ZELLIJ_SESSION_NAME" ]; then
   SESSION="$SESSION-$(session_hex "$ZELLIJ_SESSION_NAME")"
 fi
+ORIGIN_SESSION=$SESSION
 
 spool_dir() {
   if [ -n "${ZJ_AGENT_SPOOL_DIR:-}" ]; then
@@ -85,6 +119,35 @@ spool_dir() {
   fi
 }
 
+server_pid=''
+agent_pid=''
+server_started=''
+if [ -n "${ZELLIJ_SESSION_NAME:-}" ]; then
+  ancestry=$(ps ax -o pid=,ppid=,comm= 2>/dev/null | awk -v pid="$$" '
+    { parent[$1] = $2; name[$1] = $3; sub(/.*\//, "", name[$1]) }
+    END {
+      for (n = 0; pid != "" && pid != 0 && n < 64; n++) {
+        if (agent == "" && (name[pid] == "codex" || name[pid] == "claude")) agent = pid
+        if (name[pid] == "zellij") { print pid, (agent == "" ? 0 : agent); exit }
+        pid = parent[pid]
+      }
+    }')
+  server_pid=${ancestry%% *}
+  [ -z "$ancestry" ] || agent_pid=${ancestry#* }
+fi
+if [ -n "$server_pid" ]; then
+  server_started=$(LC_ALL=C ps -p "$server_pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
+fi
+if [ -n "$server_pid" ] && [ -f "$(spool_dir)/server.$server_pid" ]; then
+  IFS="$(printf '\t')" read -r route_started route_name < "$(spool_dir)/server.$server_pid" || route_name=''
+  current_started=$(LC_ALL=C ps -p "$server_pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
+  if [ -n "$route_name" ] && [ -n "$current_started" ] && [ "$route_started" = "$current_started" ]; then
+    [ "$route_name" = "${ZELLIJ_SESSION_NAME:-}" ] || PIPE_SESSION=$route_name
+    SESSION=$(printf '%s' "$route_name" | LC_ALL=C tr -c 'a-zA-Z0-9._-' '_')
+    [ "$SESSION" = "$route_name" ] || SESSION="$SESSION-$(session_hex "$route_name")"
+  fi
+fi
+
 peer_records() {
   _self=$1
   _cwd=$2
@@ -92,7 +155,7 @@ peer_records() {
     [ -f "$_rec" ] || continue
     _name=${_rec##*/}
     case "$_name" in
-      panel.*|inflight.*|git.*|*.tmp) continue ;;
+      panel.*|inflight.*|git.*|server.*|*.tmp) continue ;;
     esac
     [ "$_name" = "$_self" ] && continue
     _line=$(head -n 1 "$_rec" 2>/dev/null) || continue
@@ -141,6 +204,12 @@ eval "$(printf '%s' "$json" | jq -r '
 
 [ -n "$event" ] || exit 0
 
+question_tool=0
+case "$tool_name" in
+  request_user_input|*.request_user_input|*__request_user_input|AskUserQuestion|*.AskUserQuestion|*__AskUserQuestion)
+    question_tool=1 ;;
+esac
+
 # Events that fire per-subagent would otherwise overwrite the parent pane's row:
 # both share one $ZELLIJ_PANE_ID. They report a delta instead, below.
 case "$event" in
@@ -154,10 +223,11 @@ case "$event" in
     esac ;;
   PermissionRequest) status=waiting ;;
   PreToolUse|PostToolUse)
-    [ "${ZJ_AGENT_HEARTBEAT:-1}" = "0" ] && exit 0
-    status=working ;;
+    [ "$question_tool" = 1 ] || [ "${ZJ_AGENT_HEARTBEAT:-1}" != "0" ] || exit 0
+    status=working
+    [ "$event" != PreToolUse ] || [ "$question_tool" != 1 ] || status=waiting ;;
   PostToolUseFailure)
-    [ "${ZJ_AGENT_HEARTBEAT:-1}" = "0" ] && exit 0
+    [ "$question_tool" = 1 ] || [ "${ZJ_AGENT_HEARTBEAT:-1}" != "0" ] || exit 0
     status=working ;;
   Stop)              status='done' ;;
   StopFailure)       status=failed ;;
@@ -169,6 +239,16 @@ case "$event" in
   SessionEnd)        status=ended ;;
   *) exit 0 ;;
 esac
+
+closing_question=''
+if [ "$event" = Stop ] && [ "$TOOL" = codex ] && [ "${ZJ_AGENT_CODEX_QUESTIONS:-1}" != 0 ]; then
+  closing_question=$(printf '%s' "$last_msg" | jq -Rrs '
+    gsub("\\r"; "") | split("\n\n") | last // ""
+    | gsub("`[^`]*`"; "") | gsub("\\*\\*"; "")
+    | if test("(^|[.!]\\s+|\n)[ >#-]*(which|what|where|when|who|how|should I|shall I|can you|could you|would you|do you|are you|is it|will you)\\b[^?]*\\?\\s*$"; "i")
+      then . else "" end' 2>/dev/null)
+  [ -z "$closing_question" ] || status=waiting
+fi
 
 # Task summary: only re-extract on turn boundaries. Transcripts reach tens of MB,
 # so tool events (which fire constantly) deliberately send an empty task and the
@@ -252,7 +332,13 @@ case "$event" in
     [ "$event" = PostToolUseFailure ] && detail="$detail (failed)"
     if [ -n "$tool_secs" ] && [ "$tool_secs" -ge "${ZJ_AGENT_SLOW_TOOL:-10}" ] 2>/dev/null; then
       detail="$detail (${tool_secs}s)"
+    fi
+    if [ "$event" = PreToolUse ] && [ "$question_tool" = 1 ]; then
+      question=$(printf '%s' "$json" | jq -r '.tool_input.questions[0].question // .tool_input.question // ""' 2>/dev/null)
+      detail=${question:-needs your answer}
     fi ;;
+  Stop)
+    detail=$closing_question ;;
   *)
     detail='' ;;
 esac
@@ -262,6 +348,10 @@ esac
 # settle it from the panel or have to read the pane.
 block=''
 case "$event" in
+  PreToolUse)
+    [ "$question_tool" != 1 ] || block=question ;;
+  Stop)
+    [ -z "$closing_question" ] || block=question ;;
   PermissionRequest)
     case "$tool_name" in
       ExitPlanMode|exit_plan_mode) block=plan ;;
@@ -278,11 +368,15 @@ esac
 followup=''
 if [ "$event" = Stop ] && [ "${ZJ_AGENT_FOLLOWUP:-1}" != "0" ]; then
   ffile="${TMPDIR:-/tmp}/zj-agent-mob/followup.$SESSION.$ZELLIJ_PANE_ID"
+  if [ ! -s "$ffile" ] && [ "$ORIGIN_SESSION" != "$SESSION" ]; then
+    ffile="${TMPDIR:-/tmp}/zj-agent-mob/followup.$ORIGIN_SESSION.$ZELLIJ_PANE_ID"
+  fi
   if [ -s "$ffile" ]; then
     followup=$(head -n 1 "$ffile" 2>/dev/null || true)
     rm -f "$ffile" 2>/dev/null || true
     if [ -n "$followup" ]; then
       status=working
+      block=''
       detail="followup: $followup"
     fi
   fi
@@ -359,37 +453,11 @@ if [ "${ZJ_AGENT_DEBUG:-0}" = "1" ]; then
     >> "$HOME/.cache/zj-agent-mob/hook.log"
 fi
 
-ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,agent_id=$agent_id,repo=$repo,wt=$wt,branch=$branch,tool_secs=$tool_secs,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
+report_ts=$(jq -nr now)
+pipe_status=$status
+ARGS="ts=$report_ts,pane_id=$ZELLIJ_PANE_ID,session=$SESSION,server_pid=$server_pid,agent_pid=$agent_pid,server_started=$server_started,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,agent_id=$agent_id,repo=$repo,wt=$wt,branch=$branch,tool_secs=$tool_secs,subagent_delta=$subagent_delta,task_delta=$task_delta,task_done_delta=$task_done_delta"
 
-zellij pipe --name agent-status --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
-
-# The pipe above reaches only this session's plugin. A panel in another session
-# otherwise waits for its next poll to notice, which is too slow for the states
-# that actually need you. Fan those out directly, and only those: this costs one
-# subprocess per target, so the high-frequency heartbeats never take this path.
-case "$status" in
-  waiting|idlewait|failed|done)
-    if [ "${ZJ_AGENT_FANOUT:-1}" != "0" ] && [ -n "$SESSION" ]; then
-      for beacon in "$(spool_dir)"/panel.*; do
-        [ -f "$beacon" ] || continue
-        # The filename is the sanitized name, which is what compares against
-        # our own $SESSION. The contents are the name zellij knows it by:
-        # sanitizing is lossy, so "my session" is keyed my_session and only the
-        # stored spelling can actually be addressed.
-        key=${beacon##*/panel.}
-        [ -n "$key" ] || continue
-        [ "$key" = "$SESSION" ] && continue
-        target=$(head -n 1 "$beacon" 2>/dev/null)
-        [ -n "$target" ] || target=$key
-        zellij --session "$target" pipe --name agent-status \
-          --plugin "$PLUGIN" --args "$ARGS" >/dev/null 2>&1 || true
-      done
-    fi ;;
-esac
-
-# Cross-session transport. The pipe above only reaches this session's plugin, so
-# a panel elsewhere gets status from this file instead. Deliberately not a
-# subprocess and never blocking: this runs on the critical path of every turn.
+# Publish before delivery so a stalled pipe cannot lose the report.
 if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ended ]; then
   sdir=$(spool_dir)
   # Records hold task summaries, which are the user's own prompts, so on a
@@ -407,6 +475,9 @@ if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ende
     # strand the row at `unknown`, so inherit it too.
     if [ -z "$session_id" ] || [ -z "$cwd" ] || [ -z "$status" ] || [ -z "$model" ]; then
       prev=$(head -n 1 "$sfile" 2>/dev/null || true)
+      if [ -z "$prev" ] && [ "$ORIGIN_SESSION" != "$SESSION" ]; then
+        prev=$(head -n 1 "$sdir/$ORIGIN_SESSION.$ZELLIJ_PANE_ID" 2>/dev/null || true)
+      fi
       if [ -n "$prev" ]; then
         [ -n "$session_id" ] || session_id=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^session_id=//p' | head -1)
         [ -n "$cwd" ] || cwd=$(printf '%s' "$prev" | tr ',' '\n' | sed -n 's/^cwd=//p' | head -1)
@@ -417,16 +488,33 @@ if [ "${ZJ_AGENT_SPOOL:-1}" != "0" ] && [ -n "$SESSION" ] && [ "$status" != ende
     if [ -z "$status" ]; then
       SKIP_SPOOL=1
     fi
-    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,repo=$repo,wt=$wt,branch=$branch"
+    SPOOL_ARGS="pane_id=$ZELLIJ_PANE_ID,session=$SESSION,server_pid=$server_pid,agent_pid=$agent_pid,server_started=$server_started,tool=$TOOL,status=$status,session_id=$session_id,cwd=$cwd,task=$task,detail=$detail,block=$block,perm_mode=$perm_mode,model=$model,agent_type=$agent_type,repo=$repo,wt=$wt,branch=$branch"
     # Rename is atomic within a filesystem, so a reader sees the old record or
     # the new one, never a half-written one. $$ keeps concurrent hooks apart.
-    if [ "${SKIP_SPOOL:-0}" != "1" ] && printf 'ts=%s,%s\n' "$(date +%s)" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then
+    if [ "${SKIP_SPOOL:-0}" != "1" ] && printf 'ts=%s,%s\n' "$report_ts" "$SPOOL_ARGS" > "$sfile.$$.tmp" 2>/dev/null; then
       mv -f "$sfile.$$.tmp" "$sfile" 2>/dev/null || rm -f "$sfile.$$.tmp" 2>/dev/null || true
     else
       rm -f "$sfile.$$.tmp" 2>/dev/null || true
     fi
   fi
 fi
+
+plugin_pipe "$ARGS" pipe --name agent-status >/dev/null 2>&1 || true
+
+case "$pipe_status" in
+  waiting|idlewait|failed|done)
+    if [ "${ZJ_AGENT_FANOUT:-1}" != "0" ] && [ -n "$SESSION" ]; then
+      for beacon in "$(spool_dir)"/panel.*; do
+        [ -f "$beacon" ] || continue
+        key=${beacon##*/panel.}
+        [ -n "$key" ] || continue
+        [ "$key" = "$SESSION" ] && continue
+        target=$(head -n 1 "$beacon" 2>/dev/null)
+        [ -n "$target" ] || target=$key
+        plugin_pipe "$ARGS" --session "$target" pipe --name agent-status >/dev/null 2>&1 || true
+      done
+    fi ;;
+esac
 
 # SessionEnd retires the agent, so its record must not outlive it and colour a
 # recycled pane id later. The git cache goes with it: the next occupant of this
@@ -478,8 +566,8 @@ if [ "$event" = PermissionRequest ] && [ "${ZJ_AGENT_APPROVE:-1}" = "1" ]; then
   # that can no longer be answered, and report success for a verdict that was
   # written into the void.
   approve_timeout=${ZJ_AGENT_APPROVE_TIMEOUT:-30}
-  zellij pipe --name agent-ask --plugin "$PLUGIN" \
-    --args "pane_id=$ZELLIJ_PANE_ID,session=$SESSION,verdict_file=$vfile,tool_name=$tool_name,tool_arg=$tool_arg,timeout=$approve_timeout" \
+  plugin_pipe "pane_id=$ZELLIJ_PANE_ID,session=$SESSION,verdict_file=$vfile,tool_name=$tool_name,tool_arg=$tool_arg,timeout=$approve_timeout" \
+    pipe --name agent-ask \
     >/dev/null 2>&1 || true
 
   # Poll rather than block on a FIFO: a FIFO open() with no reader hangs past

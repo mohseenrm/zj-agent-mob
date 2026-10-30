@@ -11,6 +11,7 @@ use crate::{content_width, host, ribbon, PANE_TITLE};
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.goal_layout = crate::goal::Layout::parse(configuration.get("goal_display"));
         self.popup_on_waiting = configuration
             .get("popup_on_waiting")
             .map(|v| v != "false")
@@ -50,6 +51,7 @@ impl ZellijPlugin for State {
         set_selectable(true);
 
         self.own_plugin_id = host::own_plugin_id();
+        self.own_server_pid = host::own_server_pid();
 
         self.rename_pane();
     }
@@ -105,29 +107,46 @@ impl ZellijPlugin for State {
                     .collect();
                 // The only place both spellings of a session name are known, so
                 // the only place the addressing map can be built.
-                self.session_names = sessions
-                    .iter()
-                    .map(|s| (crate::agent::sanitize_session(&s.name), s.name.clone()))
-                    .collect();
-                let changed = self.apply_sessions(live);
-                let Some(name) = sessions
-                    .iter()
-                    .find(|s| s.is_current_session)
-                    .map(|s| crate::agent::sanitize_session(&s.name))
-                else {
-                    return changed;
+                self.session_names.extend(
+                    sessions
+                        .iter()
+                        .map(|s| (crate::agent::sanitize_session(&s.name), s.name.clone())),
+                );
+                let Some(real_name) = sessions.iter().find(|s| s.is_current_session).map(|s| s.name.clone()) else {
+                    return self.apply_sessions(live);
                 };
+                let name = crate::agent::sanitize_session(&real_name);
                 if self.session_name == name {
-                    return changed;
+                    return self.apply_sessions(live);
                 }
+                let old = self.session_name.clone();
+                self.rename_session_rows(&old, &name, self.own_server_pid);
                 self.session_name = name;
+                if self.own_server_pid != 0 {
+                    self.update_server_name(self.own_server_pid, &real_name);
+                }
+                self.apply_sessions(live);
+                if self.permissions_granted {
+                    crate::discover::announce_panel(&self.session_name, &real_name, self.own_server_pid);
+                }
                 self.request_scan();
-                changed
+                true
             }
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 let out = String::from_utf8_lossy(&stdout);
                 let err = String::from_utf8_lossy(&stderr);
+                if context.get("kind").map(String::as_str) == Some("focus") {
+                    let Some(pane_id) = context.get("pane_id").and_then(|p| p.parse().ok()) else {
+                        return false;
+                    };
+                    let id = crate::agent::AgentId {
+                        session: context.get("session").cloned().unwrap_or_default(),
+                        pane_id,
+                    };
+                    let real = context.get("real_session").map(String::as_str).unwrap_or("");
+                    return self.finish_checked_focus(id, real, exit_code == Some(0) && err.trim().is_empty());
+                }
                 if context.get(crate::install::CTX_KEY).map(String::as_str) == Some(crate::notify::CTX_DETECT) {
                     // A failed probe is recorded as `none` rather than left
                     // empty, so it is not retried on every permission event.
@@ -193,6 +212,7 @@ impl ZellijPlugin for State {
             "agent-status" => self.handle_status(&pipe_message.args),
             "agent-label" => self.handle_label(&pipe_message.args),
             "agent-ask" => self.handle_ask(&pipe_message.args),
+            "agent-goal" => pipe_message.payload.as_deref().is_some_and(|p| self.handle_goal(p)),
             _ => false,
         }
     }
@@ -620,7 +640,16 @@ impl State {
                 }
                 // Rows keep their real list position, so the number shown is
                 // the one `1`-`9` or `g` would take once the prompt closes.
-                g.push(agent.list_item(
+                let goal_label = if self.goal_layout == crate::goal::Layout::Inspector && width >= 80 {
+                    match &agent.goal {
+                        Some(o) if o.snapshot.available && o.snapshot.goal.is_none() && !o.unavailable => None,
+                        Some(o) => Some(o.label(self.now)),
+                        None => Some("goal unavailable".to_string()),
+                    }
+                } else {
+                    None
+                };
+                g.push(agent.list_item_with_goal(
                     i,
                     crate::agent::RowCtx {
                         selected: Some(i) == marked,
@@ -633,6 +662,7 @@ impl State {
                         pinned: self.is_pinned(&agent.id),
                         icons: self.icons,
                     },
+                    goal_label.as_deref(),
                 ));
                 let foreign = !self.session_name.is_empty() && agent.session() != self.session_name;
                 if detail_lines {
@@ -643,6 +673,13 @@ impl State {
                         width,
                         self.icons,
                     ));
+                }
+                if self.goal_layout == crate::goal::Layout::Inline
+                    || (self.goal_layout == crate::goal::Layout::Inspector && width < 80)
+                {
+                    if let Some(line) = self.goal_row(agent, width, self.goal_layout == crate::goal::Layout::Inline) {
+                        g.push(line);
+                    }
                 }
                 if detail_lines && self.subs_open.as_ref() == Some(&agent.id) {
                     g.extend(agent.subagent_rows(self.now, width, self.icons));
@@ -668,8 +705,29 @@ impl State {
         // Everything that is not a list row: header, its rule, the footer rule,
         // the hints, and the error note when there is one.
         let update_note = self.update.note();
-        let chrome =
-            2 + 2 * usize::from(rules) + usize::from(self.action_error.is_some()) + usize::from(update_note.is_some());
+        let inspector = if self.goal_layout == crate::goal::Layout::Inspector {
+            marked
+                .and_then(|i| self.agents.get(i))
+                .and_then(|a| a.goal.as_ref())
+                .filter(|o| o.snapshot.goal.is_some() || o.unavailable)
+                .map(|o| {
+                    let lines = o.inspector(self.now, width);
+                    if width < 80 && visible.len() == 1 {
+                        lines.into_iter().skip(1).collect()
+                    } else {
+                        lines
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let inspector = if rows >= 10 { inspector } else { Vec::new() };
+        let chrome = 2
+            + 2 * usize::from(rules)
+            + usize::from(self.action_error.is_some())
+            + usize::from(update_note.is_some())
+            + inspector.len();
         let budget = rows.saturating_sub(chrome);
         let keep_visible = marked.and_then(|m| visible.iter().position(|&i| i == m)).unwrap_or(0);
         let view = viewport(&groups, self.scroll, keep_visible, budget);
@@ -689,6 +747,7 @@ impl State {
             items.push(more_row(view.hidden_below, false, width));
         }
         y = self.render_rows(items, y);
+        y = self.render_rows(inspector, y);
         let footer_height =
             usize::from(rules) + usize::from(self.action_error.is_some()) + usize::from(update_note.is_some()) + 1;
         y = footer_start(y, rows, footer_height);
@@ -1009,6 +1068,40 @@ mod viewport_tests {
                         sel,
                         emitted
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_goal_layouts_preserve_the_viewport_and_footer_budget() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/goals.json")).unwrap();
+        for layout in [crate::goal::Layout::Inline, crate::goal::Layout::Inspector] {
+            for rows in [1, 4, 6, 10, 14, 30] {
+                for width in [24, 40, 65, 100, 160] {
+                    let mut s = state_with(5);
+                    s.goal_layout = layout;
+                    for a in &mut s.agents {
+                        let snapshot = crate::goal::Snapshot::parse(
+                            &serde_json::json!({
+                                "schema_version":1,"source":crate::goal::SOURCE,"session":"mob","pane_id":a.pane_id(),
+                                "server_pid":42,"agent_pid":77,"server_started":"start","agent_session_id":"qa-thread","observed_at":1,
+                                "available":true,"goal":fixture["active"]["result"]["goal"]
+                            })
+                            .to_string(),
+                        )
+                        .unwrap();
+                        a.goal = Some(crate::goal::Observation {
+                            snapshot,
+                            seen_at: 0.0,
+                            unavailable: false,
+                            last_observed: 1,
+                        });
+                    }
+                    for selected in [0, 2, 4] {
+                        s.selected = selected;
+                        assert!(s.render_list(rows, width) <= rows, "rows={rows} width={width}");
+                    }
                 }
             }
         }
@@ -1397,6 +1490,7 @@ mod header_width_tests {
     fn a_discovered_agent_gets_its_own_bucket() {
         let mut s = state_with(&[("working", 1)]);
         s.apply_scan(vec![crate::discover::Found {
+            server_pid: 0,
             session: "other".into(),
             pane_id: 9,
             tool: "codex".into(),

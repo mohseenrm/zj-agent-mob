@@ -31,6 +31,7 @@ bad() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n     %s\n' "$1" "$2"; }
 
 WORK=$(mktemp -d)
 SESSION="zjqa-$$"
+export ZJ_AGENT_SPOOL_DIR="$WORK/spool"
 
 # The panel must never be driven by the developer's own zellij session, and the
 # hook inherits these: unset so a nested run cannot report into the real panel.
@@ -177,6 +178,17 @@ zj action write 27 >/dev/null 2>&1 || true
 sleep 1
 
 hook '{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt","cwd":"/tmp/proj-alpha","session_id":"sess-a"}'
+# Select the fixture explicitly. Sorting preserves identity, so an unrelated
+# discovered agent must not become the selection just because urgency changed.
+zj action write-chars "/proj-alpha" >/dev/null 2>&1 || true
+sleep 0.3
+zj action write 13 >/dev/null 2>&1 || true
+zj action launch-or-focus-plugin --floating "$PLUGIN" >/dev/null 2>&1 || true
+panel_id=$(zj action list-panes --json 2>/dev/null | jq -r '.[] | select(.is_plugin and .title == "Agent Mob") | "plugin_\(.id)"' | head -1)
+if [ -n "$panel_id" ]; then
+  zj action change-floating-pane-coordinates --pane-id "$panel_id" --width 98% --height 90% >/dev/null 2>&1 || true
+fi
+sleep 1
 screen=$(dump)
 case "$screen" in
   *"waiting"*) ok "a blocked agent shows as waiting" ;;

@@ -1,6 +1,22 @@
 //! Host calls are WASM imports with no native symbol, so they no-op off-wasm to
 //! keep everything else testable with a plain `cargo test`.
 
+pub(crate) fn check_focus(real: &str, id: &crate::agent::AgentId) {
+    let context = [
+        ("kind".to_string(), "focus".to_string()),
+        ("session".to_string(), id.session.clone()),
+        ("real_session".to_string(), real.to_string()),
+        ("pane_id".to_string(), id.pane_id.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    run_command(&[
+        "sh", "-c",
+        "zellij --session \"$1\" action list-panes --json | jq -e --argjson pane \"$2\" 'any(.[]; .id == $pane and .is_plugin == false and .exited == false)' >/dev/null",
+        "sh", real, &id.pane_id.to_string(),
+    ], context);
+}
+
 #[cfg(target_family = "wasm")]
 pub(crate) use zellij_tile::shim::{
     close_self, close_terminal_pane, focus_terminal_pane, hide_self, open_command_pane_floating, reload_plugin_with_id,
@@ -10,6 +26,11 @@ pub(crate) use zellij_tile::shim::{
 #[cfg(target_family = "wasm")]
 pub(crate) fn own_plugin_id() -> u32 {
     zellij_tile::shim::get_plugin_ids().plugin_id
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn own_server_pid() -> u32 {
+    zellij_tile::shim::get_plugin_ids().zellij_pid
 }
 
 /// Renames the pane this plugin is running in. Needs our own plugin id, which
@@ -167,6 +188,9 @@ mod stub {
     pub(crate) fn rename_own_pane(_title: &str) {}
     pub(crate) fn close_self() {}
     pub(crate) fn own_plugin_id() -> u32 {
+        0
+    }
+    pub(crate) fn own_server_pid() -> u32 {
         0
     }
     pub(crate) fn reload_plugin_with_id(_id: u32) {}

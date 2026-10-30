@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Agent Mob: goal status proposals</title>
+  <style>
+    :root { color-scheme: light dark; --paper: light-dark(#f6f5f1, #161718); --ink: light-dark(#242624, #e1e3df); --muted: light-dark(#60645e, #abb0a7); --line: light-dark(#c9ccc3, #474b44); --focus: light-dark(#285e37, #a1cfac); --terminal: #0e100f; --text: #e0e5df; --dim: #a5afa3; --wait: #e5ca7c; --work: #9ecdd0; --complete: #add3a7; --selected: #30372f; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.55 system-ui, sans-serif; }
+    main { max-width: 1240px; margin: 0 auto; padding: 40px 32px 36px; }
+    h1 { margin: 0 0 10px; font-size: 27px; font-weight: 600; letter-spacing: -.025em; }
+    p { max-width: 72ch; margin: 0 0 20px; }
+    .intro { color: var(--muted); }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 20px; margin: 32px 0 18px; }
+    .proposals { display: flex; gap: 24px; flex-wrap: wrap; }
+    button, select { font: inherit; color: inherit; }
+    .proposal { cursor: pointer; background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 9px 0; color: var(--muted); }
+    .proposal[aria-pressed="true"] { color: var(--ink); border-color: var(--focus); }
+    button:hover { color: var(--focus); }
+    button:focus-visible, select:focus-visible, .terminal:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+    label { display: grid; gap: 5px; font-size: 13px; color: var(--muted); }
+    select { background: var(--paper); border: 1px solid var(--line); border-radius: 3px; padding: 7px 26px 7px 9px; min-height: 38px; color: var(--ink); }
+    .preview-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin: 0 0 9px; color: var(--muted); font-size: 12px; }
+    .terminal { background: var(--terminal); color: var(--text); padding: 18px 20px 16px; width: 100%; min-height: 390px; font: 14px/1.65 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; overflow: hidden; }
+    .terminal h2 { font: inherit; font-weight: 500; margin: 0; }
+    .terminal .rule { height: 1px; background: #5d675a; margin: 12px 0 14px; }
+    .terminal .row { display: block; width: 100%; border: 0; border-radius: 0; background: none; color: inherit; text-align: left; padding: 0; cursor: pointer; font: inherit; }
+    .terminal .row:hover { background: #20271f; color: var(--text); }
+    .terminal .row[aria-pressed="true"] .main-line { background: var(--selected); }
+    .terminal .row:focus-visible { outline: 1px solid var(--wait); outline-offset: 2px; }
+    .terminal .main-line, .terminal .detail-line { display: block; white-space: pre; }
+    .terminal .detail-line { color: var(--dim); }
+    .terminal .row + .row { margin-top: 8px; }
+    .waiting, .blocked, .budget, .budget-limited { color: var(--wait); }
+    .working, .active { color: var(--work); }
+    .complete { color: var(--complete); }
+    .muted, .paused, .unknown { color: var(--dim); }
+    .inspector { margin-top: 16px; padding-top: 12px; border-top: 1px solid #5d675a; }
+    .inspector p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .terminal footer { margin-top: 24px; padding-top: 10px; border-top: 1px solid #5d675a; color: var(--dim); }
+    .keys { display: flex; flex-wrap: wrap; gap: 7px 18px; }
+    .key { color: var(--text); }
+    #measure { position: absolute; visibility: hidden; white-space: pre; }
+    .decision { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; border-bottom: 1px solid var(--line); padding: 22px 0 4px; }
+    .decision h2 { font-size: 15px; font-weight: 600; margin: 0 0 5px; }
+    .decision p { color: var(--muted); font-size: 14px; }
+    .approval { margin: 22px 0 0; font-size: 14px; }
+    .note { margin-top: 12px; color: var(--muted); font-size: 12px; }
+    ::selection { background: var(--selected); color: var(--text); }
+    @media (max-width: 700px) { main { padding: 24px 16px; } h1 { font-size: 24px; } .terminal { padding: 14px 12px; font-size: 12px; min-height: 410px; } .decision { grid-template-columns: 1fr; gap: 0; } .toolbar { margin-top: 20px; } .proposals { gap: 20px; } }
+    @media (prefers-reduced-motion: no-preference) { .proposal { transition: border-color .16s ease-out, color .16s ease-out; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>A turn can finish before its goal does.</h1>
+  <p class="intro">Two proposals for Agent Mob. Keep the current activity label, then add the objective and its own state. All content here is illustrative.</p>
+  <div class="toolbar" aria-label="Mockup controls">
+    <div class="proposals" aria-label="Choose a proposal">
+      <button class="proposal" type="button" data-layout="inline" aria-pressed="true">Inline context <span aria-hidden="true">·</span> recommended</button>
+      <button class="proposal" type="button" data-layout="inspector" aria-pressed="false">Selected inspector</button>
+    </div>
+    <label>First agent scenario
+      <select id="scenario">
+        <option value="needs-input">Needs your input</option>
+        <option value="working">Working toward a goal</option>
+        <option value="turn-done">Turn done, goal still active</option>
+        <option value="paused">Goal paused</option>
+        <option value="blocked">Goal blocked</option>
+        <option value="complete">Goal complete</option>
+        <option value="budget">Token budget reached</option>
+        <option value="stale">Goal data is old</option>
+        <option value="unavailable">Goal data unavailable</option>
+        <option value="no-goal">No goal</option>
+      </select>
+    </label>
+  </div>
+  <div class="preview-caption"><span>Proposed terminal panel · not the installed plugin</span><span id="columns"></span></div>
+  <section class="terminal" tabindex="0" aria-label="Agent Mob mockup. Use arrow keys or J and K to select an agent.">
+    <span id="measure" aria-hidden="true">M</span>
+    <h2 id="fleet-title"></h2>
+    <div class="rule"></div>
+    <div id="rows"></div>
+    <div id="inspector" class="inspector" hidden aria-live="polite"></div>
+    <footer><div class="keys"><span><span class="key">↵</span> jump</span><span><span class="key">/</span> find</span><span><span class="key">p</span> pin</span><span><span class="key">o</span> subagents</span><span id="reply-hint"><span class="key">m</span> reply</span><span><span class="key">q</span> hide</span></div></footer>
+  </section>
+  <div class="decision">
+    <div><h2 id="proposal-title">Inline context</h2><p id="proposal-detail">One extra line per agent with a goal. You can scan every objective without moving the cursor. Existing rows without goals stay unchanged.</p></div>
+    <div><h2>Two different signals</h2><p id="scenario-detail">“Waiting” means the agent needs an answer now. The goal stays “active” until an explicit goal update changes it. A question is not proof that the goal is blocked.</p></div>
+  </div>
+  <p class="approval">Approve either layout by name, or request changes. Goal UI implementation starts after your approval.</p>
+  <p class="note">The controls above only change this preview. Selection, urgency ordering, and the existing shortcuts stay in the product. No goal percentage is inferred from tool calls.</p>
+</main>
+<script>
+(() => {
+  const root = document.querySelector('main');
+  const terminal = root.querySelector('.terminal');
+  const rows = root.querySelector('#rows');
+  const scenario = root.querySelector('#scenario');
+  let layout = 'inline';
+  let selected = 0;
+  const samples = {
+    'needs-input': { activity: 'waiting', goal: 'active', detail: 'question: Which deployment environment?', budget: '8.4k / 20k tokens', explanation: '“Waiting” means the agent needs an answer now. The goal stays “active” until an explicit goal update changes it. A question is not proof that the goal is blocked.' },
+    working: { activity: 'working', goal: 'active', detail: 'shell: run regression tests', budget: '8.4k / 20k tokens', explanation: 'The turn is working and the goal is active. A token count describes resource use, not completion. There is no estimated completion percentage.' },
+    'turn-done': { activity: 'done', goal: 'active', detail: 'turn ended; objective remains open', budget: '8.4k / 20k tokens', explanation: 'A completed turn does not complete the goal. Keep the activity label “done” and the goal label “active.” Only an explicit successful goal update can complete a goal.' },
+    paused: { activity: 'idle', goal: 'paused', detail: 'goal paused by you', budget: '8.4k / 20k tokens', explanation: 'Paused is a goal state, not a failed or completed turn. Preserve the objective and its last known budget. Do not advertise a resume action before a supported API exists.' },
+    blocked: { activity: 'idle', goal: 'blocked', detail: 'external dependency: staging credentials', budget: '8.4k / 20k tokens', explanation: 'This example has an explicit blocked goal update. It is different from a tool question. Show the reported state without inventing a reason that the source does not provide.' },
+    complete: { activity: 'done', goal: 'complete', detail: 'explicit goal completion received', budget: '12.2k / 20k tokens', explanation: 'The goal is complete because the source reports an explicit completion, not because the agent stopped. A proof summary appears only if the source provides one.' },
+    budget: { activity: 'idle', goal: 'budget-limited', detail: 'budget reached; goal is not complete', budget: '20k / 20k tokens · limit reached', explanation: 'The source explicitly reports a budget-limited goal. Token use alone never changes the goal state. A budget limit is not completion, and this preview does not change the budget.' },
+    stale: { activity: 'working', goal: 'active', detail: 'last goal update 6m ago', budget: '8.4k / 20k tokens · old data', explanation: 'Keep the last reported goal state and label its age. Old data does not prove completion, failure, or a need for input. The normal activity signal remains separate.' },
+    unavailable: { activity: 'working', goal: 'unknown', detail: 'goal source unavailable', budget: '', explanation: 'Unavailable is not the same as no goal. Show the current activity and a small “goal unavailable” label. Do not read arbitrary conversation text as goal truth.' },
+    'no-goal': { activity: 'working', goal: null, detail: 'shell: run regression tests', budget: '', explanation: 'An explicit no-goal response keeps the existing compact row. Agents without goals do not gain an empty goal line. Unsupported sources use “unavailable” instead.' },
+  };
+  const limit = (value, width) => Array.from(value).length <= width ? value : Array.from(value).slice(0, Math.max(0, width - 1)).join('') + '…';
+  const safe = value => { const span = document.createElement('span'); span.textContent = value; return span.innerHTML; };
+  function render() {
+    const first = samples[scenario.value];
+    const agents = [
+      { tool: 'codex', repo: 'zj-agent-mob', task: 'Fix renamed-session jumps', objective: 'Make navigation reliable after renames', ...first },
+      { tool: 'codex', repo: 'web/checkout', task: 'Run checkout regression tests', objective: 'Ship the checkout fix with tests', activity: 'working', goal: 'active', budget: 'no token budget', detail: 'shell: run checkout tests' },
+      { tool: 'claude', repo: 'api', task: 'Review retry policy', objective: '', activity: 'idle', goal: null, budget: '', detail: 'no new activity' },
+    ];
+    const cols = Math.max(24, Math.min(120, Math.floor((terminal.clientWidth - parseFloat(getComputedStyle(terminal).paddingLeft) * 2) / root.querySelector('#measure').getBoundingClientRect().width)));
+    root.querySelector('#columns').textContent = cols + ' columns · resize to compare';
+    const waiting = agents.filter(a => a.activity === 'waiting').length;
+    const working = agents.filter(a => a.activity === 'working').length;
+    root.querySelector('#fleet-title').textContent = limit(`zj-agent-mob   ${waiting} waiting · ${working} working`, cols);
+    rows.innerHTML = agents.map((agent, index) => {
+      const marker = index === selected ? '>' : ' ';
+      const lead = `${marker} ${index + 1} ${agent.tool.padEnd(6)} `;
+      const state = agent.activity.padEnd(8);
+      const where = cols >= 75 ? '  ' + agent.repo.padEnd(15) : '';
+      const chip = layout === 'inspector' && agent.goal && cols >= 60 ? ` [${agent.goal}]` : '';
+      const task = '  ' + limit(agent.task, Math.max(0, cols - lead.length - state.length - where.length - chip.length - 2));
+      const main = safe(lead) + `<span class="${agent.activity}">${safe(state)}</span>` + safe(where + task) + `<span class="${agent.goal || 'muted'}">${safe(chip)}</span>`;
+      const narrowGoal = layout === 'inspector' && agent.goal && cols < 60 ? `goal: ${agent.goal} · ` : '';
+      const detail = `<span class="detail-line">${safe(limit('    ' + narrowGoal + agent.detail, cols))}</span>`;
+      let goal = '';
+      if (agent.goal && layout === 'inline') {
+        const label = agent.goal === 'unknown' ? 'goal unavailable' : 'goal: ' + agent.goal + (scenario.value === 'stale' && index === 0 ? ' · old' : '');
+        const prefix = '    ' + label;
+        const tail = agent.goal === 'unknown' ? '' : ' · ' + agent.objective + (cols >= 100 && agent.budget ? ' · ' + agent.budget : '');
+        goal = `<span class="detail-line">    <span class="${agent.goal}">${safe(label)}</span>${safe(limit(tail, Math.max(0, cols - prefix.length)))}</span>`;
+      }
+      return `<button type="button" class="row" data-agent="${index}" aria-pressed="${index === selected}" aria-label="Select ${safe(agent.tool)} agent ${index + 1}"><span class="main-line">${main}</span>${detail}${goal}</button>`;
+    }).join('');
+    const inspector = root.querySelector('#inspector');
+    inspector.hidden = layout !== 'inspector';
+    const agent = agents[selected];
+    inspector.innerHTML = agent.goal ? `<p><span class="${agent.goal}">Goal ${safe(agent.goal)}</span></p><p>${safe(agent.goal === 'unknown' ? 'Goal details unavailable' : agent.objective)}</p>${agent.budget ? `<p class="muted">${safe(agent.budget)}</p>` : ''}` : '<p class="muted">No goal for this agent</p>';
+    root.querySelector('#reply-hint').hidden = agent.activity !== 'waiting';
+    root.querySelector('#scenario-detail').textContent = first.explanation;
+    root.querySelector('#proposal-title').textContent = layout === 'inline' ? 'Inline context' : 'Selected inspector';
+    root.querySelector('#proposal-detail').textContent = layout === 'inline' ? 'One extra line per agent with a goal. You can scan every objective without moving the cursor. Existing rows without goals stay unchanged.' : 'Keep the list short with a goal-state label. Put the selected objective and token budget in a dedicated area below the list. Other objectives require a selection change.';
+  }
+  root.querySelectorAll('[data-layout]').forEach(button => button.addEventListener('click', () => {
+    layout = button.dataset.layout;
+    root.querySelectorAll('[data-layout]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    render();
+  }));
+  scenario.addEventListener('change', render);
+  rows.addEventListener('click', event => { const row = event.target.closest('[data-agent]'); if (row) { selected = Number(row.dataset.agent); render(); rows.querySelector(`[data-agent="${selected}"]`).focus(); } });
+  terminal.addEventListener('keydown', event => { if (['j', 'k', 'ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); selected = (selected + (['j', 'ArrowDown'].includes(event.key) ? 1 : 2)) % 3; render(); rows.querySelector(`[data-agent="${selected}"]`).focus(); } });
+  new ResizeObserver(render).observe(terminal);
+  render();
+})();
+</script>
+</body>
+</html>

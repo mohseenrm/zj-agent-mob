@@ -32,32 +32,53 @@ pub(crate) fn scan_script(tools: &[&str]) -> String {
     // One invocation for both sources: a second dispatch would double the poll
     // cost for data that is always consumed together.
     format!(
-        r#"ps axeww -o pid=,command= 2>/dev/null | awk '
+        r#"ps axeww -o pid=,ppid=,command= 2>/dev/null | awk '
 {{
-  cmd = $2; sub(/.*\//, "", cmd)
+  parent[$1] = $2
+  cmd = $3; sub(/.*\//, "", cmd)
   # One server per session; the socket path basename is the session name.
   # No apostrophes in this block: the awk program is one single-quoted word.
-  if (cmd == "zellij" && $3 == "--server" && $4 != "") {{
+  if (cmd == "zellij" && $4 == "--server" && $5 != "") {{
     # Rejoin: a session name may contain spaces, so the path is not one field.
     s = ""
-    for (i = 4; i <= NF; i++) {{
+    for (i = 5; i <= NF; i++) {{
       if ($i ~ /^[A-Za-z_][A-Za-z0-9_]*=/) break
       s = (s == "" ? $i : s " " $i)
     }}
     sub(/.*\//, "", s)
-    if (s != "") print "LIVE", s
+    if (s != "") {{ servers[$1] = s; print "SERVER", $1, s }}
   }}
   if ({guard}) next
+  if (cmd == "codex" && $4 == "app-server") next
   pane = ""; sess = ""
-  for (i = 3; i <= NF; i++) {{
+  for (i = 4; i <= NF; i++) {{
     if ($i ~ /^ZELLIJ_PANE_ID=/)      pane = substr($i, 16)
-    if ($i ~ /^ZELLIJ_SESSION_NAME=/) sess = substr($i, 21)
+    if ($i ~ /^ZELLIJ_SESSION_NAME=/) {{
+      sess = substr($i, 21)
+      for (j = i + 1; j <= NF && $j !~ /^[A-Za-z_][A-Za-z0-9_]*=/; j++) sess = sess " " $j
+    }}
   }}
-  if (pane != "" && sess != "") print "SCAN", sess, pane, cmd
+  if (pane != "" && sess != "") {{ panes[$1] = pane; sessions[$1] = sess; tools[$1] = cmd }}
+}}
+END {{
+  for (pid in panes) {{
+    ancestor = pid
+    for (n = 0; ancestor != "" && ancestor != 0 && !(ancestor in servers) && n < 64; n++) ancestor = parent[ancestor]
+    if (ancestor in servers) print "SCAN", sessions[pid], panes[pid], tools[pid], ancestor
+    else print "SCAN", sessions[pid], panes[pid], tools[pid]
+  }}
 }}' | sort -u
 SPOOL_DIR="${{ZJ_AGENT_SPOOL_DIR:-${{TMPDIR:-/tmp}}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}}"
+for route in "$SPOOL_DIR"/server.*; do
+  [ -f "$route" ] || continue
+  pid=${{route##*.}}
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  IFS="$(printf '\t')" read -r started name < "$route" || continue
+  current=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
+  [ -n "$current" ] && [ "$current" = "$started" ] && printf 'ROUTE %s %s\n' "$pid" "$name"
+done
 grep -s -H '' "$SPOOL_DIR"/* 2>/dev/null | sed 's/^/SPOOL /'
-find "$SPOOL_DIR" -type f -mtime +1 -delete 2>/dev/null
+find "$SPOOL_DIR" -maxdepth 1 -type f -mtime +1 -delete 2>/dev/null
 # Beacons for panels that are gone, so fan-out stops chasing a session with
 # nothing listening. The window is generous on purpose: a beacon is refreshed
 # only when a scan runs, and a scan runs on pane and session events rather than
@@ -69,10 +90,50 @@ printf 'SCANEND\n'"#
     )
 }
 
-pub(crate) fn dispatch() {
+#[cfg(all(test, unix))]
+#[test]
+fn status_cleanup_preserves_an_old_goal_ordering_lock() {
+    use std::process::Command;
+    let created = Command::new("mktemp").arg("-d").output().unwrap();
+    assert!(created.status.success());
+    let path = std::path::PathBuf::from(String::from_utf8(created.stdout).unwrap().trim());
+    assert!(path.is_dir() && path.parent().is_some());
+    let cache = path.join("goals");
+    std::fs::create_dir(&cache).unwrap();
+    let lock = cache.join("refresh.lock");
+    let legacy = path.join("old-status");
+    std::fs::write(&lock, "").unwrap();
+    std::fs::write(&legacy, "old status").unwrap();
+    assert!(Command::new("touch")
+        .args(["-t", "200001010000"])
+        .arg(&lock)
+        .arg(&legacy)
+        .status()
+        .unwrap()
+        .success());
+    let result = Command::new("sh")
+        .args(["-c", &scan_script(&["codex"])])
+        .env("ZJ_AGENT_SPOOL_DIR", &path)
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(
+        lock.exists(),
+        "legacy status cleanup removed the active goal-ordering lock"
+    );
+    assert!(!legacy.exists(), "legacy cleanup did not execute");
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+pub(crate) fn dispatch(owners: &str) {
     let mut ctx = BTreeMap::new();
     ctx.insert(crate::install::CTX_KEY.to_string(), CTX_SCAN.to_string());
-    host::run_command(&["sh", "-c", &scan_script(&TOOLS)], ctx);
+    let script = if owners.is_empty() {
+        scan_script(&TOOLS)
+    } else {
+        format!("{}\npython3 -c \"$2\" \"$1\" || true", scan_script(&TOOLS))
+    };
+    host::run_command(&["sh", "-c", &script, "sh", owners, crate::goal::ADAPTER], ctx);
 }
 
 /// Announces that a panel is open in this session, so hooks elsewhere know to
@@ -88,7 +149,12 @@ pub(crate) fn dispatch() {
 pub(crate) fn beacon_script() -> &'static str {
     "d=\"${ZJ_AGENT_SPOOL_DIR:-${TMPDIR:-/tmp}/zj-agent-mob-$(id -u 2>/dev/null || echo 0)/status}\"; \
      [ -d \"$d\" ] || { mkdir -p \"$d\" 2>/dev/null && chmod 700 \"$d\" 2>/dev/null; }; \
-     [ -n \"$1\" ] && printf '%s' \"$2\" > \"$d/panel.$1\" 2>/dev/null || true"
+     [ -n \"$1\" ] && printf '%s' \"$2\" > \"$d/panel.$1\" 2>/dev/null; \
+     case \"${3:-}\" in ''|0|*[!0-9]*) exit 0 ;; esac; \
+     started=$(LC_ALL=C ps -p \"$3\" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//'); \
+     [ -n \"$started\" ] || exit 0; \
+     printf '%s\\t%s\\n' \"$started\" \"$2\" > \"$d/server.$3.$$.tmp\" 2>/dev/null \
+     && mv -f \"$d/server.$3.$$.tmp\" \"$d/server.$3\" 2>/dev/null || true"
 }
 
 /// Publishes the pin set for every panel to read, atomically: a scan reading
@@ -113,13 +179,24 @@ pub(crate) fn publish_pins(body: &str) {
     );
 }
 
-pub(crate) fn announce_panel(sanitized: &str, real: &str) {
+pub(crate) fn announce_panel(sanitized: &str, real: &str, server_pid: u32) {
     if sanitized.is_empty() {
         return;
     }
     let mut ctx = BTreeMap::new();
     ctx.insert(crate::install::CTX_KEY.to_string(), "panel-beacon".to_string());
-    host::run_command(&["sh", "-c", beacon_script(), "sh", sanitized, real], ctx);
+    host::run_command(
+        &[
+            "sh",
+            "-c",
+            beacon_script(),
+            "sh",
+            sanitized,
+            real,
+            &server_pid.to_string(),
+        ],
+        ctx,
+    );
 }
 
 /// A `session pane_id tool` triple from the scan.
@@ -127,6 +204,7 @@ pub(crate) struct Found {
     pub(crate) session: String,
     pub(crate) pane_id: u32,
     pub(crate) tool: String,
+    pub(crate) server_pid: u32,
 }
 
 /// One agent's status record, read from the spool.
@@ -139,6 +217,7 @@ pub(crate) struct Spooled {
 
 #[derive(Default)]
 pub(crate) struct Scan {
+    pub(crate) goals: Vec<crate::goal::Snapshot>,
     pub(crate) found: Vec<Found>,
     pub(crate) spooled: Vec<Spooled>,
     /// Sanitized names of every session with a running Zellij server.
@@ -152,6 +231,8 @@ pub(crate) struct Scan {
     /// a pin set in one session is a pin everywhere. `None` means the file was
     /// absent from this scan, which is different from "it is empty".
     pub(crate) pins: Option<Vec<(String, u32)>>,
+    pub(crate) server_names: BTreeMap<u32, String>,
+    pub(crate) server_origins: BTreeMap<u32, String>,
 }
 
 /// Splits `key=value,key=value` the way the pipe args arrive, so a spool record
@@ -169,6 +250,8 @@ fn parse_args(rest: &str) -> std::collections::BTreeMap<String, String> {
 /// list is more useful than none, and `ps` output is not a stable contract.
 pub(crate) fn parse(stdout: &str) -> Scan {
     let mut scan = Scan::default();
+    let mut servers = BTreeMap::new();
+    let mut routes = BTreeMap::new();
     let mut seen_files: Vec<String> = Vec::new();
     for line in stdout.lines() {
         if line == "SCANEND" {
@@ -179,6 +262,27 @@ pub(crate) fn parse(stdout: &str) -> Scan {
             continue;
         };
         match tag {
+            "GOAL" => {
+                if let Some(snapshot) = crate::goal::Snapshot::parse(rest) {
+                    scan.goals.push(snapshot);
+                }
+            }
+            "SERVER" | "ROUTE" => {
+                if let Some((pid, name)) = rest.split_once(' ') {
+                    if let Ok(pid) = pid.parse::<u32>() {
+                        if pid != 0 && !name.is_empty() {
+                            match tag {
+                                "SERVER" => {
+                                    servers.insert(pid, name.to_string());
+                                }
+                                _ => {
+                                    routes.insert(pid, name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             "LIVE" => {
                 let name = rest.trim();
                 if name.is_empty() {
@@ -190,17 +294,28 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 }
             }
             "SCAN" => {
-                let mut parts = rest.split_whitespace();
-                let Some(session) = parts.next() else { continue };
-                let Some(Ok(pane_id)) = parts.next().map(str::parse::<u32>) else {
+                let Some((rest, last)) = rest.trim().rsplit_once(' ') else {
                     continue;
                 };
-                let Some(tool) = parts.next() else { continue };
+                let (rest, tool, server_pid) = match last.parse::<u32>() {
+                    Ok(pid) => {
+                        let Some((rest, tool)) = rest.rsplit_once(' ') else {
+                            continue;
+                        };
+                        (rest, tool, pid)
+                    }
+                    Err(_) => (rest, last, 0),
+                };
+                let Some((session, pane)) = rest.rsplit_once(' ') else {
+                    continue;
+                };
+                let Ok(pane_id) = pane.parse::<u32>() else { continue };
                 if TOOLS.contains(&tool) {
                     scan.found.push(Found {
                         session: crate::agent::sanitize_session(session),
                         pane_id,
                         tool: tool.to_string(),
+                        server_pid,
                     });
                 }
             }
@@ -218,7 +333,11 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 }
                 // Panel beacons and per-pane caches share the directory but
                 // are not agent records.
-                if name.starts_with("panel.") || name.starts_with("inflight.") || name.starts_with("git.") {
+                if name.starts_with("panel.")
+                    || name.starts_with("inflight.")
+                    || name.starts_with("git.")
+                    || name.starts_with("server.")
+                {
                     continue;
                 }
                 // The shared pin set, not an agent record. One `session pane`
@@ -266,6 +385,31 @@ pub(crate) fn parse(stdout: &str) -> Scan {
                 });
             }
             _ => {}
+        }
+    }
+    for (pid, original) in servers {
+        let real = routes.remove(&pid).unwrap_or_else(|| original.clone());
+        scan.server_origins
+            .insert(pid, crate::agent::sanitize_session(&original));
+        let key = crate::agent::sanitize_session(&real);
+        if !scan.live.contains(&key) {
+            scan.live.push(key);
+        }
+        scan.server_names.insert(pid, real);
+    }
+    for agent in &mut scan.found {
+        if let Some(real) = scan.server_names.get(&agent.server_pid) {
+            agent.session = crate::agent::sanitize_session(real);
+        }
+    }
+    for record in &mut scan.spooled {
+        if let Some(real) = record
+            .args
+            .get("server_pid")
+            .and_then(|p| p.parse::<u32>().ok())
+            .and_then(|p| scan.server_names.get(&p))
+        {
+            record.session = crate::agent::sanitize_session(real);
         }
     }
     scan
@@ -466,22 +610,22 @@ mod tests {
         }
 
         const PROCS: &str = concat!(
-            "45985 claude ZELLIJ=0 ZELLIJ_PANE_ID=2 ZELLIJ_SESSION_NAME=mob\n",
-            "47845 claude ZELLIJ=0 ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=mob\n",
-            "43820 codex ZELLIJ=0 ZELLIJ_PANE_ID=6 ZELLIJ_SESSION_NAME=mob\n",
-            "67819 claude ZELLIJ=0 ZELLIJ_PANE_ID=11 ZELLIJ_SESSION_NAME=other\n",
-            "1234 nvim ZELLIJ=0 ZELLIJ_PANE_ID=9 ZELLIJ_SESSION_NAME=mob\n",
-            "5678 claude SOME=thing\n",
+            "45985 0 claude ZELLIJ=0 ZELLIJ_PANE_ID=2 ZELLIJ_SESSION_NAME=mob\n",
+            "47845 0 claude ZELLIJ=0 ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=mob\n",
+            "43820 0 codex ZELLIJ=0 ZELLIJ_PANE_ID=6 ZELLIJ_SESSION_NAME=mob\n",
+            "67819 0 claude ZELLIJ=0 ZELLIJ_PANE_ID=11 ZELLIJ_SESSION_NAME=other\n",
+            "1234 0 nvim ZELLIJ=0 ZELLIJ_PANE_ID=9 ZELLIJ_SESSION_NAME=mob\n",
+            "5678 0 claude SOME=thing\n",
         );
 
         /// A server process is not an agent, and an agent is not a server.
         #[test]
         fn reports_a_running_server_for_every_session() {
             let procs = concat!(
-                "45985 claude ZELLIJ=0 ZELLIJ_PANE_ID=2 ZELLIJ_SESSION_NAME=mob\n",
-                "1743 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/mob X=1\n",
-                "6108 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/other X=1\n",
-                "540 /System/Library/CoreServices/appleeventsd --server\n",
+                "45985 0 claude ZELLIJ=0 ZELLIJ_PANE_ID=2 ZELLIJ_SESSION_NAME=mob\n",
+                "1743 0 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/mob X=1\n",
+                "6108 0 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/other X=1\n",
+                "540 0 /System/Library/CoreServices/appleeventsd --server\n",
             );
             let scan = parse(&run("live", procs));
             assert_eq!(
@@ -495,7 +639,7 @@ mod tests {
         /// Keyed the same way a row is, or the liveness lookup misses.
         #[test]
         fn a_servers_session_name_is_sanitized() {
-            let procs = "1743 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/my session\n";
+            let procs = "1743 0 /opt/homebrew/bin/zellij --server /tmp/zellij-501/contract_version_1/my session\n";
             let scan = parse(&run("sanitize", procs));
             assert_eq!(scan.live, vec![crate::agent::sanitize_session("my session")]);
         }
@@ -514,8 +658,8 @@ mod tests {
         #[test]
         fn same_pane_id_in_two_sessions_both_survive() {
             let procs = concat!(
-                "1 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=mob\n",
-                "2 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n",
+                "1 0 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=mob\n",
+                "2 0 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n",
             );
             assert_eq!(run("dup", procs), "SCAN mob 3 claude\nSCAN other 3 claude\nSCANEND\n");
         }
@@ -525,7 +669,7 @@ mod tests {
         /// command-line pattern anchored at the start would not.
         #[test]
         fn finds_a_shell_launched_agent() {
-            let procs = "999 /opt/homebrew/bin/claude ZELLIJ_PANE_ID=4 ZELLIJ_SESSION_NAME=mob\n";
+            let procs = "999 0 /opt/homebrew/bin/claude ZELLIJ_PANE_ID=4 ZELLIJ_SESSION_NAME=mob\n";
             assert_eq!(
                 run("shell", procs),
                 "SCAN mob 4 claude\nSCANEND\n",
@@ -533,18 +677,44 @@ mod tests {
             );
         }
 
+        #[test]
+        fn ancestry_matches_old_and_new_shell_names_to_the_same_server() {
+            let procs = concat!(
+                "10 1 /usr/bin/zellij --server /tmp/zellij/old\n",
+                "20 10 /bin/zsh\n",
+                "30 20 codex ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=old\n",
+                "40 10 /bin/zsh\n",
+                "50 40 claude ZELLIJ_PANE_ID=4 ZELLIJ_SESSION_NAME=new name OTHER=value\n",
+            );
+            let scan = parse(&run("ancestry", procs));
+            assert_eq!(scan.found.len(), 2);
+            assert!(scan.found.iter().all(|a| a.server_pid == 10 && a.session == "old"));
+        }
+
+        #[test]
+        fn a_route_rejects_a_reused_pid_with_a_different_start_time() {
+            let procs = "42 1 /usr/bin/zellij --server /tmp/zellij/current\n";
+            let scan = parse(&run_with_spool(
+                "stale-route",
+                procs,
+                &[("server.42", "old-start\twrong-session\n")],
+            ));
+            assert_eq!(scan.server_names.get(&42).map(String::as_str), Some("current"));
+            assert!(scan.spooled.is_empty());
+        }
+
         /// A process with no Zellij environment at all must not be attributed to
         /// whatever session is being scanned.
         #[test]
         fn a_process_outside_zellij_is_skipped() {
-            let procs = "5678 claude SOME=thing\n";
+            let procs = "5678 0 claude SOME=thing\n";
             assert_eq!(run("nozellij", procs), "SCANEND\n");
         }
 
         /// A pane id with no session cannot be attributed to anything.
         #[test]
         fn a_pane_without_a_session_is_skipped() {
-            let procs = "1 claude ZELLIJ_PANE_ID=2\n";
+            let procs = "1 0 claude ZELLIJ_PANE_ID=2\n";
             assert_eq!(run("nosess", procs), "SCANEND\n");
         }
 
@@ -552,7 +722,7 @@ mod tests {
         /// stays at one command rather than two.
         #[test]
         fn one_invocation_returns_scan_and_spool() {
-            let procs = "1 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n";
+            let procs = "1 0 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n";
             let out = run_with_spool(
                 "both",
                 procs,
@@ -568,7 +738,7 @@ mod tests {
         /// and must not stop the scan half of the output.
         #[test]
         fn a_missing_spool_directory_is_silent() {
-            let procs = "1 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n";
+            let procs = "1 0 claude ZELLIJ_PANE_ID=3 ZELLIJ_SESSION_NAME=other\n";
             let out = run("nospool", procs);
             assert_eq!(out, "SCAN other 3 claude\nSCANEND\n", "no error output");
             assert!(parse(&out).complete);

@@ -2,11 +2,81 @@
 
 use zellij_tile::prelude::*;
 
+use crate::agent::AgentId;
 use crate::host;
 use crate::install::{SetupAction, Target};
 use crate::state::{Find, State};
 use crate::status::Status;
 use crate::util::wrap;
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    fn state() -> State {
+        let mut s = State {
+            permissions_granted: true,
+            session_name: "home".into(),
+            live_sessions: vec!["home".into(), "remote".into()],
+            ..Default::default()
+        };
+        s.handle_status(
+            &[("pane_id", "3"), ("session", "remote"), ("status", "done")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        );
+        s
+    }
+
+    #[test]
+    fn foreign_jumps_wait_for_a_verified_live_pane() {
+        let mut s = state();
+        let id = s.agents[0].id.clone();
+        s.focus_selected();
+        assert!(!s.hidden);
+        assert_eq!(s.agents[0].status, Status::Done);
+        assert_eq!(s.pending_focus.as_ref(), Some(&id));
+        assert!(s.finish_checked_focus(id, "remote", true));
+        assert!(s.hidden);
+        assert_eq!(s.agents[0].status, Status::Idle);
+    }
+
+    #[test]
+    fn a_missing_target_never_resurrects_a_session_or_dismisses_done() {
+        let mut s = state();
+        let id = s.agents[0].id.clone();
+        s.focus_selected();
+        assert!(s.finish_checked_focus(id, "remote", false));
+        assert!(!s.hidden);
+        assert_eq!(s.agents[0].status, Status::Done);
+        assert!(s.action_error.as_deref().unwrap().contains("Jump cancelled"));
+        s.agents[0].session_alive = false;
+        s.focus_selected();
+        assert!(s.pending_focus.is_none());
+        assert!(!s.hidden);
+    }
+
+    #[test]
+    fn a_rename_during_preflight_cancels_the_old_target() {
+        let mut s = state();
+        let id = s.agents[0].id.clone();
+        s.focus_selected();
+        s.rename_session_rows("remote", "renamed", 42);
+        assert!(!s.finish_checked_focus(id, "remote", true));
+        assert!(!s.hidden);
+    }
+
+    #[test]
+    fn moving_the_cursor_cancels_an_inflight_jump() {
+        let mut s = state();
+        let id = s.agents[0].id.clone();
+        s.focus_selected();
+        s.handle_key(KeyWithModifier::new(BareKey::Down));
+        assert!(!s.finish_checked_focus(id, "remote", true));
+        assert!(!s.hidden);
+    }
+}
 
 impl State {
     /// The setup prompt owns the whole screen while it is up, so the agent-list
@@ -115,28 +185,64 @@ impl State {
             self.selected = wrap(self.selected, delta, self.agents.len());
         }
         self.kill_armed = None;
+        self.pending_focus = None;
     }
 
     pub(crate) fn focus_selected(&mut self) {
         let Some(agent) = self.agents.get(self.selected) else {
             return;
         };
-        let (id, tab, session_alive) = (agent.id.clone(), agent.tab, agent.session_alive);
+        let id = agent.id.clone();
         let foreign = id.session != self.session_name && !self.session_name.is_empty();
+        if !agent.session_alive
+            || !agent.alive
+            || (foreign && !self.live_sessions.contains(&id.session) && !self.scanned_sessions.contains(&id.session))
+        {
+            self.action_error = Some("Jump cancelled: the target session or pane is no longer available".into());
+            return;
+        }
 
-        if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
+        if foreign {
+            self.pending_focus = Some(id.clone());
+            host::check_focus(&self.real_session(&id.session), &id);
+            return;
+        }
+        self.finish_focus(&id);
+    }
+
+    pub(crate) fn finish_checked_focus(&mut self, id: AgentId, real: &str, success: bool) -> bool {
+        if self.pending_focus.as_ref() != Some(&id) {
+            return false;
+        }
+        self.pending_focus = None;
+        if !success
+            || self.real_session(&id.session) != real
+            || !self
+                .agents
+                .get(self.selected)
+                .is_some_and(|a| a.id == id && a.session_alive && a.alive)
+        {
+            self.action_error =
+                Some("Jump cancelled: the target session or pane changed; refresh and try again".into());
+            return true;
+        }
+        self.finish_focus(&id);
+        true
+    }
+
+    fn finish_focus(&mut self, id: &AgentId) {
+        self.action_error = None;
+        if let Some(a) = self.agents.iter_mut().find(|a| &a.id == id) {
             if a.status == Status::Done {
                 a.status = Status::Idle;
                 a.status_since = self.now;
             }
         }
 
-        if foreign {
-            // A dead session has no pane to land on; attaching resurrects it.
-            let target = if session_alive { Some((id.pane_id, false)) } else { None };
+        if id.session != self.session_name && !self.session_name.is_empty() {
             // The name Zellij knows it by, not the sanitized filename key.
             let session = self.real_session(&id.session);
-            host::switch_session_with_focus(&session, tab.filter(|_| session_alive), target);
+            host::switch_session_with_focus(&session, None, Some((id.pane_id, false)));
         } else {
             host::focus_terminal_pane(id.pane_id, true, false);
         }
@@ -962,6 +1068,8 @@ mod tests {
         assert_eq!(s.kill_armed.as_ref(), Some(&armed));
 
         s.handle_status(&args_map(&[("pane_id", "2"), ("status", "waiting")]));
+        assert_eq!(s.agents[s.selected].id, armed, "a resort preserves the selected agent");
+        s.selected = 0;
         let cursor = s.agents[s.selected].id.clone();
         assert_ne!(cursor, armed, "precondition: the cursor moved");
 
@@ -987,6 +1095,8 @@ mod tests {
         s.handle_key(key('x'));
 
         s.handle_status(&args_map(&[("pane_id", "9"), ("status", "failed")]));
+        assert_eq!(s.agents[s.selected].id, armed, "a resort preserves the selected agent");
+        s.selected = 0;
         let cursor = s.agents[s.selected].id.clone();
         assert_ne!(cursor, armed, "precondition: a failed row took the cursor");
 
@@ -1014,6 +1124,8 @@ mod tests {
 
         // A lower pane id sorts first within the same status, taking the cursor.
         s.handle_status(&args_map(&[("pane_id", "2"), ("status", "waiting")]));
+        assert_eq!(s.agents[s.selected].id, target, "a resort preserves the selected agent");
+        s.selected = 0;
         let cursor = s.agents[s.selected].id.clone();
         assert_ne!(cursor, target, "precondition: the cursor moved off the target");
 

@@ -54,6 +54,7 @@ impl Grouping {
 
 #[derive(Default)]
 pub struct State {
+    pub(crate) goal_layout: crate::goal::Layout,
     pub(crate) agents: Vec<Agent>,
     /// At most one prompt is shown at a time, for the selected agent.
     pub(crate) asks: Vec<Ask>,
@@ -62,6 +63,7 @@ pub struct State {
     pub(crate) now: f64,
     pub(crate) permissions_granted: bool,
     pub(crate) kill_armed: Option<AgentId>,
+    pub(crate) pending_focus: Option<AgentId>,
     pub(crate) timer_running: bool,
     pub(crate) popup_on_waiting: bool,
     pub(crate) hidden: bool,
@@ -84,6 +86,8 @@ pub struct State {
     /// "my session" is stored as `my_session` and addressing that fails, so the
     /// two uses must not share a string.
     pub(crate) session_names: BTreeMap<String, String>,
+    pub(crate) session_servers: BTreeMap<u32, String>,
+    pub(crate) session_aliases: BTreeMap<String, String>,
     /// A scan is in flight, so a second one would be wasted work.
     pub(crate) scan_pending: bool,
     /// `now` at the last scan dispatch, which paces the spool poll. Stamped on
@@ -139,6 +143,7 @@ pub struct State {
     /// Which glyph table the panel draws from, chosen once in `load`.
     pub(crate) icons: &'static crate::icons::Icons,
     pub(crate) own_plugin_id: u32,
+    pub(crate) own_server_pid: u32,
     /// Set once this instance has asked the host to close it as a duplicate.
     /// `close_self` is a request, not a guarantee: the pane survives until the
     /// host acts, and every `PaneUpdate` in between would ask again. Asking in
@@ -162,6 +167,194 @@ pub(crate) struct Reply {
 pub(crate) struct Find {
     pub(crate) query: String,
     pub(crate) cursor: Option<AgentId>,
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    fn report(session: &str, pid: &str, status: &str) -> BTreeMap<String, String> {
+        [
+            ("pane_id", "3"),
+            ("session", session),
+            ("server_pid", pid),
+            ("status", status),
+            ("tool", "codex"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect()
+    }
+
+    fn state() -> State {
+        State {
+            session_name: "old".into(),
+            own_server_pid: 42,
+            permissions_granted: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn current_session_rename_moves_bound_state_and_accepts_old_shell_names() {
+        let mut s = state();
+        s.handle_status(&report("old", "42", "waiting"));
+        s.handle_status(&report("elsewhere", "99", "working"));
+        let old = s.agents.iter().find(|a| a.server_pid == 42).unwrap().id.clone();
+        s.selected = s.agents.iter().position(|a| a.id == old).unwrap();
+        s.pinned.push(old.clone());
+        s.reply = Some(Reply {
+            id: old.clone(),
+            text: "staging".into(),
+        });
+        s.followup = Some(Reply {
+            id: old.clone(),
+            text: "run checks".into(),
+        });
+        s.find = Some(Find {
+            query: "codex".into(),
+            cursor: Some(old.clone()),
+        });
+        s.kill_armed = Some(old.clone());
+        s.subs_open = Some(old.clone());
+        s.asks.push(Ask {
+            id: old,
+            verdict_file: "/tmp/old-verdict".into(),
+            tool_name: "shell".into(),
+            tool_arg: String::new(),
+            expires_at: 30.0,
+        });
+
+        s.update(Event::SessionUpdate(
+            vec![SessionInfo {
+                name: "my renamed session".into(),
+                is_current_session: true,
+                ..Default::default()
+            }],
+            vec![],
+        ));
+        let new = AgentId {
+            session: crate::agent::sanitize_session("my renamed session"),
+            pane_id: 3,
+        };
+        assert_eq!(s.session_name, new.session);
+        assert_eq!(s.agents[s.selected].id, new);
+        assert_eq!(s.pinned, vec![new.clone()]);
+        assert_eq!(s.reply.as_ref().unwrap().id, new);
+        assert_eq!(s.followup.as_ref().unwrap().id, new);
+        assert_eq!(s.find.as_ref().unwrap().cursor.as_ref(), Some(&new));
+        assert_eq!(s.subs_open.as_ref(), Some(&new));
+        assert_eq!(s.asks[0].id, new);
+        assert_eq!(s.asks[0].verdict_file, "/tmp/old-verdict");
+        assert!(s.kill_armed.is_none());
+        assert!(s.handle_status(&report("old", "42", "working")));
+        assert_eq!(s.agents.len(), 2, "an old shell name must not create a duplicate row");
+        assert!(s
+            .agents
+            .iter()
+            .any(|a| a.server_pid == 99 && a.session() == "elsewhere"));
+    }
+
+    #[test]
+    fn first_session_event_recovers_a_pipe_that_arrived_before_the_name() {
+        let mut s = state();
+        s.session_name.clear();
+        s.handle_status(&report("old", "42", "working"));
+        s.update(Event::SessionUpdate(
+            vec![SessionInfo {
+                name: "new".into(),
+                is_current_session: true,
+                ..Default::default()
+            }],
+            vec![],
+        ));
+        assert_eq!(s.agents[0].session(), "new");
+        assert!(!s.selected_is_foreign());
+    }
+
+    #[test]
+    fn a_cold_panel_resolves_foreign_renames_and_old_spool_filenames() {
+        let mut s = state();
+        s.session_name = "home".into();
+        s.own_server_pid = 7;
+        s.handle_status(&report("old", "42", "waiting"));
+        s.pinned.push(s.agents[0].id.clone());
+        let scan = crate::discover::parse(concat!(
+            "SERVER 42 old\nROUTE 42 renamed session\nSCAN old 3 codex 42\n",
+            "SPOOL /tmp/status/old.3:ts=100,pane_id=3,session=old,server_pid=42,status=waiting,block=question\n",
+            "SPOOL /tmp/status/pins:old 3\nSCANEND\n"
+        ));
+        assert!(s.apply_scan_result(scan));
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.agents[0].status, Status::Waiting);
+        assert_eq!(s.real_session(s.agents[0].session()), "renamed session");
+        assert_eq!(s.pinned[0], s.agents[0].id);
+        s.handle_status(&report("old", "42", "working"));
+        assert_eq!(s.agents.len(), 1);
+    }
+
+    #[test]
+    fn a_reused_old_name_does_not_redirect_the_new_sessions_pane() {
+        let mut s = state();
+        s.session_name = "home".into();
+        s.own_server_pid = 7;
+        s.handle_status(&report("old", "42", "working"));
+        let scan = crate::discover::parse(
+            "SERVER 42 old\nROUTE 42 renamed\nSERVER 99 old\nSCAN old 3 codex 42\nSCAN old 3 claude 99\nSCANEND\n",
+        );
+        s.apply_scan_result(scan);
+        assert_eq!(s.agents.len(), 2);
+        s.handle_status(&report("old", "99", "waiting"));
+        s.handle_status(&report("old", "42", "done"));
+        assert!(s
+            .agents
+            .iter()
+            .any(|a| a.session() == "old" && a.status == Status::Waiting));
+        assert!(s
+            .agents
+            .iter()
+            .any(|a| a.session() == "renamed" && a.status == Status::Done));
+        assert!(!s.session_aliases.contains_key("old"));
+    }
+
+    #[test]
+    fn an_inflight_scan_cannot_undo_the_current_sessions_rename() {
+        let mut s = state();
+        s.session_name = "new".into();
+        s.update_server_name(42, "new");
+        s.handle_status(&report("old", "42", "waiting"));
+        s.apply_scan_result(crate::discover::parse("SERVER 42 old\nSCAN old 3 codex 42\nSCANEND\n"));
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.agents[0].session(), "new");
+        assert_eq!(s.real_session("new"), "new");
+        assert!(s.agents[0].session_alive);
+    }
+
+    #[test]
+    fn renaming_a_pane_changes_the_label_not_the_jump_identity() {
+        let mut s = state();
+        s.handle_status(&report("old", "42", "done"));
+        let id = s.agents[0].id.clone();
+        let mut panes = std::collections::HashMap::new();
+        panes.insert(
+            2,
+            vec![PaneInfo {
+                id: 3,
+                title: "renamed pane".into(),
+                ..Default::default()
+            }],
+        );
+        s.reconcile(PaneManifest { panes });
+        assert_eq!(s.agents[s.selected].id, id);
+        assert_eq!(s.agents[s.selected].display_task(), "renamed pane");
+        s.focus_selected();
+        assert!(s.hidden);
+        assert!(
+            s.pending_focus.is_none(),
+            "a renamed local pane never becomes a cross-session jump"
+        );
+        assert_eq!(s.agents[0].status, Status::Idle);
+    }
 }
 
 impl State {
@@ -234,6 +427,13 @@ impl State {
         // without the clock it would never reach its expiry and would keep
         // offering `a` for a hook that has already stopped listening.
         let needed = !self.asks.is_empty()
+            || self.goal_refresh_needed()
+            || (self.goal_layout != crate::goal::Layout::Off
+                && self
+                    .agents
+                    .iter()
+                    .any(|a| a.session_alive && a.goal.as_ref().is_some_and(|o| o.snapshot.goal.is_some())))
+            || (self.discover && self.agents.iter().any(|a| a.alive && a.session_alive))
             || self
                 .agents
                 .iter()
@@ -319,12 +519,89 @@ impl State {
     /// panel's own session, which is where they must have come from.
     fn id_from(&self, args: &BTreeMap<String, String>) -> Option<AgentId> {
         let pane_id = args.get("pane_id").and_then(|v| v.parse::<u32>().ok())?;
-        let session = args
+        let mut session = args
             .get("session")
             .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_else(|| self.session_name.clone());
+        if let Some(pid) = args
+            .get("server_pid")
+            .and_then(|p| p.parse::<u32>().ok())
+            .filter(|p| *p != 0)
+        {
+            if pid == self.own_server_pid && !self.session_name.is_empty() {
+                session = self.session_name.clone();
+            } else if let Some(name) = self.session_servers.get(&pid) {
+                session = crate::agent::sanitize_session(name);
+            }
+        } else if let Some(current) = self.session_aliases.get(&session) {
+            session = current.clone();
+        }
         Some(AgentId { session, pane_id })
+    }
+
+    pub(crate) fn rename_session_rows(&mut self, old: &str, new: &str, server_pid: u32) {
+        if old.is_empty() || old == new {
+            return;
+        }
+        for current in self.session_aliases.values_mut() {
+            if current == old {
+                *current = new.to_string();
+            }
+        }
+        self.session_aliases.remove(new);
+        self.session_aliases.insert(old.to_string(), new.to_string());
+        let mut moved = Vec::new();
+        for agent in &mut self.agents {
+            if agent.id.session == old && (agent.server_pid == 0 || agent.server_pid == server_pid) {
+                moved.push(agent.id.clone());
+                agent.id.session = new.to_string();
+                agent.session_alive = true;
+            }
+        }
+        let move_id = |id: &mut AgentId| {
+            if moved.contains(id) {
+                id.session = new.to_string();
+            }
+        };
+        for ask in &mut self.asks {
+            move_id(&mut ask.id);
+        }
+        let pins_before = self.pinned.clone();
+        for id in &mut self.pinned {
+            move_id(id);
+        }
+        for reply in self.reply.iter_mut().chain(self.followup.iter_mut()) {
+            move_id(&mut reply.id);
+        }
+        if let Some(id) = self.find.as_mut().and_then(|f| f.cursor.as_mut()) {
+            move_id(id);
+        }
+        if let Some(id) = self.subs_open.as_mut() {
+            move_id(id);
+        }
+        self.kill_armed = None;
+        self.pending_focus = None;
+        if pins_before != self.pinned {
+            crate::discover::publish_pins(&self.pins_body());
+        }
+    }
+
+    pub(crate) fn update_server_name(&mut self, pid: u32, real: &str) {
+        let current = crate::agent::sanitize_session(real);
+        self.session_names.insert(current.clone(), real.to_string());
+        if let Some(old) = self.session_servers.insert(pid, real.to_string()) {
+            self.rename_session_rows(&crate::agent::sanitize_session(&old), &current, pid);
+        }
+        let old_keys: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|a| a.server_pid == pid && a.id.session != current)
+            .map(|a| a.id.session.clone())
+            .collect();
+        for old in old_keys {
+            self.rename_session_rows(&old, &current, pid);
+        }
     }
 
     /// The name Zellij knows a session by, which is what `--session` needs.
@@ -469,6 +746,14 @@ impl State {
         let Some(status) = Status::parse(raw_status) else {
             return false;
         };
+        let report_ts = args
+            .get("ts")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0);
+        if report_ts > 0.0 && self.agents.iter().any(|a| a.id == id && a.spool_ts >= report_ts) {
+            return false;
+        }
 
         // Empty means "unchanged": heartbeats omit these to avoid re-reading
         // multi-MB transcripts.
@@ -479,6 +764,37 @@ impl State {
         let newly_waiting;
         let transitioned;
         if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+            agent.spool_ts = report_ts;
+            let sid = args.get("session_id").filter(|s| !s.is_empty());
+            let started = args.get("server_started").filter(|s| !s.is_empty());
+            if sid.is_some_and(|s| *s != agent.session_id)
+                || started.is_some_and(|s| !agent.server_started.is_empty() && *s != agent.server_started)
+            {
+                agent.goal = None;
+                agent.agent_pid = 0;
+            }
+            if let Some(sid) = sid {
+                agent.session_id = sid.clone();
+            }
+            if let Some(pid) = args.get("agent_pid").and_then(|v| v.parse::<u32>().ok()) {
+                if agent.agent_pid != pid {
+                    agent.goal = None;
+                }
+                agent.agent_pid = pid;
+            }
+            if let Some(started) = started {
+                agent.server_started = started.clone();
+            }
+            if let Some(pid) = args
+                .get("server_pid")
+                .and_then(|p| p.parse::<u32>().ok())
+                .filter(|p| *p != 0)
+            {
+                if agent.server_pid != 0 && agent.server_pid != pid {
+                    agent.goal = None;
+                }
+                agent.server_pid = pid;
+            }
             let changed = agent.status != status;
             newly_waiting = changed && status == Status::Waiting;
             transitioned = changed;
@@ -545,6 +861,10 @@ impl State {
             transitioned = true;
             self.agents.push(Agent {
                 id: id.clone(),
+                server_pid: args.get("server_pid").and_then(|p| p.parse().ok()).unwrap_or(0),
+                agent_pid: args.get("agent_pid").and_then(|p| p.parse().ok()).unwrap_or(0),
+                server_started: args.get("server_started").cloned().unwrap_or_default(),
+                goal: None,
                 tool: args.get("tool").cloned().unwrap_or_else(|| "agent".into()),
                 session_id: args.get("session_id").cloned().unwrap_or_default(),
                 status,
@@ -554,7 +874,7 @@ impl State {
                 turns: if status == Status::Working { 1 } else { 0 },
                 status_since: now,
                 last_report: now,
-                spool_ts: 0.0,
+                spool_ts: report_ts,
                 tab: None,
                 pane_title: String::new(),
                 alive: true,
@@ -928,18 +1248,18 @@ impl State {
 
     /// Whether the spool is due a re-read.
     ///
-    /// The spool is the only thing that refreshes a foreign row's status, and
-    /// nothing else polls it: `request_scan` is otherwise driven by pane and
-    /// session events, which do not fire while an agent is merely working. So
-    /// without this a foreign row decays to `unknown` and never recovers.
-    ///
-    /// Gated on a foreign row existing, so a single-session panel pays nothing.
+    /// Refresh foreign reports and recover newer local reports after lost pipes.
+    /// Empty fleets and gone sessions do not hold a background poll open.
     pub(crate) fn spool_poll_due(&self) -> bool {
         if self.scan_pending || self.now - self.last_scan_at < crate::SPOOL_POLL_INTERVAL {
             return false;
         }
         let home = &self.session_name;
-        self.agents.iter().any(|a| a.id.session != *home && a.session_alive)
+        self.goal_refresh_needed()
+            || self
+                .agents
+                .iter()
+                .any(|a| a.session_alive && (a.id.session != *home || (self.discover && a.alive)))
     }
 
     /// Runs a scan unless one is already in flight, or discovery is switched off.
@@ -949,11 +1269,11 @@ impl State {
         }
         self.scan_pending = true;
         self.last_scan_at = self.now;
-        crate::discover::dispatch();
+        crate::discover::dispatch(&self.goal_owners());
         // Refreshed alongside the scan so hooks elsewhere keep fanning urgent
         // transitions to this panel while it is open.
         let real = self.real_session(&self.session_name);
-        crate::discover::announce_panel(&self.session_name, &real);
+        crate::discover::announce_panel(&self.session_name, &real, self.own_server_pid);
     }
 
     /// Merges a process scan into the agent list.
@@ -982,7 +1302,7 @@ impl State {
     /// the spool refines what survived. A spool record never creates a row -
     /// only a live process justifies one - so a stale file cannot resurrect an
     /// agent that exited.
-    pub(crate) fn apply_scan_result(&mut self, scan: crate::discover::Scan) -> bool {
+    pub(crate) fn apply_scan_result(&mut self, mut scan: crate::discover::Scan) -> bool {
         if !scan.complete {
             return false;
         }
@@ -995,11 +1315,58 @@ impl State {
             }
         }
         // Liveness first: `merge_found` culls foreign rows by `session_alive`.
-        let mut changed = self.apply_scanned_sessions(scan.live);
+        let mut changed = false;
+        let pins_before = self.pinned.clone();
+        if self.own_server_pid != 0 && !self.session_name.is_empty() {
+            if let Some(old) = scan
+                .server_names
+                .insert(self.own_server_pid, self.real_session(&self.session_name))
+            {
+                let old_key = crate::agent::sanitize_session(&old);
+                scan.live.retain(|name| *name != old_key);
+                if !scan.live.contains(&self.session_name) {
+                    scan.live.push(self.session_name.clone());
+                }
+            }
+        }
+        for (pid, real) in scan.server_names {
+            changed |= self.session_servers.get(&pid) != Some(&real);
+            self.session_names
+                .insert(crate::agent::sanitize_session(&real), real.clone());
+            if let Some(origin) = scan.server_origins.get(&pid) {
+                self.rename_session_rows(origin, &crate::agent::sanitize_session(&real), pid);
+            }
+            self.update_server_name(pid, &real);
+        }
+        let current_keys: Vec<_> = self
+            .session_servers
+            .values()
+            .map(|name| crate::agent::sanitize_session(name))
+            .collect();
+        self.session_aliases.retain(|old, _| !current_keys.contains(old));
+        for found in &mut scan.found {
+            if let Some(real) = self.session_servers.get(&found.server_pid) {
+                found.session = crate::agent::sanitize_session(real);
+            }
+        }
+        for record in &mut scan.spooled {
+            if let Some(real) = record
+                .args
+                .get("server_pid")
+                .and_then(|p| p.parse::<u32>().ok())
+                .and_then(|p| self.session_servers.get(&p))
+            {
+                record.session = crate::agent::sanitize_session(real);
+            }
+        }
+        changed |= self.apply_scanned_sessions(scan.live);
         changed |= self.merge_found(scan.found);
         changed |= self.apply_spool(scan.spooled);
+        for goal in scan.goals {
+            changed |= self.apply_goal(goal);
+        }
         // After the rows exist, so a pin lands on a row this scan just created.
-        if let Some(pins) = scan.pins {
+        if let Some(pins) = scan.pins.filter(|_| pins_before == self.pinned) {
             changed |= self.apply_pins(pins);
         }
         if changed {
@@ -1034,11 +1401,21 @@ impl State {
                 session: f.session,
                 pane_id: f.pane_id,
             };
-            if self.agents.iter().any(|a| a.id == id) {
+            if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+                if f.server_pid != 0 && agent.server_pid != 0 && agent.server_pid != f.server_pid {
+                    agent.goal = None;
+                    agent.session_id.clear();
+                    agent.server_started.clear();
+                    agent.server_pid = f.server_pid;
+                }
                 continue;
             }
             self.agents.push(Agent {
                 id,
+                server_pid: f.server_pid,
+                agent_pid: 0,
+                server_started: String::new(),
+                goal: None,
                 tool: f.tool,
                 session_id: String::new(),
                 status: Status::Discovered,
@@ -1077,15 +1454,21 @@ impl State {
 
     /// Applies spool records to rows the process scan already justified.
     ///
-    /// Home rows are skipped entirely: the hook pipes straight into this
-    /// session, so the pipe is both fresher and authoritative, and letting a
-    /// spool read overwrite it would flap the row.
+    /// A cold home row can recover its first report from the spool. Timestamped
+    /// hooks also recover a lost pipe; older records never overwrite a pipe.
     fn apply_spool(&mut self, spooled: Vec<crate::discover::Spooled>) -> bool {
         let (home, now) = (self.session_name.clone(), self.now);
         let mut changed = false;
         let mut transitions: Vec<(AgentId, Status, String)> = Vec::new();
         for rec in spooled {
-            if rec.session == home {
+            if rec.session == home
+                && !self.agents.iter().any(|a| {
+                    a.session() == home
+                        && a.pane_id() == rec.pane_id
+                        && ((a.status == Status::Discovered && a.spool_ts == 0.0)
+                            || (a.spool_ts > 0.0 && rec.ts > a.spool_ts))
+                })
+            {
                 continue;
             }
             let id = AgentId {
@@ -1137,6 +1520,9 @@ impl State {
             // The turn's fan-out, progress and summary all belonged to the
             // agent that just went away.
             if restarted {
+                agent.goal = None;
+                agent.agent_pid = 0;
+                agent.server_started.clear();
                 agent.subagents.clear();
                 agent.tasks_total = 0;
                 agent.tasks_done = 0;
@@ -1235,6 +1621,18 @@ impl State {
             }
             if !rec_sid.is_empty() && agent.session_id != rec_sid {
                 agent.session_id = rec_sid.to_string();
+            }
+            if let Some(pid) = rec.args.get("agent_pid").and_then(|v| v.parse::<u32>().ok()) {
+                if agent.agent_pid != pid {
+                    agent.goal = None;
+                }
+                agent.agent_pid = pid;
+            }
+            if let Some(started) = rec.args.get("server_started").filter(|s| !s.is_empty()) {
+                if !agent.server_started.is_empty() && agent.server_started != *started {
+                    agent.goal = None;
+                }
+                agent.server_started = started.clone();
             }
             agent.last_report = seen_at;
             let stale = age >= STALE_AFTER && !reconfirms;
@@ -1361,7 +1759,10 @@ impl State {
     pub(crate) fn apply_pins(&mut self, pins: Vec<(String, u32)>) -> bool {
         let next: Vec<AgentId> = pins
             .into_iter()
-            .map(|(session, pane_id)| AgentId { session, pane_id })
+            .map(|(session, pane_id)| AgentId {
+                session: self.session_aliases.get(&session).cloned().unwrap_or(session),
+                pane_id,
+            })
             .collect();
         if next == self.pinned {
             return false;
@@ -1391,6 +1792,7 @@ impl State {
     }
 
     pub(crate) fn sort_agents(&mut self) {
+        let selected_id = self.agents.get(self.selected).map(|a| a.id.clone());
         let grouping = self.grouping;
         let pins = self.pinned.clone();
         let is_pinned = |a: &Agent| pins.contains(&a.id);
@@ -1436,6 +1838,9 @@ impl State {
                     .then(a.id.cmp(&b.id))
             }
         });
+        if let Some(selected) = selected_id.and_then(|id| self.agents.iter().position(|a| a.id == id)) {
+            self.selected = selected;
+        }
         self.clamp_selection();
         let agents = &self.agents;
         self.notifier.retain_known(|id| agents.iter().any(|a| &a.id == id));
@@ -1498,7 +1903,14 @@ impl State {
     fn find_score(&self, query: &str, a: &Agent) -> Option<u32> {
         // The name the user knows the session by, not the sanitized file key.
         let session = self.real_session(a.session());
-        let fields: [(&str, u32); 8] = [
+        let goal = if self.goal_layout != crate::goal::Layout::Off {
+            a.goal.as_ref().and_then(|o| o.snapshot.goal.as_ref())
+        } else {
+            None
+        };
+        let fields: [(&str, u32); 10] = [
+            (goal.map(|g| g.objective.as_str()).unwrap_or(""), 4),
+            (goal.map(|g| g.status.label()).unwrap_or(""), 1),
             (a.display_task(), 4),
             (a.project(), 4),
             (&a.wt, 4),
@@ -2220,6 +2632,7 @@ mod tests {
         pairs
             .iter()
             .map(|(pane_id, tool)| crate::discover::Found {
+                server_pid: 0,
                 session: "mob".to_string(),
                 pane_id: *pane_id,
                 tool: tool.to_string(),
@@ -2421,6 +2834,7 @@ mod tests {
         let mut s = notifying_state();
         s.apply_scan_result(crate::discover::Scan {
             found: vec![crate::discover::Found {
+                server_pid: 0,
                 session: "other".into(),
                 pane_id: 3,
                 tool: "claude".into(),
@@ -2549,16 +2963,19 @@ mod tests {
         );
     }
 
-    /// Once escalated there is nothing further to count towards, so the clock
-    /// may stop again.
+    /// Escalation stops needing ticks; enabled discovery still repairs pipes.
     #[test]
-    fn an_already_escalated_row_does_not_hold_the_clock_open() {
+    fn an_already_escalated_row_only_keeps_the_clock_for_discovery() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("status", "waiting")]));
         s.now = crate::WAITING_ESCALATE_AFTER + 10.0;
         s.timer_running = false;
         s.arm_timer();
-        assert!(!s.timer_running, "nothing left to wait for");
+        assert!(s.timer_running, "a live local row still needs fallback refresh");
+        s.discover = false;
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(!s.timer_running, "discovery disabled and escalation complete");
     }
 
     #[test]
@@ -3118,11 +3535,13 @@ mod cross_session_tests {
         let mut s = state();
         let found = vec![
             crate::discover::Found {
+                server_pid: 0,
                 session: "mob".into(),
                 pane_id: 3,
                 tool: "claude".into(),
             },
             crate::discover::Found {
+                server_pid: 0,
                 session: "other".into(),
                 pane_id: 3,
                 tool: "codex".into(),
@@ -3139,11 +3558,13 @@ mod cross_session_tests {
         let mut s = state();
         s.apply_scan(vec![
             crate::discover::Found {
+                server_pid: 0,
                 session: "mob".into(),
                 pane_id: 3,
                 tool: "claude".into(),
             },
             crate::discover::Found {
+                server_pid: 0,
                 session: "other".into(),
                 pane_id: 3,
                 tool: "claude".into(),
@@ -3151,6 +3572,7 @@ mod cross_session_tests {
         ]);
         assert_eq!(s.agents.len(), 2);
         s.apply_scan(vec![crate::discover::Found {
+            server_pid: 0,
             session: "mob".into(),
             pane_id: 3,
             tool: "claude".into(),
@@ -3268,6 +3690,7 @@ mod cross_session_tests {
         pairs
             .iter()
             .map(|(session, pane_id)| crate::discover::Found {
+                server_pid: 0,
                 session: session.to_string(),
                 pane_id: *pane_id,
                 tool: "claude".to_string(),
@@ -3447,9 +3870,7 @@ mod cross_session_tests {
         s.arm_timer();
         assert!(s.timer_running, "a foreign row must keep the clock running");
 
-        // A home `waiting` row also needs ticks now, but for its own reason:
-        // it must be able to reach the escalation threshold. Once past it there
-        // is nothing left to count towards and the clock may stop.
+        // A local row also needs fallback refresh after escalation.
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "3"), ("session", "mob"), ("status", "waiting")]));
         s.timer_running = false;
@@ -3459,7 +3880,11 @@ mod cross_session_tests {
         s.now = crate::WAITING_ESCALATE_AFTER + 1.0;
         s.timer_running = false;
         s.arm_timer();
-        assert!(!s.timer_running, "already escalated: nothing left to wait for");
+        assert!(s.timer_running, "local fallback refresh still needs ticks");
+        s.discover = false;
+        s.timer_running = false;
+        s.arm_timer();
+        assert!(!s.timer_running, "discovery disabled and escalation complete");
     }
 
     /// A stale foreign row must keep ticking: the clock is what paces the
@@ -3526,6 +3951,7 @@ mod cross_session_tests {
             live: live.iter().map(|s| s.to_string()).collect(),
             complete: true,
             pins: None,
+            ..Default::default()
         }
     }
 
@@ -3710,6 +4136,65 @@ mod cross_session_tests {
         ));
         assert_eq!(s.agents[0].status, Status::Working, "the pipe owns home rows");
         assert_eq!(s.agents[0].task.as_deref(), Some("from the pipe"));
+    }
+
+    #[test]
+    fn a_cold_home_panel_recovers_a_saved_report_without_overwriting_a_later_pipe() {
+        let mut s = state();
+        s.apply_scan_result(scan_with(
+            found(&[("mob", 3)]),
+            vec![spool(&[
+                ("ts", "100"),
+                ("pane_id", "3"),
+                ("session", "mob"),
+                ("status", "waiting"),
+                ("session_id", "saved-agent"),
+                ("cwd", "/tmp/zj-qa-main"),
+                ("block", "question"),
+            ])],
+        ));
+        assert_eq!(s.agents[0].status, Status::Waiting);
+        assert_eq!(s.agents[0].session_id, "saved-agent");
+        assert_eq!(s.agents[0].cwd, "/tmp/zj-qa-main");
+        s.handle_status(&args(&[
+            ("pane_id", "3"),
+            ("status", "working"),
+            ("task", "fresh pipe"),
+        ]));
+        s.apply_scan_result(scan_with(
+            found(&[("mob", 3)]),
+            vec![spool(&[
+                ("ts", "200"),
+                ("pane_id", "3"),
+                ("session", "mob"),
+                ("status", "waiting"),
+            ])],
+        ));
+        assert_eq!(s.agents[0].status, Status::Working);
+        assert_eq!(s.agents[0].task.as_deref(), Some("fresh pipe"));
+    }
+
+    #[test]
+    fn a_newer_home_spool_recovers_a_lost_pipe_and_rejects_late_delivery() {
+        let mut s = state();
+        s.discover = true;
+        s.handle_status(&args(&[("pane_id", "3"), ("status", "working"), ("ts", "100")]));
+        s.now = crate::SPOOL_POLL_INTERVAL;
+        assert!(s.spool_poll_due());
+        s.apply_scan_result(scan_with(
+            found(&[("mob", 3)]),
+            vec![spool(&[
+                ("ts", "101"),
+                ("pane_id", "3"),
+                ("session", "mob"),
+                ("status", "waiting"),
+            ])],
+        ));
+        assert_eq!(s.agents[0].status, Status::Waiting);
+        assert!(!s.handle_status(&args(&[("pane_id", "3"), ("status", "working"), ("ts", "100.5")])));
+        assert_eq!(s.agents[0].status, Status::Waiting);
+        assert!(s.handle_status(&args(&[("pane_id", "3"), ("status", "done"), ("ts", "102")])));
+        assert_eq!(s.agents[0].status, Status::Done);
     }
 
     /// Pane ids are recycled. A record from last week's agent on this pane must
@@ -3931,6 +4416,9 @@ mod cross_session_tests {
         std::fs::write(&zellij, "#!/bin/sh\nexit 0\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&zellij, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ps = bin.join("ps");
+        std::fs::write(&ps, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
         for ev in [
@@ -4208,11 +4696,14 @@ mod cross_session_tests {
     }
 
     #[test]
-    fn the_poll_fires_on_a_cadence_only_while_a_foreign_row_exists() {
+    fn the_poll_fires_on_a_cadence_for_local_and_foreign_rows() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
         s.now = crate::SPOOL_POLL_INTERVAL * 10.0;
-        assert!(!s.spool_poll_due(), "a home-only panel never polls");
+        assert!(s.spool_poll_due(), "local rows need lost-pipe recovery");
+        s.discover = false;
+        assert!(!s.spool_poll_due(), "local polling respects discovery off");
+        s.discover = true;
 
         s.apply_scan(found(&[("other", 3)]));
         s.last_scan_at = s.now;
@@ -4287,15 +4778,21 @@ mod cross_session_tests {
         assert_eq!(s.last_scan_at, s.now);
     }
 
-    /// A home-only panel must not acquire a background scan loop.
+    /// Local recovery uses the same cadence and respects discovery off.
     #[test]
-    fn the_tick_does_not_poll_without_a_foreign_row() {
+    fn the_tick_polls_local_rows_only_with_discovery_enabled() {
         let mut s = state();
         s.handle_status(&args(&[("pane_id", "4"), ("session", "mob"), ("status", "working")]));
         for _ in 0..(crate::SPOOL_POLL_INTERVAL / TICK) as usize * 3 {
             s.on_tick();
         }
-        assert!(!s.scan_pending, "nothing foreign to poll for");
+        assert!(s.scan_pending, "a local row needs fallback refresh");
+        s.discover = false;
+        s.scan_pending = false;
+        for _ in 0..(crate::SPOOL_POLL_INTERVAL / TICK) as usize * 3 {
+            s.on_tick();
+        }
+        assert!(!s.scan_pending, "discovery off stops background scans");
     }
 
     /// `request_scan` stamps on dispatch, so a scan that never comes back
@@ -4353,6 +4850,7 @@ mod last_known_status_tests {
 
     fn found(session: &str, pane: u32) -> Vec<crate::discover::Found> {
         vec![crate::discover::Found {
+            server_pid: 0,
             session: session.into(),
             pane_id: pane,
             tool: "claude".into(),
@@ -4385,6 +4883,7 @@ mod last_known_status_tests {
             complete: true,
             live: vec!["mob".into(), "other".into()],
             pins: None,
+            ..Default::default()
         }
     }
 
@@ -4691,6 +5190,7 @@ mod pin_tests {
         pin(&mut s, "other", 1);
         assert_eq!(s.pinned.len(), 1);
         s.apply_scan(vec![crate::discover::Found {
+            server_pid: 0,
             session: "mob".into(),
             pane_id: 1,
             tool: "claude".into(),

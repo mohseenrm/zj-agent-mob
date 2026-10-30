@@ -67,14 +67,11 @@ matters because this runs on the critical path of every tool call.
 The panel reads the directory on the same `run_command` that already runs the process scan, so
 polling costs one command rather than two.
 
-That scan runs on pane and session events, which is not enough on its own: an agent in another
-session can work for ten minutes without opening a pane, and meanwhile the row ages. So while any
-foreign agent is on screen the panel also re-scans every `SPOOL_POLL_INTERVAL` (5s), well inside
-the 60s `STALE_AFTER` so a row gets many chances to refresh before it is marked stale. The poll is
-gated on a foreign row existing, so a single-session panel never pays for it, and on the session
-still being listed, since nothing can refresh a row whose session is gone.
+The scan also runs every `SPOOL_POLL_INTERVAL` (5s) while live rows exist.
+Foreign rows refresh through their saved reports. Local rows recover newer reports after a lost pipe.
+Empty fleets and gone sessions do not keep the poll active. `discover=false` disables background scans.
 
-The panel's clock is what paces this, so a foreign row keeps the timer running whatever its status.
+The panel's clock paces this refresh, so a live row keeps the timer active whatever its status.
 A stale row in particular must: it is the row the poll exists to refresh, and a panel that stopped
 ticking once its rows aged could never bring them back.
 
@@ -145,8 +142,8 @@ Three sources can say something about an agent, and they are deliberately not eq
 
 | Source | Owns | Beats |
 |---|---|---|
-| Pipe (the agent's own session) | status for home rows | everything, for home rows |
-| Spool | status for foreign rows | the scan |
+| Pipe | activity reports | older saved reports |
+| Spool | foreign reports and local recovery | older timestamped pipe reports and the scan |
 | Process scan | whether a row exists at all | nothing; it asserts existence only |
 
 **The rule that makes this safe: a spool record never creates a row.** Existence comes from the
@@ -325,7 +322,7 @@ Rough guide:
 
 The panel's own cost is separate: `discover::scan_script` runs one `ps axeww`
 plus a spool read on every `PaneUpdate`, and every 5 seconds
-(`SPOOL_POLL_INTERVAL`) while a foreign row is on screen.
+(`SPOOL_POLL_INTERVAL`) while live rows exist.
 
 ## Task summaries
 
@@ -367,7 +364,33 @@ Polling rather than a FIFO: opening a FIFO with no reader blocks past any timeou
 
 The path is passed to `sh -c` as a positional argument rather than interpolated into the command string, so nothing outside the plugin is ever parsed by a shell.
 
-`/goal` sets a session-scoped hook but leaves no on-disk artifact, so goals aren't readable. `ai-title` tracks the real work anyway. For a manual override:
+Goal display is opt-in through `goal_display`. The panel uses read-only `thread/goal/get` snapshots, not goal-tool inputs or conversation text.
+The hook session ID supplies the thread ID. A mismatched source thread cannot supply a goal.
+The snapshot owner includes the agent session ID, agent process ID, pane ID, Zellij server PID, and server start time.
+The adapter also checks process ancestry and rejects reports older than the current process start.
+An old saved record cannot give a recycled pane the previous process's goal.
+Session names and pane titles remain labels, not goal ownership.
+
+Each refresh uses one App Server process and a four-second deadline.
+A private spool lock serializes reads and publication across panels.
+Source timestamps have one-second precision, so timestamps alone cannot order rapid mutations.
+Each serialized snapshot also has an observation number.
+Old revisions, duplicate observations, and mismatched owners cannot replace current state.
+
+The typed JSON snapshot travels separately from comma-separated activity arguments.
+The adapter publishes the same snapshot to the scan result and an atomic private spool file.
+Local and foreign rows use the same read-only source.
+The `agent-goal` pipe accepts the same versioned JSON payload.
+The parser limits payload size and objective length, and removes terminal controls from display text.
+An ordinary heartbeat cannot erase a goal. An explicit `goal: null` response can clear it.
+
+Activity hooks save their timestamped status before pipe delivery.
+The five-second scan also repairs lost local pipes, including a pipe that races a session rename.
+Older spool records cannot overwrite newer pipe reports. Untimestamped legacy pipes remain authoritative.
+Pipe delivery has a four-second deadline through `timeout`, `gtimeout`, or Perl.
+Without one of those programs, the hook uses only the saved status record.
+
+Pane titles still supply the task label. For a manual task override:
 
 ```sh
 zellij pipe --name agent-label --args "pane_id=3,label=whatever you want"

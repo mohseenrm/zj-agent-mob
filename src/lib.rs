@@ -3,6 +3,7 @@
 mod agent;
 mod discover;
 mod find;
+mod goal;
 mod host;
 mod icons;
 mod install;
@@ -259,6 +260,7 @@ pub mod testing {
             let found = found
                 .iter()
                 .map(|(s, p, t)| crate::discover::Found {
+                    server_pid: 0,
                     session: s.to_string(),
                     pane_id: *p,
                     tool: t.to_string(),
