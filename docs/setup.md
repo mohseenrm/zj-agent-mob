@@ -201,6 +201,47 @@ LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zj-agent-mob.wasm" {
 | `summary_file` | unset | Write the fleet summary here on every change, for a status bar to render. Also writes `<path>.kv` for parsing. Unset means nothing is published. See [the fleet summary](#the-fleet-summary-in-your-status-bar) |
 | `icons` | `nerd` | Which glyph set the panel draws. `nerd` needs a [Nerd Font](https://www.nerdfonts.com); `unicode` falls back to plain symbols any font has |
 | `check_updates` | `true` | Check GitHub for a newer release on load, via the installed `install.sh`. Set `false` to stop the automatic check; <kbd>U</kbd> still checks and installs on demand. See [updating](#updating) |
+| `goal_display` | `off` | Read-only goal display: `inline` adds an objective line. `inspector` adds state labels and selected goal details. |
+
+### Goal display (opt-in)
+
+Goal display requires Python 3 and a Codex CLI with `thread/goal/get` support.
+The source adapter uses the existing Codex authentication and configuration.
+It does not require an API key or start an agent turn.
+
+Set the same plugin configuration for the panel and its hooks.
+Zellij treats different plugin configurations as different instances.
+
+```sh
+export ZJ_AGENT_PLUGIN_CONFIG='goal_display=inline'
+zellij action launch-or-focus-plugin --floating \
+  --configuration "$ZJ_AGENT_PLUGIN_CONFIG" \
+  "file:$HOME/.config/zellij/plugins/zj-agent-mob.wasm"
+```
+
+Start agents from that shell so their hooks inherit the variable.
+For the inspector layout, replace `inline` with `inspector` in both places.
+If the panel has other configuration keys, include the same keys in `ZJ_AGENT_PLUGIN_CONFIG`.
+The plugin requires the updated hook for live process identity and timestamped reports.
+
+The panel reads goals for up to 128 live Codex agents every five seconds.
+One bounded App Server process serves each batch.
+Goal refresh requires `discover=true` and RunCommands permission.
+The adapter never starts or resumes a thread to read its goal.
+
+Activity and goal state remain independent. A `done` turn can have an `active` goal.
+The panel displays token use, not an estimate of completed work.
+Only an explicit source response can complete or clear a goal.
+An unavailable source preserves the last reported objective with an unavailable label.
+Old observations retain their state and show `old data`.
+An explicit no-goal response removes the goal line.
+
+Codex CLI 0.166.0 passed the local source checks.
+Other releases, remote-only threads, Claude goals, and agents without a hook identity display unavailable support.
+No private Codex database or conversation text supplies goal state.
+The panel has no pause, resume, or completion controls.
+
+The source contract and reproducible checks are in [the goal implementation record](goal-status-plan.md#implementation-record).
 
 ## Updating
 

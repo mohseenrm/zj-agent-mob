@@ -45,6 +45,21 @@ shellcheck --shell=sh init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh test
 | Unit | `src/*.rs`, beside the code | The state machine and layout, starting from an already-parsed pipe message |
 | End-to-end (hook) | [`tests/hook_e2e.rs`](../tests/hook_e2e.rs) | The hook script: hook-event JSON in, `zellij pipe --args` out |
 | End-to-end (installer) | [`tests/e2e-install.sh`](../tests/e2e-install.sh) | `init.sh`: the hook config written for Claude Code and Codex, and the round trip back out |
+| Goal source | [`tests/test_goal_source.py`](../tests/test_goal_source.py) | Read-only methods, batches, lock ordering, private storage, outages, and instance ownership |
+| Live goal lifecycle | [`tests/e2e-goals.py`](../tests/e2e-goals.py) | The release wasm, real Zellij panes, and persisted disposable Codex goals. A localhost-only provider prevents remote model inference. |
+
+Run the live goal checks separately from CI:
+
+```sh
+cargo build --release --target wasm32-wasip1
+python3 tests/e2e-goals.py
+```
+
+The live goal script requires Codex authentication and `thread/goal/get` support.
+Active goals can start automatic turns. The test uses a closed localhost model endpoint and a read-only sandbox.
+It creates disposable threads, changes their goals, then clears and archives them.
+Use `--keep` only for screenshot capture. That flag retains the test sessions and threads for manual cleanup.
+The script does not change installed hooks or the installed plugin.
 
 Between them these cover the two seams the Rust suite cannot reach, and neither needs a running Zellij, a real agent, or a pane. Both run in about a second.
 

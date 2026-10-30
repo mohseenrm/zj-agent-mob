@@ -93,6 +93,10 @@ pub(crate) struct Subagent {
 
 pub(crate) struct Agent {
     pub(crate) id: AgentId,
+    pub(crate) server_pid: u32,
+    pub(crate) agent_pid: u32,
+    pub(crate) server_started: String,
+    pub(crate) goal: Option<crate::goal::Observation>,
     pub(crate) tool: String,
     /// The agent's own id. Distinguishes a recycled pane from the agent that
     /// used to occupy it, which pane ids alone cannot.
@@ -105,7 +109,7 @@ pub(crate) struct Agent {
     pub(crate) status_since: f64,
     /// When a pipe last said anything about this row, change or not.
     pub(crate) last_report: f64,
-    /// Timestamp of the newest spool record applied, in the spool's own epoch.
+    /// Timestamp of the newest hook or spool report, in the spool's epoch.
     /// Not comparable with `last_report`, which is on the panel's tick clock.
     pub(crate) spool_ts: f64,
     pub(crate) tab: Option<usize>,
@@ -263,7 +267,12 @@ impl Agent {
     }
 
     /// One agent's row. The icon and status label are themed; the rest is plain.
+    #[cfg(test)]
     pub(crate) fn list_item(&self, i: usize, ctx: RowCtx) -> Text {
+        self.list_item_with_goal(i, ctx, None)
+    }
+
+    pub(crate) fn list_item_with_goal(&self, i: usize, ctx: RowCtx, goal_label: Option<&str>) -> Text {
         let RowCtx {
             selected,
             icon,
@@ -309,6 +318,7 @@ impl Agent {
             _ => fmt_elapsed(now - self.status_since),
         };
         text.push_str(&format!("{:<9} {:>6}", label, elapsed));
+        let goal_badge = goal_label.map(|label| format!("  [{}]", label)).unwrap_or_default();
 
         let foreign = !home.is_empty() && self.session() != home;
         let mut session_range = None;
@@ -322,7 +332,7 @@ impl Agent {
             };
             // The frame's width is capped by the room this row actually has,
             // so a wide identity never pushes the row past `cols`.
-            let w = id_width.min(cols.saturating_sub(chars(&text) + 2));
+            let w = id_width.min(cols.saturating_sub(chars(&text) + 2 + chars(&goal_badge)));
             if w > 0 {
                 text.push_str("  ");
                 let start = chars(&text);
@@ -339,7 +349,7 @@ impl Agent {
             true => String::new(),
             false => format!("[{}]", truncate(&self.perm_mode, 12)),
         };
-        let mode_range = if !badge.is_empty() && text.chars().count() + 2 + chars(&badge) <= cols {
+        let mode_range = if !badge.is_empty() && text.chars().count() + 2 + chars(&badge) + chars(&goal_badge) <= cols {
             text.push_str("  ");
             let start = chars(&text);
             text.push_str(&badge);
@@ -356,22 +366,26 @@ impl Agent {
             (0, false) => format!("{}{}", icons.subagent, icons.done),
             (n, _) => format!("{}{}", icons.subagent, n),
         };
-        let sub_range = if !sub_badge.is_empty() && text.chars().count() + 2 + chars(&sub_badge) <= cols {
-            text.push_str("  ");
-            let start = chars(&text);
-            text.push_str(&sub_badge);
-            Some((start..start + chars(&sub_badge), live > 0))
-        } else {
-            None
-        };
-        let room = cols.saturating_sub(text.chars().count() + 2);
+        let sub_range =
+            if !sub_badge.is_empty() && text.chars().count() + 2 + chars(&sub_badge) + chars(&goal_badge) <= cols {
+                text.push_str("  ");
+                let start = chars(&text);
+                text.push_str(&sub_badge);
+                Some((start..start + chars(&sub_badge), live > 0))
+            } else {
+                None
+            };
+        let room = cols.saturating_sub(text.chars().count() + 2 + chars(&goal_badge));
         if room > 6 {
             text.push_str("  ");
             text.push_str(&truncate(self.display_task(), room));
         }
+        if !goal_badge.is_empty() && chars(&text) + chars(&goal_badge) <= cols {
+            text.push_str(&goal_badge);
+        }
 
         let level = self.status.color_level();
-        let mut text = Text::new(text);
+        let mut text = Text::new(crate::util::truncate_cells(&text, cols));
         if !self.session_alive || self.stale {
             text = text
                 .color_range(DIM_LEVEL, icon_range)
@@ -596,6 +610,10 @@ mod render_tests {
 
     pub(super) fn agent() -> Agent {
         Agent {
+            server_pid: 0,
+            agent_pid: 0,
+            server_started: String::new(),
+            goal: None,
             id: AgentId {
                 session: "mob".into(),
                 pane_id: 3,
@@ -640,6 +658,21 @@ mod render_tests {
             home,
             pinned: false,
             icons: &crate::icons::UNICODE,
+        }
+    }
+
+    #[test]
+    fn inspector_reserves_goal_state_before_identity_and_task_at_medium_widths() {
+        let mut a = agent();
+        a.repo = "a-very-long-repository".into();
+        for width in [60, 65, 70, 80, 100] {
+            let row = item_text(&a.list_item_with_goal(
+                0,
+                ctx(false, "*", 0.0, width, true, "mob"),
+                Some("goal: budget-limited"),
+            ));
+            assert!(row.contains("[goal: budget-limited]"), "{width}: {row}");
+            assert!(row.chars().count() <= width);
         }
     }
 

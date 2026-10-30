@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 
 WASM=target/wasm32-wasip1/release/zj-agent-mob.wasm
 EXPORTS="_start load update render pipe plugin_version"
-SHELL_SCRIPTS="init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh tests/e2e-zellij.sh"
+SHELL_SCRIPTS="init.sh scripts/zj-agent-mob-hook.sh scripts/check.sh scripts/reinstall-local.sh tests/e2e-install.sh tests/e2e-zellij.sh tests/e2e-navigation.sh tests/fixtures/goal-agent.sh"
 
 # `fast` steps are the ones quick enough for a tight local loop; `all` steps
 # also run on a bare `./scripts/check.sh`.
@@ -28,7 +28,7 @@ run_step() {
     fmt) cargo fmt --all --check ;;
     clippy) cargo clippy --all-targets -- -D warnings ;;
     # Tests run natively: host calls are stubbed off-wasm precisely so this works.
-    test) cargo test --all-targets ;;
+    test) cargo test --all-targets && python3 -m unittest discover -s tests -p 'test_goal_source.py' ;;
     shellcheck) run_shellcheck ;;
     wasm) cargo build --release --target wasm32-wasip1 ;;
     exports) check_exports ;;
@@ -40,7 +40,7 @@ run_step() {
     # else stops at a stub, so a render that overflows its pane, or a plugin
     # that will not load at all, is invisible without this. Skips itself when
     # zellij is absent, so CI is unaffected.
-    panel) ./tests/e2e-zellij.sh ;;
+    panel) ./tests/e2e-zellij.sh && ./tests/e2e-navigation.sh ;;
     *)
       echo "unknown step: $1" >&2
       echo "steps: $STEPS" >&2

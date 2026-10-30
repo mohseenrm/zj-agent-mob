@@ -1127,7 +1127,7 @@ dependencies = [
  "terminal_size",
  "textwrap 0.15.2",
  "thiserror 1.0.69",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1914,7 +1914,7 @@ checksum = "b7b3e525a49ec206798b40326a44121291b530c963cfb01018f63e135bac543d"
 dependencies = [
  "smawk",
  "unicode-linebreak",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -2106,6 +2106,12 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "unicode-xid"
@@ -2583,7 +2589,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "unicode-width",
+ "unicode-width 0.1.14",
  "url",
  "uuid",
  "winapi",
@@ -2668,7 +2674,9 @@ dependencies = [
 name = "zj-agent-mob"
 version = "1.0.0"
 dependencies = [
+ "serde",
  "serde_json",
+ "unicode-width 0.2.3",
  "zellij-tile",
 ]
 

@@ -1,0 +1,15 @@
+{
+  "capture": {"runtime": "codex-cli 0.166.0", "date": "2026-10-30", "transport": "stdio App Server JSON-RPC", "sanitized": "thread ID only; no turn/start request sent", "ordering": "All mutations below returned the same createdAt and updatedAt second. Serialize authoritative reads, not tool arrival order."},
+  "none": {"id":3,"result":{"goal":null}},
+  "active": {"id":5,"result":{"goal":{"threadId":"qa-thread","objective":"Disposable goal adapter verification","status":"active","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "paused": {"id":7,"result":{"goal":{"threadId":"qa-thread","objective":"Disposable goal adapter verification","status":"paused","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "blocked": {"id":9,"result":{"goal":{"threadId":"qa-thread","objective":"Disposable goal adapter verification","status":"blocked","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "complete": {"id":11,"result":{"goal":{"threadId":"qa-thread","objective":"Disposable goal adapter verification","status":"complete","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "replacement": {"id":13,"result":{"goal":{"threadId":"qa-thread","objective":"Replacement goal adapter verification","status":"active","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "budget": {"id":15,"result":{"goal":{"threadId":"qa-thread","objective":"Replacement goal adapter verification","status":"budgetLimited","tokenBudget":10,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "usage": {"id":17,"result":{"goal":{"threadId":"qa-thread","objective":"Replacement goal adapter verification","status":"usageLimited","tokenBudget":10,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1793388339,"updatedAt":1793388339}}},
+  "failure": {"error":{"code":-32600,"message":"Invalid request: unknown variant `not-a-state`, expected one of `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`"},"id":18},
+  "clear": {"id":19,"result":{"cleared":true}},
+  "cleared": {"id":20,"result":{"goal":null}},
+  "benchmark_ms": {"1":0.07,"10":0.61,"50":3.17,"100":10.04}
+}

@@ -34,6 +34,28 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Truncates by terminal cells, including double-width characters.
+pub(crate) fn truncate_cells(value: &str, width: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for c in value.chars() {
+        let size = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + size >= width {
+            break;
+        }
+        used += size;
+        result.push(c);
+    }
+    result.push('…');
+    result
+}
+
 /// Decoding helpers for the DCS payloads Zellij's UI components emit. Tests
 /// read rendered rows through these rather than asserting on raw byte lists.
 #[cfg(test)]

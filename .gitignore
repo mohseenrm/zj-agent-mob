@@ -21,14 +21,19 @@ target
 #.idea/
 
 .DS_Store
+__pycache__/
+.playwright-mcp/
 
-docs/
+docs/*
 !docs/troubleshooting.md
 !docs/setup.md
 !docs/how-it-works.md
 !docs/development.md
 !docs/img/
 !docs/img/*.png
+!docs/goal-status-plan.md
+!docs/mockups/
+!docs/mockups/goal-status.html
 
 # Claude Code local state (settings, agent worktrees)
 .claude/

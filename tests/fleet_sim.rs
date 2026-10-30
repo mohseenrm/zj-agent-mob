@@ -246,11 +246,13 @@ fn the_second_x_kills_the_agent_that_was_armed() {
         ("session_id", "s"),
         ("cwd", "/w/p"),
     ]));
-    assert_ne!(
+    assert_eq!(
         sim.agent_ids()[sim.selected()],
         armed,
-        "the re-sort must have moved a different agent under the cursor"
+        "the re-sort preserves the selected agent"
     );
+    sim.select(0);
+    assert_ne!(sim.agent_ids()[sim.selected()], armed);
 
     sim.press(key('x'));
     assert!(

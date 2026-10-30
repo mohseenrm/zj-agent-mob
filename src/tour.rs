@@ -82,6 +82,10 @@ impl Default for Spec {
 impl Spec {
     fn build(&self, now: f64) -> Agent {
         Agent {
+            server_pid: 0,
+            agent_pid: 0,
+            server_started: String::new(),
+            goal: None,
             id: AgentId {
                 session: self.session.into(),
                 pane_id: self.pane,
